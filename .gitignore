@@ -1,0 +1,60 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+venv/
+env/
+ENV/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.project
+.pydevproject
+.settings/
+
+# Logs
+*.log
+logs/
+log/
+
+# Local configuration
+config/local.yml
+
+# Models and data
+models/
+data/
+*.pt
+*.pth
+*.onnx
+
+# System
+.DS_Store
+Thumbs.db
+
+# Application specific
+.kokoro/
+.ollama/
+*.wav
+*.mp3
