@@ -1,0 +1,74 @@
+# Real-Time Translator Configuration
+
+audio:
+  # Audio processing settings
+  sample_rate: 16000
+  chunk_size: 1024
+  channels: 1
+  use_virtual_devices: true
+  
+  # Audio detection settings
+  silence_threshold: 0.01
+  min_speech_duration: 0.5
+  max_speech_duration: 10.0
+  
+  # Buffer settings
+  input_buffer_size: 4096
+  output_buffer_size: 4096
+
+translation:
+  # Language settings
+  source_lang: "auto"  # auto, uk (Ukrainian), pl (Polish)
+  target_lang: "en"    # English
+  
+  # Whisper model settings
+  whisper_model: "medium"  # tiny, base, small, medium, large
+  whisper_device: "cpu"    # cpu, cuda
+  
+  # Translation settings
+  beam_size: 5
+  temperature: 0.3
+  
+  # Batch processing
+  max_queue_size: 10
+  
+speech:
+  # TTS settings
+  tts_engine: "kokoro"     # kokoro, coqui
+  tts_device: "cpu"        # cpu, cuda
+  tts_voice: "en_US"
+  tts_speed: 1.0
+  tts_pitch: 0.0
+  tts_energy: 1.0
+  
+  # Speech processing
+  use_noise_reduction: true
+  use_echo_cancellation: true
+  auto_gain: true
+
+ui:
+  # Window settings
+  minimize_to_tray: true
+  start_minimized: false
+  always_on_top: false
+  
+  # Display settings
+  show_audio_levels: true
+  update_interval_ms: 100
+  
+  # Theme
+  theme: "system"  # light, dark, system
+
+logging:
+  # Logging settings
+  level: "INFO"  # DEBUG, INFO, WARNING, ERROR
+  log_to_file: true
+  max_log_size: "10MB"
+  keep_logs_days: 7
+
+system:
+  # Performance settings
+  num_threads: 4
+  batch_size: 16
+  use_gpu: false
+  gpu_memory_limit: "2GB"

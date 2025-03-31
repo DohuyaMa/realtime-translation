@@ -1,0 +1,25 @@
+# Core dependencies
+PyQt5>=5.15.0
+pyaudio>=0.2.11
+numpy>=1.19.0
+sounddevice>=0.4.1
+
+# AI and ML
+torch>=2.0.0
+transformers>=4.30.0
+whisper>=1.0.0
+onnxruntime>=1.15.0
+
+# Audio processing
+soundfile>=0.10.3
+librosa>=0.8.1
+pipewire-python>=0.1.2
+pulsectl>=22.1.0
+
+# Utilities
+PyYAML>=5.4.1
+python-dotenv>=0.19.0
+loguru>=0.6.0
+
+# Kokoro TTS dependencies
+kokoro-onnx @ git+https://github.com/thewh1teagle/kokoro-onnx.git
