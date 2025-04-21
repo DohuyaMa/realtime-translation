@@ -12,6 +12,38 @@ A desktop application for real-time voice translation with integration capabilit
 - Audio quality monitoring
 - Local AI model processing
 
+## System Requirements
+
+- CPU: 4+ cores
+- RAM: 8GB minimum (16GB recommended)
+- Storage: 10GB for models
+- GPU: Optional, improves model performance
+- NixOS with PipeWire/PulseAudio
+- Python 3.8+
+- ollama
+- Docker (optional)
+
+## Quick Start
+
+1. Clone the repository:
+   ```bash
+   git clone https://github.com/kokoro-org/real-time-translator.git
+   cd real-time-translator
+   ```
+
+2. Run the application:
+   ```bash
+   ./run.sh
+   ```
+
+The script will automatically:
+- Set up virtual environment and dependencies
+- Configure virtual audio devices
+- Set up Kokoro for voice synthesis
+- Create default configuration
+- Download required AI models
+- Launch the application
+
 ## System Architecture
 
 ### Components
@@ -20,11 +52,15 @@ A desktop application for real-time voice translation with integration capabilit
    - PyAudio for microphone capture
    - PipeWire/PulseAudio for virtual devices
    - Real-time audio routing
+   - Buffer management (512-4096 samples)
+   - Sample rates: 16000-48000 Hz
 
 2. **AI Processing Layer**
    - Whisper AI (via ollama) for speech recognition
    - Local LLM for translation
-   - Coqui TTS for voice synthesis
+   - Primary TTS: Kokoro (English synthesis)
+   - Backup TTS: Coqui TTS
+   - Support for transcription files import
 
 3. **User Interface**
    - Qt-based desktop application
@@ -33,16 +69,7 @@ A desktop application for real-time voice translation with integration capabilit
    - Language selection
    - Profile management
 
-## Installation
-
-### Prerequisites
-
-- NixOS with PipeWire/PulseAudio
-- Python 3.8+
-- ollama
-- Docker (optional)
-
-### Dependencies
+## Dependencies
 
 ```nix
 # configuration.nix
@@ -68,54 +95,19 @@ A desktop application for real-time voice translation with integration capabilit
 }
 ```
 
-### Installation Steps
-
-1. Clone the repository:
-   ```bash
-   git clone [repository-url]
-   cd real-time-translator
-   ```
-
-2. Create and activate virtual environment:
-   ```bash
-   python -m venv venv
-   source venv/bin/activate
-   ```
-
-3. Install Python dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-4. Download required AI models:
-   ```bash
-   ./scripts/setup_models.sh
-   ```
-
 ## Configuration
 
-### Audio Setup
-
-1. Configure virtual audio devices:
-   ```bash
-   # Create virtual input device
-   pactl load-module module-null-sink sink_name=virtual_input
-   
-   # Create virtual output device
-   pactl load-module module-null-sink sink_name=virtual_output
-   ```
-
-2. Configure default devices in the application settings
+The application automatically creates a default configuration during first run. You can customize the following settings:
 
 ### AI Model Configuration
 
 1. Language Models
    - Speech recognition: Whisper (small, medium, or large)
    - Translation: Choose appropriate ollama model
-   - TTS: Select Coqui TTS model
+   - TTS: Select Kokoro (English) or Coqui TTS (other languages)
 
 2. Performance Settings
-   - Buffer size for audio processing
+   - Buffer size: 512-4096 samples (lower = less latency, higher = more stable)
    - Model inference optimization
    - CPU/GPU utilization
 
@@ -126,17 +118,53 @@ Create profiles for different use cases:
 - Presentation profile (balanced quality)
 - High-quality profile (maximum accuracy)
 
-## Usage
+## Development
 
-1. Launch the application:
+### Setup Development Environment
+
+1. Install development dependencies:
    ```bash
-   ./run.sh
+   pip install -r requirements-dev.txt
    ```
 
-2. Select input/output devices
-3. Choose source and target languages
-4. Configure audio routing
-5. Start translation
+2. Install pre-commit hooks:
+   ```bash
+   pip install pre-commit
+   pre-commit install
+   ```
+
+### Running Tests
+
+```bash
+# Run all tests
+pytest
+
+# Run specific test file
+pytest tests/test_audio.py
+
+# Run with coverage
+pytest --cov=src tests/
+```
+
+## Documentation
+
+Comprehensive documentation is available in the `docs/` directory:
+
+- [Installation Guide](docs/INSTALLATION.md) - Detailed setup instructions
+- [Technical Documentation](docs/TECHNICAL.md) - System architecture and components
+- [Configuration Guide](docs/CONFIGURATION.md) - Detailed config options
+- [Languages Support](docs/LANGUAGES.md) - Supported languages and models
+- [UI Guide](docs/UI_GUIDE.md) - User interface documentation
+- [Kokoro Integration](docs/KOKORO_INTEGRATION.md) - Voice synthesis setup
+
+## Usage
+
+After running `./run.sh`, the application will start automatically. Then:
+
+1. Select input/output devices
+2. Choose source and target languages
+3. Configure audio routing
+4. Start translation
 
 ### Integration with Communication Apps
 
@@ -153,19 +181,22 @@ Create profiles for different use cases:
 ### Common Issues
 
 1. Audio Routing Problems
-   - Check PipeWire/PulseAudio configuration
-   - Verify virtual device creation
+   - Check PipeWire/PulseAudio configuration: `pactl list sinks`
+   - Verify virtual device creation: `pactl list sources`
    - Check application permissions
+   - Monitor audio levels
 
 2. AI Model Issues
-   - Verify ollama is running
-   - Check model downloads
-   - Monitor system resources
+   - Verify ollama is running: `ollama list`
+   - Check model downloads in `models/` directory
+   - Monitor system resources (CPU/RAM usage)
+   - Verify GPU acceleration if enabled
 
 3. Performance Issues
-   - Adjust buffer sizes
+   - Adjust buffer sizes (512-4096)
    - Check CPU/GPU usage
    - Optimize model settings
+   - Monitor latency with `./scripts/system_check.sh`
 
 ## Customization
 
@@ -185,4 +216,24 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development guidelines.
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the MIT License.
+
+Copyright (c) 2024 Kokoro Organization
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
