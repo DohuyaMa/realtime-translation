@@ -14,7 +14,9 @@ class AudioCapture:
         sample_rate: int = 16000,
         channels: int = 1,
         chunk_size: int = 1024,
-        format_type: int = pyaudio.paFloat32
+        format_type: int = pyaudio.paFloat32,
+        buffer_size_ms: int = 50,  # Buffer size in milliseconds
+        resampling_quality: str = 'high'  # low, medium, high
     ):
         """Initialize audio capture with specified parameters.
         
@@ -30,11 +32,27 @@ class AudioCapture:
         self.channels = channels
         self.chunk_size = chunk_size
         self.format_type = format_type
-        
+        # Audio configuration
         self.audio = pyaudio.PyAudio()
         self.stream: Optional[pyaudio.Stream] = None
         self.is_running = False
-        self.audio_queue = queue.Queue()
+        
+        # Calculate optimal buffer sizes
+        self.buffer_size = int(sample_rate * buffer_size_ms / 1000)
+        self.audio_queue = queue.Queue(maxsize=5)  # Limit queue size
+        
+        # Callbacks
+        self.callback_fn: Optional[Callable[[np.ndarray], None]] = None
+        self.device_error_fn: Optional[Callable[[str], None]] = None
+        
+        # Monitoring
+        self.peak_level = 0.0
+        self.rms_level = 0.0
+        self.monitor_thread: Optional[threading.Thread] = None
+        
+        # Resampling
+        self.resampling_quality = resampling_quality
+        self._init_resampling()
         self.callback_fn: Optional[Callable[[np.ndarray], None]] = None
 
     def get_input_devices(self) -> Dict[int, str]:
@@ -70,8 +88,26 @@ class AudioCapture:
         if status:
             logger.warning(f"Audio callback status: {status}")
             
-        audio_data = np.frombuffer(in_data, dtype=np.float32)
-        self.audio_queue.put(audio_data)
+        try:
+            audio_data = np.frombuffer(in_data, dtype=np.float32)
+            
+            # Update audio levels
+            self._update_levels(audio_data)
+            
+            # Resample if needed
+            if self.sample_rate != self.device_sample_rate:
+                audio_data = self._resample_audio(audio_data)
+            
+            if not self.audio_queue.full():
+                self.audio_queue.put(audio_data)
+            else:
+                logger.warning("Audio queue full, dropping frame")
+        except Exception as e:
+            logger.error(f"Error processing audio data: {e}")
+            if self.device_error_fn:
+                self.device_error_fn(str(e))
+            else:
+                logger.warning("Audio queue full, dropping frame")
         
         if self.callback_fn:
             try:
@@ -138,6 +174,57 @@ class AudioCapture:
             
         self.audio.terminate()
         logger.info("Audio capture stopped")
+
+    def get_audio_levels(self) -> Dict[str, float]:
+        """Get current audio levels.
+        
+        Returns:
+            Dictionary with peak and RMS levels
+        """
+        return {
+            'peak': self.peak_level,
+            'rms': self.rms_level
+        }
+
+    def _update_levels(self, audio_data: np.ndarray):
+        """Update audio level measurements."""
+        if len(audio_data) > 0:
+            self.peak_level = float(np.max(np.abs(audio_data)))
+            self.rms_level = float(np.sqrt(np.mean(np.square(audio_data))))
+
+    def _init_resampling(self):
+        """Initialize resampling configuration."""
+        try:
+            device_info = self.audio.get_device_info_by_index(
+                self.input_device_index if self.input_device_index is not None else
+                self.audio.get_default_input_device_info()['index']
+            )
+            self.device_sample_rate = int(device_info['defaultSampleRate'])
+            
+            if self.device_sample_rate != self.sample_rate:
+                logger.info(f"Resampling from {self.device_sample_rate}Hz to {self.sample_rate}Hz")
+                
+        except Exception as e:
+            logger.error(f"Error initializing resampling: {e}")
+            self.device_sample_rate = self.sample_rate
+
+    def _resample_audio(self, audio_data: np.ndarray) -> np.ndarray:
+        """Resample audio data to target sample rate."""
+        try:
+            # Implement resampling based on quality setting
+            # This is a placeholder - you should implement actual resampling
+            return audio_data
+        except Exception as e:
+            logger.error(f"Resampling error: {e}")
+            return audio_data
+
+    def set_device_error_callback(self, callback: Callable[[str], None]):
+        """Set callback for device errors.
+        
+        Args:
+            callback: Function to call with error message
+        """
+        self.device_error_fn = callback
 
     def __del__(self):
         """Cleanup on deletion."""

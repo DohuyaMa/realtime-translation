@@ -26,14 +26,20 @@ class AudioRouter:
                 self.pulse.module_load('module-null-sink',
                     f'sink_name={input_name} '
                     'sink_properties=device.description="Virtual Input" '
-                    'rate=48000 channels=2')
+                    'rate=48000 channels=2 '
+                    'latency_msec=10 '  # Low latency setting
+                    'fragment_size=256 '  # Small fragment size for lower latency
+                    'fragments=2')  # Minimum number of fragments
                 
                 # Create virtual output sink
                 output_name = "virtual_output"
                 self.pulse.module_load('module-null-sink',
                     f'sink_name={output_name} '
                     'sink_properties=device.description="Virtual Output" '
-                    'rate=48000 channels=2')
+                    'rate=48000 channels=2 '
+                    'latency_msec=10 '  # Low latency setting
+                    'fragment_size=256 '  # Small fragment size for lower latency
+                    'fragments=2')  # Minimum number of fragments
                 
                 self.virtual_input = input_name
                 self.virtual_output = output_name
@@ -124,10 +130,14 @@ class AudioRouter:
                 if not source or not sink:
                     raise ValueError(f"Source '{source_name}' or sink '{sink_name}' not found")
                 
-                # Create loopback module
+                # Create loopback module with low latency settings
                 self.pulse.module_load('module-loopback',
                     f'source={source_name} sink={sink_name} '
-                    'adjust_time=1 rate=48000 channels=2')
+                    'adjust_time=0 '  # Disable time adjustment for lower latency
+                    'rate=48000 channels=2 '
+                    'latency_msec=10 '  # Low latency setting
+                    'source_dont_move=true '  # Prevent source from moving
+                    'sink_dont_move=true')  # Prevent sink from moving
                 
                 logger.info(f"Routed audio: {source_name} -> {sink_name}")
                 
@@ -135,22 +145,62 @@ class AudioRouter:
                 logger.error(f"Failed to route audio: {e}")
                 raise
 
-    def get_virtual_device_status(self) -> Dict[str, bool]:
+    def get_virtual_device_status(self) -> Dict[str, Dict]:
         """Check status of virtual devices.
         
         Returns:
-            Dictionary with status of input and output devices
+            Dictionary with status and metrics of input and output devices
         """
         with self._lock:
             try:
-                sinks = [s.name for s in self.pulse.sink_list()]
+                sinks = {s.name: s for s in self.pulse.sink_list()}
+                sources = {s.name: s for s in self.pulse.source_list()}
+                
+                input_stats = self._get_device_stats(
+                    sinks.get(self.virtual_input) if self.virtual_input else None
+                )
+                output_stats = self._get_device_stats(
+                    sinks.get(self.virtual_output) if self.virtual_output else None
+                )
+                
                 return {
-                    'input': self.virtual_input in sinks if self.virtual_input else False,
-                    'output': self.virtual_output in sinks if self.virtual_output else False
+                    'input': input_stats,
+                    'output': output_stats
                 }
+                
             except Exception as e:
                 logger.error(f"Failed to get virtual device status: {e}")
-                return {'input': False, 'output': False}
+                return {
+                    'input': {'active': False, 'latency_ms': 0, 'buffer_size': 0},
+                    'output': {'active': False, 'latency_ms': 0, 'buffer_size': 0}
+                }
+
+    def _get_device_stats(self, device) -> Dict:
+        """Get device statistics.
+        
+        Args:
+            device: PulseAudio device object
+            
+        Returns:
+            Dictionary with device statistics
+        """
+        if not device:
+            return {'active': False, 'latency_ms': 0, 'buffer_size': 0}
+            
+        try:
+            latency_us = device.latency
+            buffer_size = device.configured_latency
+            
+            return {
+                'active': True,
+                'latency_ms': latency_us / 1000 if latency_us else 0,
+                'buffer_size': buffer_size,
+                'sample_rate': device.rate,
+                'channels': device.channel_count
+            }
+        except Exception as e:
+            logger.error(f"Failed to get device stats: {e}")
+            return {'active': False, 'latency_ms': 0, 'buffer_size': 0}
 
     def cleanup(self):
         """Clean up audio routing and virtual devices."""
