@@ -1,0 +1,12 @@
+[Unit]
+Description=Real-time Translator Translation Service
+Requires=rt-translate.socket
+
+[Service]
+Type=simple
+ExecStart=%h/.nix-profile/bin/python -m src.translate.translate_service --socket-path %t/rt-translate.sock
+Restart=always
+RestartSec=5
+
+[Install]
+Also=rt-translate.socket

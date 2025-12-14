@@ -20,7 +20,7 @@ This document explains the dependencies and setup process using the Nix package 
 - **PyYAML**: YAML configuration file parsing
 - **python-dotenv**: Environment variable management
 - **loguru**: Logging library
-- **kokoro-onnx**: TTS engine (from git repository)
+- **kokoro**: TTS engine (from nixpkgs, using KPipeline)
 
 ### System Dependencies
 - **libffi**: Foreign Function Interface library
@@ -48,7 +48,7 @@ nix develop
 ```
 
 This will provide:
-- Python 3.11 with all required packages
+- Python 3.12 with all required packages including kokoro TTS
 - System tools (git, docker, nodejs, etc.)
 - Audio subsystem tools
 - AI/ML tools (ollama)

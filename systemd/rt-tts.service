@@ -1,0 +1,12 @@
+[Unit]
+Description=Real-time Translator TTS Service
+Requires=rt-tts.socket
+
+[Service]
+Type=simple
+ExecStart=%h/.nix-profile/bin/python -m src.tts.tts_service --socket-path %t/rt-tts.sock
+Restart=always
+RestartSec=5
+
+[Install]
+Also=rt-tts.socket

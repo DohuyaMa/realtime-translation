@@ -1,0 +1,10 @@
+[Unit]
+Description=Real-time Translator TTS Socket
+Documentation=man:systemd.socket(5)
+
+[Socket]
+ListenStream=%t/rt-tts.sock
+SocketMode=0660
+
+[Install]
+WantedBy=sockets.target

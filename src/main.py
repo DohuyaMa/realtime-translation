@@ -3,12 +3,40 @@
 import sys
 import os
 import argparse
-from PyQt5.QtWidgets import QApplication
-from PyQt5.QtCore import Qt
+import subprocess
+from PyQt6.QtWidgets import QApplication
+from PyQt6.QtCore import Qt
 from loguru import logger
 import yaml
 
 from .ui.main_window import MainWindow
+
+
+def ensure_pipewire_nodes():
+    """Ensure that the required PipeWire nodes exist."""
+    try:
+        # Check for sinks
+        result = subprocess.check_output(
+            ["pactl", "list", "sinks", "short"],
+            text=True
+        )
+        if "rt_virtual_input" not in result or "rt_virtual_output" not in result:
+            sys.exit("Virtual PipeWire sinks not found. Please set up PipeWire configuration first.")
+        
+        # Check for sources (monitors)
+        result = subprocess.check_output(
+            ["pactl", "list", "sources", "short"],
+            text=True
+        )
+        if "rt_virtual_output.monitor" not in result:
+            sys.exit("Virtual PipeWire source (monitor) not found. Please set up PipeWire configuration first.")
+            
+        logger.info("PipeWire nodes verified successfully")
+        
+    except subprocess.CalledProcessError as e:
+        sys.exit(f"Failed to check PipeWire nodes: {e}")
+    except FileNotFoundError:
+        sys.exit("pactl command not found. Please ensure PipeWire is installed.")
 
 def setup_logging(log_level: str = "INFO"):
     """Set up logging configuration.
@@ -109,6 +137,15 @@ def parse_args():
 
 def main():
     """Main application entry point."""
+    # Check PipeWire nodes before proceeding
+    ensure_pipewire_nodes()
+    
+    # Set up HuggingFace environment variables to avoid PEP 668 issues in Nix
+    import os
+    os.environ.setdefault("HF_HOME", os.path.expanduser("~/real-time-translator-cache/huggingface"))
+    os.environ.setdefault("TRANSFORMERS_CACHE", os.path.expanduser("~/real-time-translator-cache/transformers"))
+    os.environ.setdefault("HF_HUB_CACHE", os.path.expanduser("~/real-time-translator-cache/huggingface/hub"))
+    
     # Parse command line arguments
     args = parse_args()
     
@@ -140,9 +177,8 @@ def main():
         app.setApplicationName("Real-Time Translator")
         app.setApplicationDisplayName("Real-Time Translator")
         
-        # Enable High DPI scaling
-        app.setAttribute(Qt.AA_EnableHighDpiScaling, True)
-        app.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
+        # Enable High DPI scaling (attributes have changed in PyQt6)
+        # For PyQt6, we'll just skip these attributes as they're handled differently
         
         # Create and show main window
         window = MainWindow()
@@ -151,7 +187,7 @@ def main():
             window.show()
         
         # Start application event loop
-        sys.exit(app.exec_())
+        sys.exit(app.exec())
         
     except Exception as e:
         logger.error(f"Application error: {e}")

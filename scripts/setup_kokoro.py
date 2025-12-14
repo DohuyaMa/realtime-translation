@@ -79,28 +79,42 @@ def create_config():
 
 def setup_cache():
     """Set up cache directory."""
-    cache_dir = Path.home() / '.cache' / 'kokoro'
+    # Use user's home directory for cache to avoid issues with Nix environment
+    cache_dir = Path.home() / 'real-time-translator-cache' / 'kokoro'
     cache_dir.mkdir(parents=True, exist_ok=True)
     logger.info(f"Cache directory created: {cache_dir}")
 
 def download_models():
     """Download required models."""
     try:
-        sys.path.append('kokoro-tts')
-        from kokoro_onnx import download_models
-        
-        models_dir = Path('kokoro-tts/models')
-        models_dir.mkdir(parents=True, exist_ok=True)
-        
-        logger.info("Downloading models...")
-        download_models(str(models_dir))
-        logger.success("Models downloaded successfully")
+        # Check if we're in a Nix environment
+        if os.environ.get('NIX_PYTHON') or os.environ.get('NIX_ENV') or os.path.exists('/etc/nixos') or os.environ.get('NIX_STORE'):
+            logger.info("In Nix environment, skipping model download (should be provided by Nix package)")
+            return
+        else:
+            sys.path.append('kokoro-tts')
+            from kokoro import download_models
+            
+            models_dir = Path('kokoro-tts/models')
+            models_dir.mkdir(parents=True, exist_ok=True)
+            
+            logger.info("Downloading models...")
+            download_models(str(models_dir))
+            logger.success("Models downloaded successfully")
     except Exception as e:
         logger.error(f"Failed to download models: {e}")
-        sys.exit(1)
+        # In Nix environment, this is expected, so we don't exit
+        if not (os.environ.get('NIX_PYTHON') or os.environ.get('NIX_ENV') or os.path.exists('/etc/nixos') or os.environ.get('NIX_STORE')):
+            sys.exit(1)
 
 def setup_development():
     """Set up development environment."""
+    # Check if we're in a Nix environment
+    if os.environ.get('NIX_PYTHON') or os.environ.get('NIX_ENV') or os.path.exists('/etc/nixos') or os.environ.get('NIX_STORE'):
+        logger.info("In Nix environment, skipping pip install (packages provided by Nix)")
+        logger.success("Development environment setup completed (using Nix packages)")
+        return
+        
     try:
         # Install Kokoro requirements
         subprocess.run(

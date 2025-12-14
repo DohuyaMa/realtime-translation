@@ -1,0 +1,10 @@
+[Unit]
+Description=Real-time Translator Whisper Socket
+Documentation=man:systemd.socket(5)
+
+[Socket]
+ListenStream=%t/rt-whisper.sock
+SocketMode=0660
+
+[Install]
+WantedBy=sockets.target

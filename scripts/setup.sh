@@ -45,20 +45,27 @@ else
     warning "Not running on NixOS, some features might not work correctly"
 fi
 
-# Create virtual environment if it doesn't exist
-if [ ! -d "venv" ]; then
-    status "Creating virtual environment..."
-    python3 -m venv venv
+# Check if we're in a Nix environment (check for NIX environment variables)
+if [ -n "$NIX_PYTHON" ] || [ -n "$NIX_ENV" ] || [ -f "/etc/nixos" ] || [ -n "$NIX_STORE" ]; then
+    status "Detected Nix environment, skipping virtual environment and pip install"
+    # In Nix environment, we don't need to create a virtual environment or install packages
+    status "Using Nix-provided Python environment"
+else
+    # Create virtual environment if it doesn't exist
+    if [ ! -d "venv" ]; then
+        status "Creating virtual environment..."
+        python3 -m venv venv
+    fi
+
+    # Activate virtual environment
+    status "Activating virtual environment..."
+    source venv/bin/activate
+
+    # Install requirements
+    status "Installing requirements..."
+    pip install --upgrade pip
+    pip install -r requirements.txt
 fi
-
-# Activate virtual environment
-status "Activating virtual environment..."
-source venv/bin/activate
-
-# Install requirements
-status "Installing requirements..."
-pip install --upgrade pip
-pip install -r requirements.txt
 
 # Make setup script executable
 chmod +x "$SCRIPT_DIR/setup_kokoro.py"

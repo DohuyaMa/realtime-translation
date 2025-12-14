@@ -1,0 +1,12 @@
+[Unit]
+Description=Real-time Translator Capture Service
+Requires=rt-capture.socket
+
+[Service]
+Type=simple
+ExecStart=%h/.nix-profile/bin/python -m src.capture.capture_service --socket-path %t/rt-capture.sock
+Restart=always
+RestartSec=5
+
+[Install]
+Also=rt-capture.socket
