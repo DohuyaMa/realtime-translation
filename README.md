@@ -1,239 +1,300 @@
-# Real-Time Voice Translation System
+# Real-time Speech Translation System
 
-A desktop application for real-time voice translation with integration capabilities for communication platforms like Teams and Zoom.
+A modular real-time speech translation system that captures audio from a microphone, performs speech recognition, translates the text, and synthesizes the translated text to speech - all in real-time.
 
-## Features
+## Table of Contents
+- [Architecture](#architecture)
+- [Installation](#installation)
+- [Configuration](#configuration)
+- [Usage](#usage)
+- [Services](#services)
+- [Systemd Integration](#systemd-integration)
+- [Troubleshooting](#troubleshooting)
 
-- Real-time speech recognition and translation
-- Support for multiple languages
-- Integration with communication platforms
-- Virtual audio device routing
-- Profile management for different use cases
-- Audio quality monitoring
-- Local AI model processing
+## Architecture
 
-## System Requirements
+The system follows a modular architecture with separate services communicating via UNIX sockets:
 
-- CPU: 4+ cores
-- RAM: 8GB minimum (16GB recommended)
-- Storage: 10GB for models
-- GPU: Optional, improves model performance
-- NixOS with PipeWire/PulseAudio
-- Python 3.8+
-- ollama
-- Docker (optional)
+```
+[Physical Mic] → [Capture Service] → [Whisper Service] → [Translation Service] → [TTS Service] → [Playback Service] → [rt_virtual_output]
+                                                                                                                        ↓
+                                                                                                        [rt_virtual_output.monitor] → [Teams/Zoom]
+```
 
-## Quick Start
+### Components
+- **Capture Service**: Handles audio input from the microphone
+- **Whisper Service**: Performs speech recognition using OpenAI Whisper
+- **Translation Service**: Translates text between languages
+- **TTS Service**: Synthesizes text to speech
+- **Playback Service**: Handles audio output to the virtual microphone
+### Fixed Device Names
 
-1. Clone the repository:
+The system uses these fixed device names instead of creating virtual devices dynamically:
+```python
+VIRTUAL_INPUT_SINK = "rt_virtual_input"
+VIRTUAL_OUTPUT_SINK = "rt_virtual_output"
+VIRTUAL_MIC_SOURCE = "rt_virtual_output.monitor"
+```
+
+## Installation
+
+### Prerequisites
+- Nix package manager
+- PipeWire audio server
+- systemd (for automatic virtual sink creation)
+
+### Setup
+
+1. **Clone the repository:**
    ```bash
-   git clone https://github.com/kokoro-org/real-time-translator.git
+   git clone <repository-url>
    cd real-time-translator
    ```
 
-2. Run the application:
+2. **Enter the Nix development environment:**
    ```bash
-   ./run.sh
+   nix develop
    ```
 
-The script will automatically:
-- Set up virtual environment and dependencies
-- Configure virtual audio devices
-- Set up Kokoro for voice synthesis
-- Create default configuration
-- Download required AI models
-- Launch the application
+3. **Set up virtual microphones using systemd service (recommended):**
+   ```bash
+   # Run the installation script to set up the systemd service
+   python install_pipewire_config.py
+   ```
+   
+   Or manually:
+   ```bash
+   # Copy the systemd service file
+   mkdir -p ~/.config/systemd/user
+   cp systemd/rt-virtual-sinks.service ~/.config/systemd/user/
+   
+   # Reload systemd daemon
+   systemctl --user daemon-reload
+   
+   # Enable and start the service
+   systemctl --user enable --now rt-virtual-sinks.service
+   ```
 
-## System Architecture
-
-### Components
-
-1. **Audio Processing Layer**
-   - PyAudio for microphone capture
-   - PipeWire/PulseAudio for virtual devices
-   - Real-time audio routing
-   - Buffer management (512-4096 samples)
-   - Sample rates: 16000-48000 Hz
-
-2. **AI Processing Layer**
-   - Whisper AI (via ollama) for speech recognition
-   - Local LLM for translation
-   - Primary TTS: Kokoro (English synthesis)
-   - Backup TTS: Coqui TTS
-   - Support for transcription files import
-
-3. **User Interface**
-   - Qt-based desktop application
-   - Audio visualization
-   - Device configuration
-   - Language selection
-   - Profile management
-
-## Dependencies
-
-```nix
-# configuration.nix
-{
-  # Enable sound with pipewire
-  sound.enable = true;
-  security.rtkit.enable = true;
-  services.pipewire = {
-    enable = true;
-    alsa.enable = true;
-    alsa.support32Bit = true;
-    pulse.enable = true;
-  };
-
-  # Python and Qt dependencies
-  environment.systemPackages = with pkgs; [
-    python3
-    python3Packages.pyqt5
-    python3Packages.pyaudio
-    python3Packages.torch
-    ollama
-  ];
-}
-```
+4. **Verify PipeWire nodes:**
+   ```bash
+   pactl list sinks short | grep rt_
+   pactl list sources short | grep rt_
+   ```
+   
+   You should see:
+   - `rt_virtual_input`
+   - `rt_virtual_output`
+   - `rt_virtual_output.monitor`
 
 ## Configuration
 
-The application automatically creates a default configuration during first run. You can customize the following settings:
+### PipeWire Configuration
 
-### AI Model Configuration
+The system uses a systemd service to create virtual devices automatically after PipeWire starts:
+- `rt_virtual_input` - sink where Python writes sound
+- `rt_virtual_output` - sink for Teams/Zoom to use as mic
+- `rt_virtual_output.monitor` - the actual microphone that Teams/Zoom sees
 
-1. Language Models
-   - Speech recognition: Whisper (small, medium, or large)
-   - Translation: Choose appropriate ollama model
-   - TTS: Select Kokoro (English) or Coqui TTS (other languages)
+The virtual sinks are created using pactl commands in the systemd service, which is the reliable approach on NixOS and modern PipeWire systems.
 
-2. Performance Settings
-   - Buffer size: 512-4096 samples (lower = less latency, higher = more stable)
-   - Model inference optimization
-   - CPU/GPU utilization
+### Fixed Device Names
 
-### Profile Management
-
-Create profiles for different use cases:
-- Meeting profile (optimized for voice)
-- Presentation profile (balanced quality)
-- High-quality profile (maximum accuracy)
-
-## Development
-
-### Setup Development Environment
-
-1. Install development dependencies:
-   ```bash
-   pip install -r requirements-dev.txt
-   ```
-
-2. Install pre-commit hooks:
-   ```bash
-   pip install pre-commit
-   pre-commit install
-   ```
-
-### Running Tests
-
-```bash
-# Run all tests
-pytest
-
-# Run specific test file
-pytest tests/test_audio.py
-
-# Run with coverage
-pytest --cov=src tests/
-```
-
-## Documentation
-
-Comprehensive documentation is available in the `docs/` directory:
-
-- [Installation Guide](docs/INSTALLATION.md) - Detailed setup instructions
-- [Technical Documentation](docs/TECHNICAL.md) - System architecture and components
-- [Configuration Guide](docs/CONFIGURATION.md) - Detailed config options
-- [Languages Support](docs/LANGUAGES.md) - Supported languages and models
-- [UI Guide](docs/UI_GUIDE.md) - User interface documentation
-- [Kokoro Integration](docs/KOKORO_INTEGRATION.md) - Voice synthesis setup
+The system uses these fixed device names instead of creating virtual devices dynamically:
+```python
+VIRTUAL_INPUT_SINK = "rt_virtual_input"
+VIRTUAL_OUTPUT_SINK = "rt_virtual_output"
+VIRTUAL_MIC_SOURCE = "rt_virtual_output.monitor"
 
 ## Usage
 
-After running `./run.sh`, the application will start automatically. Then:
+### Starting the Services
 
-1. Select input/output devices
-2. Choose source and target languages
-3. Configure audio routing
-4. Start translation
+The system can be run using systemd socket activation:
 
-### Integration with Communication Apps
+1. **Copy systemd service files:**
+   ```bash
+   mkdir -p ~/.config/systemd/user
+   cp systemd/*.socket systemd/*.service ~/.config/systemd/user/
+   ```
 
-#### Teams
-1. Set virtual output as Teams microphone input
-2. Adjust audio levels in Teams settings
+2. **Enable and start socket activation:**
+   ```bash
+   systemctl --user enable rt-capture.socket
+   systemctl --user enable rt-whisper.socket
+   systemctl --user enable rt-translate.socket
+   systemctl --user enable rt-tts.socket
+   systemctl --user enable rt-playback.socket
 
-#### Zoom
-1. Select virtual output device as microphone
-2. Test audio in Zoom settings
+   systemctl --user start rt-capture.socket
+   systemctl --user start rt-whisper.socket
+   systemctl --user start rt-translate.socket
+   systemctl --user start rt-tts.socket
+   systemctl --user start rt-playback.socket
+   ```
+
+### Manual Usage
+
+Alternatively, you can run services manually:
+
+```bash
+# In separate terminals, run each service:
+python -m src.capture.capture_service
+python -m src.whisper.whisper_service
+python -m src.translate.translate_service
+python -m src.tts.tts_service
+python -m src.playback.playback_service
+```
+
+### Teams/Zoom Configuration
+
+In Teams or Zoom audio settings:
+- Set microphone to "RT Virtual Output (Microphone)" (which is `rt_virtual_output.monitor`)
+
+## Services
+
+### Capture Service
+- Path: `src/capture/capture_service.py`
+- Socket: `/tmp/rt-capture.sock`
+- Handles audio input from the microphone
+- Supports start/stop capture and status queries
+
+### Whisper Service
+- Path: `src/whisper/whisper_service.py`
+- Socket: `/tmp/rt-whisper.sock`
+- Performs speech recognition
+- Supports language setting and processing
+
+### Translation Service
+- Path: `src/translate/translate_service.py`
+- Socket: `/tmp/rt-translate.sock`
+- Translates text between languages
+- Supports language setting and translation
+
+### TTS Service
+- Path: `src/tts/tts_service.py`
+- Socket: `/tmp/rt-tts.sock`
+- Synthesizes text to speech
+- Supports text synthesis
+
+### Playback Service
+- Path: `src/playback/playback_service.py`
+- Socket: `/tmp/rt-playback.sock`
+- Handles audio output to the virtual microphone
+- Supports audio playback and device setting
+
+## Systemd Integration
+
+The system includes systemd socket activation for efficient resource management:
+
+### Socket Files
+- `rt-capture.socket` - Capture service socket
+- `rt-whisper.socket` - Whisper service socket
+- `rt-translate.socket` - Translation service socket
+- `rt-tts.socket` - TTS service socket
+- `rt-playback.socket` - Playback service socket
+
+### Service Files
+- `rt-capture.service` - Capture service
+- `rt-whisper.service` - Whisper service
+- `rt-translate.service` - Translation service
+- `rt-tts.service` - TTS service
+- `rt-playback.service` - Playback service
+
+Benefits:
+- Services start only when there's incoming data
+- Automatic restart on failure
+- Clean shutdown handling
 
 ## Troubleshooting
 
-### Common Issues
+### Service Status
+Check service status with:
+```bash
+systemctl --user status rt-*.service
+systemctl --user status rt-*.socket
+```
 
-1. Audio Routing Problems
-   - Check PipeWire/PulseAudio configuration: `pactl list sinks`
-   - Verify virtual device creation: `pactl list sources`
-   - Check application permissions
-   - Monitor audio levels
+### Logs
+View service logs with:
+```bash
+journalctl --user -u rt-*.service -f
+```
 
-2. AI Model Issues
-   - Verify ollama is running: `ollama list`
-   - Check model downloads in `models/` directory
-   - Monitor system resources (CPU/RAM usage)
-   - Verify GPU acceleration if enabled
+### Socket Status
+Check socket activation with:
+```bash
+systemctl --user list-sockets | grep rt-
+```
 
-3. Performance Issues
-   - Adjust buffer sizes (512-4096)
-   - Check CPU/GPU usage
-   - Optimize model settings
-   - Monitor latency with `./scripts/system_check.sh`
+### PipeWire Issues
+If virtual devices don't appear:
+```bash
+systemctl --user restart pipewire pipewire-pulse
+pactl list sinks short
+pactl list sources short
+```
 
-## Customization
+### Audio Issues
+- Verify that the correct input device is selected in your application
+- Check that the virtual microphone is selected in Teams/Zoom
+- Ensure PipeWire is running and the configuration file is in place
 
-### Adding New Languages
-1. Download language models
-2. Update configuration
-3. Test translation quality
+## Development
 
-### Custom Voice Models
-1. Train custom TTS models
-2. Import into the system
-3. Configure voice settings
+### Adding New Features
+- Each service is modular and can be developed independently
+- Follow the IPC protocol when adding new message types
+- Use the base IPC classes for consistent communication
 
-## Contributing
+### Testing Individual Services
+Each service can be tested independently by connecting to its socket and sending appropriate messages.
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for development guidelines.
+## Benefits of Modular Architecture
 
-## License
+1. **Modularity**: Each component runs as a separate process
+2. **Resilience**: Failure in one service doesn't crash the entire pipeline
+3. **Resource Efficiency**: Socket activation means services only run when needed
+4. **Maintainability**: Easier to debug individual components
+5. **Scalability**: Services can be optimized independently
+6. **Flexibility**: Services can be updated independently
 
-This project is licensed under the MIT License.
+## IPC Protocol
 
-Copyright (c) 2024 Kokoro Organization
+### Message Format
+```
+[4-byte length][JSON message]
+```
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+### Message Structure
+```json
+{
+  "type": "message_type",
+  "data": { ... }
+}
+```
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+### Common Message Types
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+#### Capture Service
+- `start_capture` - Start audio capture
+- `stop_capture` - Stop audio capture
+- `get_status` - Get service status
+
+#### Whisper Service
+- `process_audio` - Process audio for speech recognition
+- `get_status` - Get service status
+- `set_languages` - Set source/target languages
+
+#### Translation Service
+- `translate_text` - Translate text
+- `get_status` - Get service status
+- `set_languages` - Set source/target languages
+
+#### TTS Service
+- `synthesize_text` - Synthesize text to speech
+- `get_status` - Get service status
+
+#### Playback Service
+- `play_audio` - Play audio data
+- `get_status` - Get service status
+- `set_device` - Set output device

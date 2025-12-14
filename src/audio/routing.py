@@ -3,6 +3,12 @@ import threading
 from loguru import logger
 from typing import Optional, Dict, List, Tuple
 
+# Fixed device names for the static PipeWire configuration
+VIRTUAL_INPUT_SINK = "rt_virtual_input"
+VIRTUAL_OUTPUT_SINK = "rt_virtual_output"
+VIRTUAL_MIC_SOURCE = "rt_virtual_output.monitor"
+
+
 class AudioRouter:
     """Audio routing manager for PipeWire/PulseAudio virtual devices."""
     
@@ -10,46 +16,16 @@ class AudioRouter:
         """Initialize audio router."""
         self.pulse = pulsectl.Pulse('real-time-translator')
         self._lock = threading.Lock()
-        self.virtual_input: Optional[str] = None
-        self.virtual_output: Optional[str] = None
+        self.virtual_input = VIRTUAL_INPUT_SINK
+        self.virtual_output = VIRTUAL_OUTPUT_SINK
 
-    def create_virtual_devices(self) -> Tuple[str, str]:
-        """Create virtual input and output devices.
+    def get_virtual_devices(self) -> Tuple[str, str]:
+        """Get the fixed virtual input and output devices.
         
         Returns:
             Tuple of (input_device_name, output_device_name)
         """
-        with self._lock:
-            try:
-                # Create virtual input sink
-                input_name = "virtual_input"
-                self.pulse.module_load('module-null-sink',
-                    f'sink_name={input_name} '
-                    'sink_properties=device.description="Virtual Input" '
-                    'rate=48000 channels=2 '
-                    'latency_msec=10 '  # Low latency setting
-                    'fragment_size=256 '  # Small fragment size for lower latency
-                    'fragments=2')  # Minimum number of fragments
-                
-                # Create virtual output sink
-                output_name = "virtual_output"
-                self.pulse.module_load('module-null-sink',
-                    f'sink_name={output_name} '
-                    'sink_properties=device.description="Virtual Output" '
-                    'rate=48000 channels=2 '
-                    'latency_msec=10 '  # Low latency setting
-                    'fragment_size=256 '  # Small fragment size for lower latency
-                    'fragments=2')  # Minimum number of fragments
-                
-                self.virtual_input = input_name
-                self.virtual_output = output_name
-                
-                logger.info("Virtual audio devices created successfully")
-                return input_name, output_name
-                
-            except Exception as e:
-                logger.error(f"Failed to create virtual devices: {e}")
-                raise
+        return self.virtual_input, self.virtual_output
 
     def list_devices(self) -> Dict[str, List[Dict]]:
         """List all available audio devices.
@@ -201,19 +177,12 @@ class AudioRouter:
         except Exception as e:
             logger.error(f"Failed to get device stats: {e}")
             return {'active': False, 'latency_ms': 0, 'buffer_size': 0}
-
+        
     def cleanup(self):
-        """Clean up audio routing and virtual devices."""
+        """Clean up audio routing."""
         with self._lock:
             try:
-                # Unload virtual device modules
-                for module in self.pulse.module_list():
-                    if any(name in str(module) for name in 
-                        [self.virtual_input, self.virtual_output]):
-                        self.pulse.module_unload(module.index)
-                
                 logger.info("Audio routing cleanup completed")
-                
             except Exception as e:
                 logger.error(f"Error during cleanup: {e}")
             finally:

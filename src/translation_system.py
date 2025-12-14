@@ -1,13 +1,13 @@
+"""Main coordinator for the real-time translation system using modular architecture."""
+
 from typing import Optional, Dict
 import threading
 import queue
 from loguru import logger
 
-from .audio.capture import AudioCapture
 from .audio.routing import AudioRouter
-from .audio.processor import AudioProcessor
-from .models.whisper_recognition import WhisperRecognizer
-from .models.tts_engine import TTSEngine
+from .common.ipc import IPCClient
+
 
 class TranslationSystem:
     """Main coordinator for the real-time translation system."""
@@ -16,8 +16,7 @@ class TranslationSystem:
         self,
         source_lang: str = "auto",
         target_lang: str = "en",
-        sample_rate: int = 16000,
-        use_virtual_audio: bool = True
+        sample_rate: int = 16000
     ):
         """Initialize translation system.
         
@@ -25,7 +24,6 @@ class TranslationSystem:
             source_lang: Source language code (uk for Ukrainian, pl for Polish, or auto)
             target_lang: Target language code (en for English)
             sample_rate: Audio sample rate
-            use_virtual_audio: Whether to use virtual audio devices
         """
         self.source_lang = source_lang
         self.target_lang = target_lang
@@ -33,10 +31,13 @@ class TranslationSystem:
         
         # Components
         self.audio_router: Optional[AudioRouter] = None
-        self.audio_capture: Optional[AudioCapture] = None
-        self.audio_processor: Optional[AudioProcessor] = None
-        self.recognizer: Optional[WhisperRecognizer] = None
-        self.tts_engine: Optional[TTSEngine] = None
+        
+        # IPC clients for modular services
+        self.capture_client: Optional[IPCClient] = None
+        self.whisper_client: Optional[IPCClient] = None
+        self.translate_client: Optional[IPCClient] = None
+        self.tts_client: Optional[IPCClient] = None
+        self.playback_client: Optional[IPCClient] = None
         
         # State
         self.is_running = False
@@ -44,74 +45,101 @@ class TranslationSystem:
         self.status_callback: Optional[callable] = None
         
         # Initialize components
-        self._initialize_components(use_virtual_audio)
+        self._initialize_components()
         
         logger.info(f"Translation system initialized: {source_lang}->{target_lang}")
 
-    def _initialize_components(self, use_virtual_audio: bool):
-        """Initialize system components.
-        
-        Args:
-            use_virtual_audio: Whether to set up virtual audio devices
-        """
+    def _initialize_components(self):
+        """Initialize system components."""
         try:
-            # Set up audio routing if requested
-            if use_virtual_audio:
-                self.audio_router = AudioRouter()
-                input_device, output_device = self.audio_router.create_virtual_devices()
-                logger.info(f"Virtual audio devices created: {input_device}, {output_device}")
+            # Set up audio routing with fixed device names
+            self.audio_router = AudioRouter()
+            input_device, output_device = self.audio_router.get_virtual_devices()
+            logger.info(f"Using virtual audio devices: {input_device}, {output_device}")
             
-            # Initialize audio capture
-            self.audio_capture = AudioCapture(
-                sample_rate=self.sample_rate,
-                channels=1
-            )
+            # Initialize IPC clients for modular services
+            self.capture_client = IPCClient("/tmp/rt-capture.sock")
+            self.whisper_client = IPCClient("/tmp/rt-whisper.sock")
+            self.translate_client = IPCClient("/tmp/rt-translate.sock")
+            self.tts_client = IPCClient("/tmp/rt-tts.sock")
+            self.playback_client = IPCClient("/tmp/rt-playback.sock")
             
-            # Initialize audio processor
-            self.audio_processor = AudioProcessor(
-                sample_rate=self.sample_rate,
-                silence_threshold=0.01,
-                min_speech_duration=0.5
-            )
-            
-            # Initialize speech recognition
-            self.recognizer = WhisperRecognizer(
-                source_lang=self.source_lang,
-                target_lang=self.target_lang
-            )
-            
-            # Initialize TTS
-            self.tts_engine = TTSEngine(
-                sample_rate=self.sample_rate
-            )
-            
-            # Set up callbacks
-            self.audio_capture.set_callback(self.audio_processor.process_chunk)
-            self.audio_processor.set_callbacks(
-                speech_callback=self._handle_speech_segment,
-                silence_callback=self._handle_silence
-            )
-            self.recognizer.set_callback(self._handle_recognition_result)
-            self.tts_engine.set_callback(self._handle_synthesized_audio)
-            
+            # Connect to services
+            try:
+                self.capture_client.connect()
+                self.whisper_client.connect()
+                self.translate_client.connect()
+                self.tts_client.connect()
+                self.playback_client.connect()
+                logger.info("Connected to all modular services")
+            except Exception as e:
+                logger.error(f"Failed to connect to services: {e}")
+                # We'll continue but services need to be started separately
+                
         except Exception as e:
             logger.error(f"Failed to initialize components: {e}")
             raise
 
-    def _handle_speech_segment(self, audio_data):
-        """Handle detected speech segment.
+    def process_audio_chunk(self, audio_data):
+        """Process an audio chunk through the translation pipeline.
         
         Args:
-            audio_data: Audio samples for the speech segment
+            audio_data: Audio samples to process
         """
-        if self.translation_enabled and self.recognizer:
-            self.recognizer.process_audio(audio_data)
+        if not self.translation_enabled:
+            return
             
-        if self.status_callback:
-            self.status_callback({
-                'status': 'speech_detected',
-                'duration': len(audio_data) / self.sample_rate
-            })
+        try:
+            # Send audio to whisper service for recognition
+            if self.whisper_client:
+                import base64
+                audio_bytes = audio_data.astype(audio_data.dtype).tobytes()
+                audio_b64 = base64.b64encode(audio_bytes).decode('utf-8')
+                
+                result = self.whisper_client.send_message('process_audio', {
+                    'data': audio_b64,
+                    'format': str(audio_data.dtype),
+                    'sample_rate': self.sample_rate
+                })
+                
+                if result and result.get('status') == 'success':
+                    text = result['data']['text']
+                    logger.info(f"Recognized: {text}")
+                    
+                    # Translate the text
+                    if self.translate_client:
+                        translation_result = self.translate_client.send_message('translate_text', {
+                            'text': text
+                        })
+                        
+                        if translation_result and translation_result.get('status') == 'success':
+                            translated_text = translation_result['data']['translated_text']
+                            logger.info(f"Translated: {translated_text}")
+                            
+                            # Synthesize the translated text
+                            if self.tts_client:
+                                synthesis_result = self.tts_client.send_message('synthesize_text', {
+                                    'text': translated_text
+                                })
+                                
+                                if synthesis_result and synthesis_result.get('status') == 'success':
+                                    audio_data_b64 = synthesis_result['data']['audio_data']
+                                    
+                                    # Play the synthesized audio
+                                    if self.playback_client:
+                                        self.playback_client.send_message('play_audio', {
+                                            'audio_data': audio_data_b64
+                                        })
+                                        
+                                        if self.status_callback:
+                                            self.status_callback({
+                                                'status': 'translation_complete',
+                                                'original_text': text,
+                                                'translated_text': translated_text,
+                                                'duration': synthesis_result['data'].get('duration', 0)
+                                            })
+        except Exception as e:
+            logger.error(f"Error processing audio chunk: {e}")
 
     def _handle_silence(self):
         """Handle detected silence period."""
@@ -120,54 +148,19 @@ class TranslationSystem:
                 'status': 'silence_detected'
             })
 
-    def _handle_recognition_result(self, result: Dict):
-        """Handle speech recognition result.
-        
-        Args:
-            result: Recognition result dictionary
-        """
-        if not self.translation_enabled:
-            return
-            
-        text = result.get('text', '').strip()
-        if text and self.tts_engine:
-            self.tts_engine.synthesize(
-                text,
-                play_audio=True
-            )
-            
-        if self.status_callback:
-            self.status_callback({
-                'status': 'recognition_complete',
-                'text': text,
-                'language': result.get('language'),
-                'processing_time': result.get('processing_time')
-            })
-
-    def _handle_synthesized_audio(self, audio_data):
-        """Handle synthesized audio from TTS.
-        
-        Args:
-            audio_data: Synthesized audio samples
-        """
-        if self.status_callback:
-            self.status_callback({
-                'status': 'synthesis_complete',
-                'duration': len(audio_data) / self.sample_rate
-            })
-
     def start(self):
         """Start the translation system."""
         if self.is_running:
             logger.warning("Translation system already running")
             return
-            
+             
         try:
-            if self.audio_capture:
-                self.audio_capture.start()
+            # Start capture if client is available
+            if self.capture_client:
+                self.capture_client.send_message('start_capture', {})
             self.is_running = True
             logger.info("Translation system started")
-            
+             
         except Exception as e:
             logger.error(f"Failed to start translation system: {e}")
             raise
@@ -176,14 +169,15 @@ class TranslationSystem:
         """Stop the translation system."""
         if not self.is_running:
             return
-            
+             
         try:
-            if self.audio_capture:
-                self.audio_capture.stop()
-                
+            # Stop capture if client is available
+            if self.capture_client:
+                self.capture_client.send_message('stop_capture', {})
+                 
             self.is_running = False
             logger.info("Translation system stopped")
-            
+             
         except Exception as e:
             logger.error(f"Error stopping translation system: {e}")
 
@@ -196,10 +190,25 @@ class TranslationSystem:
         """
         self.source_lang = source_lang
         self.target_lang = target_lang
-        
-        if self.recognizer:
-            self.recognizer.set_languages(source_lang, target_lang)
-            
+         
+        # Update whisper service languages
+        if self.whisper_client:
+            self.whisper_client.send_message('set_languages', {
+                'data': {
+                    'source_lang': source_lang,
+                    'target_lang': target_lang
+                }
+            })
+             
+        # Update translation service languages
+        if self.translate_client:
+            self.translate_client.send_message('set_languages', {
+                'data': {
+                    'source_lang': source_lang,
+                    'target_lang': target_lang
+                }
+            })
+             
         logger.info(f"Languages updated: {source_lang}->{target_lang}")
 
     def set_status_callback(self, callback: callable):
@@ -242,24 +251,32 @@ class TranslationSystem:
             'target_language': self.target_lang
         }
         
-        if self.audio_processor:
-            stats.update(self.audio_processor.get_stats())
-            
+        if self.capture_client:
+            try:
+                status = self.capture_client.send_message('get_status', {})
+                if status and status.get('status') == 'success':
+                    stats.update(status.get('data', {}))
+            except:
+                pass
+             
         return stats
 
     def cleanup(self):
         """Clean up system resources."""
         self.stop()
-        
+         
         if self.audio_router:
             self.audio_router.cleanup()
-            
-        if self.tts_engine:
-            self.tts_engine.stop()
-            
-        if self.recognizer:
-            self.recognizer.stop()
-            
+             
+        # Disconnect IPC clients
+        for client in [self.capture_client, self.whisper_client,
+                      self.translate_client, self.tts_client, self.playback_client]:
+            if client:
+                try:
+                    client.disconnect()
+                except:
+                    pass
+             
         logger.info("Translation system cleaned up")
 
     def __del__(self):

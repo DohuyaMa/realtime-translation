@@ -1,11 +1,10 @@
-from PyQt5.QtWidgets import (
+from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QComboBox, QPushButton, QLabel, QProgressBar,
-    QCheckBox, QGroupBox, QSystemTrayIcon, QMenu,
-    QAction
+    QCheckBox, QGroupBox, QSystemTrayIcon, QMenu
 )
-from PyQt5.QtCore import Qt, QTimer
-from PyQt5.QtGui import QIcon
+from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtGui import QIcon, QAction
 import sys
 from loguru import logger
 from typing import Optional, Dict

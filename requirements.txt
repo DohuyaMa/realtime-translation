@@ -22,4 +22,6 @@ python-dotenv>=0.19.0
 loguru>=0.6.0
 
 # Kokoro TTS dependencies
-kokoro-onnx @ git+https://github.com/thewh1teagle/kokoro-onnx.git
+# For Nix-based installations, use the kokoro package from nixpkgs
+# For pip-based installations, use kokoro-onnx
+kokoro-onnx>=0.4.9
