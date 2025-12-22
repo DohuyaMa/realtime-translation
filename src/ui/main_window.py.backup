@@ -1,7 +1,8 @@
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QComboBox, QPushButton, QLabel, QProgressBar,
-    QCheckBox, QGroupBox, QSystemTrayIcon, QMenu
+    QCheckBox, QGroupBox, QSystemTrayIcon, QMenu,
+    QGridLayout, QFrame
 )
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QIcon, QAction
@@ -25,14 +26,17 @@ class MainWindow(QMainWindow):
         self.is_translating = False
         self.update_timer: Optional[QTimer] = None
         
+        # Service status tracking
+        self.service_labels = {}
+        self.service_buttons = {}
+        
         self.init_ui()
         self.setup_translation_system()
         self.setup_tray_icon()
-        
     def init_ui(self):
         """Initialize the user interface."""
         self.setWindowTitle('Real-Time Translator')
-        self.setMinimumWidth(600)
+        self.setMinimumWidth(800)
         
         # Create central widget and layout
         central_widget = QWidget()
@@ -108,6 +112,9 @@ class MainWindow(QMainWindow):
         levels_group.setLayout(levels_layout)
         layout.addWidget(levels_group)
         
+        # Service status panel
+        self.setup_service_status_panel(layout)
+        
         # Status and controls
         status_layout = QHBoxLayout()
         
@@ -135,6 +142,47 @@ class MainWindow(QMainWindow):
         self.update_timer = QTimer()
         self.update_timer.timeout.connect(self.update_ui)
         self.update_timer.start(100)  # Update every 100ms
+    
+    def setup_service_status_panel(self, layout):
+        """Set up the service status panel."""
+        service_group = QGroupBox("Service Status")
+        service_layout = QGridLayout()
+        
+        # Define services with their display names and colors
+        services = [
+            ("capture", "Capture Service"),
+            ("whisper", "Whisper Service"),
+            ("translate", "Translation Service"),
+            ("tts", "TTS Service"),
+            ("playback", "Playback Service")
+        ]
+        
+        for idx, (service_key, service_name) in enumerate(services):
+            # Status indicator
+            status_label = QLabel("●")
+            status_label.setStyleSheet("color: red; font-size: 16px; font-weight: bold;")
+            status_label.setToolTip(f"{service_name} status")
+            service_layout.addWidget(status_label, idx, 0)
+            self.service_labels[f"{service_key}_status"] = status_label
+            
+            # Service name
+            name_label = QLabel(service_name)
+            service_layout.addWidget(name_label, idx, 1)
+            
+            # Status text
+            status_text = QLabel("Not Connected")
+            status_text.setStyleSheet("color: gray;")
+            service_layout.addWidget(status_text, idx, 2)
+            self.service_labels[f"{service_key}_text"] = status_text
+            
+            # Control button
+            control_btn = QPushButton("Start")
+            control_btn.clicked.connect(lambda checked, s=service_key: self.toggle_service(s))
+            service_layout.addWidget(control_btn, idx, 3)
+            self.service_buttons[service_key] = control_btn
+        
+        service_group.setLayout(service_layout)
+        layout.addWidget(service_group)
         
     def setup_translation_system(self):
         """Initialize the translation system."""
@@ -181,6 +229,10 @@ class MainWindow(QMainWindow):
             
         devices = self.translation_system.get_audio_devices()
         
+        # Store current selections to restore them if possible
+        current_input = self.input_device_combo.currentText()
+        current_output = self.output_device_combo.currentText()
+        
         self.input_device_combo.clear()
         self.output_device_combo.clear()
         
@@ -189,6 +241,20 @@ class MainWindow(QMainWindow):
             
         for device in devices['outputs']:
             self.output_device_combo.addItem(device['description'], device['name'])
+        
+        # Restore previous selections if they still exist
+        if current_input:
+            index = self.input_device_combo.findText(current_input)
+            if index >= 0:
+                self.input_device_combo.setCurrentIndex(index)
+        
+        if current_output:
+            index = self.output_device_combo.findText(current_output)
+            if index >= 0:
+                self.output_device_combo.setCurrentIndex(index)
+        
+        # Connect the input device selection to a handler
+        self.input_device_combo.currentTextChanged.connect(self.on_input_device_changed)
             
     def toggle_translation(self):
         """Toggle translation on/off."""
@@ -227,22 +293,112 @@ class MainWindow(QMainWindow):
             lang_code = 'auto'
             
         self.translation_system.set_languages(lang_code)
-        
-    def update_ui(self):
-        """Update UI elements with current status."""
-        if not self.translation_system:
+    
+    def on_input_device_changed(self, text):
+        """Handle input device selection change."""
+        if not self.translation_system or not text:
             return
             
-        # Get current stats
-        stats = self.translation_system.get_stats()
+        # Find the device name that corresponds to the selected description
+        devices = self.translation_system.get_audio_devices()
+        selected_device_name = None
         
-        # Update audio levels
-        self.input_level.setValue(int(stats.get('audio_level', 0) * 100))
+        for device in devices['inputs']:
+            if device['description'] == text:
+                selected_device_name = device['name']
+                break
         
-        # Update status message
-        if stats.get('is_speech', False):
-            self.statusBar().showMessage('Speech detected')
+        if selected_device_name:
+            try:
+                # Use the TranslationSystem method to change input device
+                response = self.translation_system.set_input_device(selected_device_name)
+                if response:
+                    self.statusBar().showMessage(f'Input device changed to: {text}')
+                else:
+                    self.statusBar().showMessage(f'Failed to change input device to: {text}')
+            except Exception as e:
+                logger.error(f"Failed to change input device: {e}")
+                self.statusBar().showMessage(f"Failed to change input device: {e}")
+        
+    def update_ui(self):
+        def update_ui(self):
+            """Update UI elements with current status."""
+            if not self.translation_system:
+                return
+                
+            # Get current stats
+            stats = self.translation_system.get_stats()
             
+            # Update audio levels
+            self.input_level.setValue(int(stats.get('audio_level', 0) * 100))
+            
+            # Update status message
+            if stats.get('is_speech', False):
+                self.statusBar().showMessage('Speech detected')
+            
+            # Update service status indicators
+            self.update_service_status_display(stats)
+        
+        def update_service_status_display(self, stats: Dict):
+            """Update the service status display based on system stats."""
+            # Check each service status based on IPC client connections
+            services = ['capture', 'whisper', 'translate', 'tts', 'playback']
+            
+            for service in services:
+                # Check if the service is connected based on the stats
+                service_connected = stats.get(f'{service}_connected', False)
+                
+                # Update status indicator
+                status_label = self.service_labels[f"{service}_status"]
+                status_text = self.service_labels[f"{service}_text"]
+                
+                if service_connected:
+                    status_label.setStyleSheet("color: green; font-size: 16px; font-weight: bold;")
+                    status_text.setText("Connected")
+                    status_text.setStyleSheet("color: green;")
+                    
+                    # Update button text to "Stop" if service is running
+                    button = self.service_buttons[service]
+                    button.setText("Stop")
+                else:
+                    status_label.setStyleSheet("color: red; font-size: 16px; font-weight: bold;")
+                    status_text.setText("Not Connected")
+                    status_text.setStyleSheet("color: gray;")
+                    
+                    # Update button text to "Start"
+                    button = self.service_buttons[service]
+                    button.setText("Start")
+        
+        def toggle_service(self, service_name: str):
+            """Toggle a specific service on/off."""
+            if not self.translation_system:
+                return
+            
+            # Get the button for this service
+            button = self.service_buttons[service_name]
+            
+            # Determine if we're starting or stopping based on button text
+            is_starting = button.text() == "Start"
+            
+            try:
+                success = False
+                if is_starting:
+                    # Start the service
+                    success = self.translation_system.start_service(service_name)
+                    if success:
+                        button.setText("Stop")
+                else:
+                    # Stop the service
+                    success = self.translation_system.stop_service(service_name)
+                    if success:
+                        button.setText("Start")
+                
+                if not success:
+                    self.statusBar().showMessage(f"Failed to control {service_name} service")
+            except Exception as e:
+                logger.error(f"Failed to toggle {service_name} service: {e}")
+                # Show error in status bar
+                self.statusBar().showMessage(f"Error controlling {service_name} service: {e}")
     def handle_status_update(self, status: Dict):
         """Handle status updates from translation system."""
         status_type = status.get('status')

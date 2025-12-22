@@ -162,8 +162,32 @@ python -m src.whisper.whisper_service
 
 ```
 [Physical Mic] → [Capture Service] → [Whisper Service] → [Translation Service] → [TTS Service] → [Playback Service] → [rt_virtual_output]
-                                                                                                                        ↓
-                                                                                                        [rt_virtual_output.monitor] → [Teams/Zoom]
+                                                                                                                         ↓
+                                                                                                         [rt_virtual_output.monitor] → [Teams/Zoom]
+```
+
+## Service Chain Architecture Diagram
+
+```mermaid
+graph LR
+    A[Physical Microphone] --> B(Capture Service)
+    B --> C(Whisper Service)
+    C --> D(Translation Service)
+    D --> E(TTS Service)
+    E --> F(Playback Service)
+    F --> G(rt_virtual_output)
+    G --> H[rt_virtual_output.monitor]
+    H --> I[Teams/Zoom/Virtual Meeting App]
+    
+    style A fill:#e1f5fe
+    style B fill:#f3e5f5
+    style C fill:#e8f5e8
+    style D fill:#fff3e0
+    style E fill:#f3e5f5
+    style F fill:#e1f5fe
+    style G fill:#e0f2f1
+    style H fill:#eceff1
+    style I fill:#fff8e1
 ```
 
 ## IPC Protocol

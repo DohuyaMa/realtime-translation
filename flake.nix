@@ -11,25 +11,18 @@
   };
 
   outputs = { self, nixpkgs, flake-utils, home-manager }:
-    flake-utils.lib.eachDefaultSystem (system:
-      let
-        pkgs = nixpkgs.legacyPackages.${system};
-
-        # Python packages
-        pythonPackages = pkgs.python312Packages;
-        
-        # Required packages
-        kokoroPackage = pythonPackages.kokoro;
-        whisperPackage = pythonPackages.openai-whisper;
-        alsaUtils = pkgs.alsa-utils;
-
-        pythonEnv = pythonPackages.buildPythonPackage {
-          pname = "real-time-translator";
-          version = "0.1.0";
-          format = "other";
-          src = ./.;
+    let
+      # Define the Home Manager module separately (not in eachSystem)
+      rtTranslatorModule = { config, pkgs, ... }: 
+        let
+          # Python packages
+          pythonPackages = pkgs.python312Packages;
           
-          propagatedBuildInputs = with pythonPackages; [
+          # Required packages
+          kokoroPackage = pythonPackages.kokoro;
+          
+          # Create proper Python environment for runtime
+          pythonEnv = pkgs.python312.withPackages (ps: with ps; [
             # Core dependencies
             pyaudio
             numpy
@@ -38,7 +31,7 @@
             # AI and ML
             torch
             transformers
-            whisperPackage
+            openai-whisper
             onnxruntime
             
             # Audio processing
@@ -51,287 +44,374 @@
             python-dotenv
             loguru
             
-            # UI
-            pyqt6
-            
             # Kokoro TTS dependencies
             kokoroPackage
-          ];
-          
-          # Completely disable all phases that might trigger python-imports-check-hook
-          # Skip the build phase entirely - this is just a script wrapper
-          buildPhase = "true";
-          
-          # Simple install phase
-          installPhase = ''
-            runHook preInstall
-            mkdir -p $out/bin $out/share/real-time-translator
-            
-            # Copy source files
-            cp -r $src/* $out/share/real-time-translator/
-            rm -rf $out/share/real-time-translator/.git
-            
-            # Create wrapper script for the application
-            makeWrapper ${pythonPackages.python.interpreter} $out/bin/real-time-translator \
-              --prefix PYTHONPATH : "$out/share/real-time-translator" \
-              --add-flags "-m src.main"
-
-          '';
-          
-          # Disable phases that cause issues
-          checkPhase = "true";
-          
-          # Make sure we have the right dependencies for makeWrapper
-          nativeBuildInputs = with pkgs; [ makeWrapper ];
-        };
-
-        # System dependencies
-        # System dependencies
-        systemPackages = with pkgs; [
-          # Core system tools
-          just
-          
-          # Qt dependencies for GUI
-          qt6.qtbase
-          qt6.qtwayland
-          xorg.libX11
-          xorg.libXext
-          xorg.libXrender
-          xorg.libXrandr
-          xorg.libXfixes
-          libGL
-          
-          # Development tools
-          nodejs
-          pnpm
-          python312
-          python312Packages.pip
-          python312Packages.virtualenv
-          
-          # Libraries needed for audio processing
-          libffi
-          openssl
-          zlib
-          
-          # Additional system libraries
-          gcc
-          gnumake
-          pkg-config
-          ninja
-        ];
-      in
-      {
-        devShells.default = pkgs.mkShell {
-          buildInputs = systemPackages ++ (with pythonPackages; [
-            # Individual packages instead of the combined pythonEnv that needs building
-            pyaudio
-            numpy
-            sounddevice
-            torch
-            transformers
-            whisperPackage
-            onnxruntime
-            soundfile
-            librosa
-            pulsectl
-            pyyaml
-            python-dotenv
-            loguru
-            pyqt6
-            kokoroPackage
-            pytest
           ]);
-          
-          # Environment variables
-          PIP_DISABLE_PIP_VERSION_CHECK = "1";
-          HF_HOME = "$HOME/.cache/huggingface";
-          TRANSFORMERS_CACHE = "$HOME/.cache/transformers";
-          HF_HUB_CACHE = "$HOME/.cache/huggingface/hub";
-          
-          # Setup hooks
-          shellHook = ''
-            export PYTHONPATH="$PWD:$PYTHONPATH"
-            export HF_HOME="$HOME/.cache/huggingface"
-            export TRANSFORMERS_CACHE="$HOME/.cache/transformers"
-            export HF_HUB_CACHE="$HOME/.cache/huggingface/hub"
-            
-            # Create cache directories
-            mkdir -p "$HOME/.cache/huggingface"
-            mkdir -p "$HOME/.cache/transformers"
-            mkdir -p "$HOME/.cache/huggingface/hub"
-            
-            echo "Real-time Translator development environment ready!"
-            echo "Use 'python3 -m src.main' to start the application"
-            echo ""
-            echo "Note: Make sure your PipeWire virtual sinks are set up."
-            echo "Run this once to set up virtual sinks if not already done:"
-            echo "  python install_pipewire_config.py"
-            echo "  # Or manually: systemctl --user restart pipewire pipewire-pulse"
-          '';
-        };
-        
-        packages.default = pythonEnv;
-        
-        apps.default = {
-          type = "app";
-          program = "${pythonEnv}/bin/real-time-translator";
-        };
 
-        # User-level systemd units via home-manager
-        homeManagerConfiguration = {
-          # Import home-manager modules
-          imports = [ home-manager.homeManagerModules.home-manager ];
-          
-          # Home manager configuration
-          home.stateVersion = "24.11"; # Set this to your NixOS version
-          
-          # Include the package in home.packages for easy access
-          home.packages = [ pythonEnv ];
-          
-          # Configure systemd user services
-          systemd.user.services = {
-            "rt-capture" = {
-              description = "RT Capture service";
-              requires = [ "rt-capture.socket" ];
-              after = [ "rt-capture.socket" ];
-              serviceConfig = {
-                Type = "simple";
-                ExecStart = "${pkgs.python312}/bin/python -m src.capture.capture_service --socket-path %t/rt-capture.sock";
-                Restart = "always";
-                RestartSec = 5;
+          # Runtime wrapper for services
+          serviceWrapper = name: modulePath: pkgs.writeShellApplication {
+            name = "rt-${name}-service";
+            runtimeInputs = [ pythonEnv pkgs.coreutils ];
+            text = ''
+              export PYTHONPATH="${pythonEnv}/lib/python3.12/site-packages:$PYTHONPATH"
+              exec ${pythonEnv.interpreter} -m ${modulePath} "$@"
+            '';
+          };
+
+          # Create service wrappers
+          captureService = serviceWrapper "capture" "src.capture.capture_service";
+          playbackService = serviceWrapper "playback" "src.playback.playback_service";
+          translateService = serviceWrapper "translate" "src.translate.translate_service";
+          ttsService = serviceWrapper "tts" "src.tts.tts_service";
+          whisperService = serviceWrapper "whisper" "src.whisper.whisper_service";
+        in
+        {
+          options.rt-translator = {
+            enable = pkgs.lib.mkEnableOption "Real-time speech translation system";
+          };
+
+          config = pkgs.lib.mkIf config.rt-translator.enable {
+            # Include the package in home.packages for easy access
+            home.packages = [ 
+              pythonEnv
+              # Runtime wrappers
+              captureService
+              playbackService
+              translateService
+              ttsService
+              whisperService
+            ];
+
+            # Configure systemd user services
+            systemd.user.services = {
+              "rt-capture" = {
+                description = "RT Capture service";
+                requires = [ "rt-capture.socket" ];
+                after = [ "rt-capture.socket" ];
+                path = [ pythonEnv ];
+                serviceConfig = {
+                  Type = "simple";
+                  ExecStart = "${captureService}/bin/rt-capture-service --socket-path %t/rt-capture.sock";
+                  Restart = "always";
+                  RestartSec = 5;
+                  Environment = [
+                    "PYTHONPATH=${pythonEnv}/${pythonEnv.sitePackages}"
+                  ];
+                };
+                install = {
+                  WantedBy = [ "default.target" ];
+                  Also = [ "rt-capture.socket" ];
+                };
               };
-              install = {
-                WantedBy = [ "default.target" ];
-                Also = [ "rt-capture.socket" ];
+              
+              "rt-playback" = {
+                description = "RT Playback service";
+                requires = [ "rt-playback.socket" ];
+                after = [ "rt-playback.socket" ];
+                path = [ pythonEnv ];
+                serviceConfig = {
+                  Type = "simple";
+                  ExecStart = "${playbackService}/bin/rt-playback-service --socket-path %t/rt-playback.sock";
+                  Restart = "always";
+                  RestartSec = 5;
+                  Environment = [
+                    "PYTHONPATH=${pythonEnv}/${pythonEnv.sitePackages}"
+                  ];
+                };
+                install = {
+                  WantedBy = [ "default.target" ];
+                  Also = [ "rt-playback.socket" ];
+                };
+              };
+              
+              "rt-translate" = {
+                description = "RT Translation service";
+                requires = [ "rt-translate.socket" ];
+                after = [ "rt-translate.socket" ];
+                path = [ pythonEnv ];
+                serviceConfig = {
+                  Type = "simple";
+                  ExecStart = "${translateService}/bin/rt-translate-service --socket-path %t/rt-translate.sock";
+                  Restart = "always";
+                  RestartSec = 5;
+                  Environment = [
+                    "PYTHONPATH=${pythonEnv}/${pythonEnv.sitePackages}"
+                  ];
+                };
+                install = {
+                  WantedBy = [ "default.target" ];
+                  Also = [ "rt-translate.socket" ];
+                };
+              };
+              
+              "rt-tts" = {
+                description = "RT TTS service";
+                requires = [ "rt-tts.socket" ];
+                after = [ "rt-tts.socket" ];
+                path = [ pythonEnv ];
+                serviceConfig = {
+                  Type = "simple";
+                  ExecStart = "${ttsService}/bin/rt-tts-service --socket-path %t/rt-tts.sock";
+                  Restart = "always";
+                  RestartSec = 5;
+                  Environment = [
+                    "PYTHONPATH=${pythonEnv}/${pythonEnv.sitePackages}"
+                  ];
+                };
+                install = {
+                  WantedBy = [ "default.target" ];
+                  Also = [ "rt-tts.socket" ];
+                };
+              };
+              
+              "rt-whisper" = {
+                description = "RT Whisper service";
+                requires = [ "rt-whisper.socket" ];
+                after = [ "rt-whisper.socket" ];
+                path = [ pythonEnv ];
+                serviceConfig = {
+                  Type = "simple";
+                  ExecStart = "${whisperService}/bin/rt-whisper-service --socket-path %t/rt-whisper.sock";
+                  Restart = "always";
+                  RestartSec = 5;
+                  Environment = [
+                    "PYTHONPATH=${pythonEnv}/${pythonEnv.sitePackages}"
+                  ];
+                };
+                install = {
+                  WantedBy = [ "default.target" ];
+                  Also = [ "rt-whisper.socket" ];
+                };
+              };
+              
+              "rt-virtual-sinks" = {
+                description = "Create RT Virtual Sinks";
+                after = [ "pipewire.service" ];
+                wants = [ "pipewire.service" ];
+                serviceConfig = {
+                  Type = "oneshot";
+                  ExecStart = "${pkgs.bash}/bin/bash -c \"${pkgs.pipewire}/bin/pactl load-module module-null-sink sink_name=rt_virtual_input sink_properties=device.description='RT Virtual Input' && ${pkgs.pipewire}/bin/pactl load-module module-null-sink sink_name=rt_virtual_output sink_properties=device.description='RT Virtual Output (Microphone)'\"";
+                  RemainAfterExit = "yes";
+                };
+                install = {
+                  WantedBy = [ "default.target" ];
+                };
               };
             };
-            
-            "rt-playback" = {
-              description = "RT Playback service";
-              requires = [ "rt-playback.socket" ];
-              after = [ "rt-playback.socket" ];
-              serviceConfig = {
-                Type = "simple";
-                ExecStart = "${pkgs.python312}/bin/python -m src.playback_service --socket-path %t/rt-playback.sock";
-                Restart = "always";
-                RestartSec = 5;
+
+            # Configure systemd user sockets
+            systemd.user.sockets = {
+              "rt-capture" = {
+                description = "RT Capture socket";
+                wantedBy = [ "sockets.target" ];
+                socketConfig = {
+                  ListenStream = "%t/rt-capture.sock";
+                  SocketMode = "0660";
+                };
               };
-              install = {
-                WantedBy = [ "default.target" ];
-                Also = [ "rt-playback.socket" ];
+              
+              "rt-playback" = {
+                description = "RT Playback socket";
+                wantedBy = [ "sockets.target" ];
+                socketConfig = {
+                  ListenStream = "%t/rt-playback.sock";
+                  SocketMode = "0660";
+                };
               };
-            };
-            
-            "rt-translate" = {
-              description = "RT Translation service";
-              requires = [ "rt-translate.socket" ];
-              after = [ "rt-translate.socket" ];
-              serviceConfig = {
-                Type = "simple";
-                ExecStart = "${pkgs.python312}/bin/python -m src.translate.translate_service --socket-path %t/rt-translate.sock";
-                Restart = "always";
-                RestartSec = 5;
+              
+              "rt-translate" = {
+                description = "RT Translation socket";
+                wantedBy = [ "sockets.target" ];
+                socketConfig = {
+                  ListenStream = "%t/rt-translate.sock";
+                  SocketMode = "0660";
+                };
               };
-              install = {
-                WantedBy = [ "default.target" ];
-                Also = [ "rt-translate.socket" ];
+              
+              "rt-tts" = {
+                description = "RT TTS socket";
+                wantedBy = [ "sockets.target" ];
+                socketConfig = {
+                  ListenStream = "%t/rt-tts.sock";
+                  SocketMode = "0660";
+                };
               };
-            };
-            
-            "rt-tts" = {
-              description = "RT TTS service";
-              requires = [ "rt-tts.socket" ];
-              after = [ "rt-tts.socket" ];
-              serviceConfig = {
-                Type = "simple";
-                ExecStart = "${pkgs.python312}/bin/python -m src.tts.tts_service --socket-path %t/rt-tts.sock";
-                Restart = "always";
-                RestartSec = 5;
-              };
-              install = {
-                WantedBy = [ "default.target" ];
-                Also = [ "rt-tts.socket" ];
-              };
-            };
-            
-            "rt-whisper" = {
-              description = "RT Whisper service";
-              requires = [ "rt-whisper.socket" ];
-              after = [ "rt-whisper.socket" ];
-              serviceConfig = {
-                Type = "simple";
-                ExecStart = "${pkgs.python312}/bin/python -m src.whisper.whisper_service --socket-path %t/rt-whisper.sock";
-                Restart = "always";
-                RestartSec = 5;
-              };
-              install = {
-                WantedBy = [ "default.target" ];
-                Also = [ "rt-whisper.socket" ];
-              };
-            };
-            
-            "rt-virtual-sinks" = {
-              description = "Create RT Virtual Sinks";
-              after = [ "pipewire.service" "pipewire-pulse.service" ];
-              wants = [ "pipewire.service" "pipewire-pulse.service" ];
-              serviceConfig = {
-                Type = "oneshot";
-                ExecStart = "${pkgs.bash}/bin/bash -c \"${pkgs.pulseaudio}/bin/pactl load-module module-null-sink sink_name=rt_virtual_input sink_properties=device.description='RT Virtual Input' && ${pkgs.pulseaudio}/bin/pactl load-module module-null-sink sink_name=rt_virtual_output sink_properties=device.description='RT Virtual Output (Microphone)'\"";
-                RemainAfterExit = "yes";
-              };
-              install = {
-                WantedBy = [ "default.target" ];
+              
+              "rt-whisper" = {
+                description = "RT Whisper socket";
+                wantedBy = [ "sockets.target" ];
+                socketConfig = {
+                  ListenStream = "%t/rt-whisper.sock";
+                  SocketMode = "0660";
+                };
               };
             };
           };
-
-          # Configure systemd user sockets
-          systemd.user.sockets = {
-            "rt-capture" = {
-              description = "RT Capture socket";
-              wantedBy = [ "sockets.target" ];
-              socketConfig = {
-                ListenStream = "%t/rt-capture.sock";
-                SocketMode = "0660";
-              };
-            };
-            
-            "rt-playback" = {
-              description = "RT Playback socket";
-              wantedBy = [ "sockets.target" ];
-              socketConfig = {
-                ListenStream = "%t/rt-playback.sock";
-                SocketMode = "0660";
-              };
-            };
-            
-            "rt-translate" = {
-              description = "RT Translation socket";
-              wantedBy = [ "sockets.target" ];
-              socketConfig = {
-                ListenStream = "%t/rt-translate.sock";
-                SocketMode = "0660";
-              };
-            };
-            
-            "rt-tts" = {
-              description = "RT TTS socket";
-              wantedBy = [ "sockets.target" ];
-              socketConfig = {
-                ListenStream = "%t/rt-tts.sock";
-                SocketMode = "0660";
-              };
-            };
-            
-            "rt-whisper" = {
-              description = "RT Whisper socket";
-              wantedBy = [ "sockets.target" ];
-              socketConfig = {
-                ListenStream = "%t/rt-whisper.sock";
-                SocketMode = "0660";
-              };
-            };
-          };
         };
-      });
+in
+{
+  # Home Manager module
+  homeManagerModules.rt-translator = rtTranslatorModule;
+
+  # System-specific outputs using flake-utils
+} // flake-utils.lib.eachSystem ["x86_64-linux"] (system:
+  let
+    pkgs = nixpkgs.legacyPackages.${system};
+
+    # Python packages
+    pythonPackages = pkgs.python312Packages;
+    
+    # Use the official kokoro package from nixpkgs
+    kokoroPackage = pythonPackages.kokoro;
+    
+    # Create application package using mkDerivation instead of buildPythonPackage
+    appPackage = pkgs.stdenv.mkDerivation {
+      pname = "real-time-translator";
+      version = "0.1.0";
+      src = ./.;
+      
+      nativeBuildInputs = with pkgs; [ makeWrapper python312 ];
+      
+      propagatedBuildInputs = with pythonPackages; [
+        # Core dependencies
+        pyaudio
+        numpy
+        sounddevice
+        
+        # AI and ML
+        torch
+        transformers
+        openai-whisper
+        onnxruntime
+        
+        # Audio processing
+        soundfile
+        librosa
+        pulsectl
+        
+        # Utilities
+        pyyaml
+        python-dotenv
+        loguru
+        
+        # Kokoro TTS dependencies
+        kokoroPackage
+      ];
+      
+      buildPhase = "true"; # Skip build phase
+      
+      installPhase = ''
+        runHook preInstall
+        mkdir -p $out/bin $out/share/real-time-translator
+        
+        # Copy source files, excluding result symlink and .git
+        cp -r $src/* $out/share/real-time-translator/
+        rm -rf $out/share/real-time-translator/.git
+        # Remove result symlink if it exists to avoid broken symlink errors
+        rm -f $out/share/real-time-translator/result
+        
+        # Create wrapper script for the application
+        makeWrapper ${pythonPackages.python.interpreter} $out/bin/real-time-translator \
+          --prefix PYTHONPATH : "$out/share/real-time-translator" \
+          --add-flags "-m src.main"
+      '';
+      
+      doInstallCheck = false;
+    };
+
+    # System dependencies for devShell
+    systemPackages = with pkgs; [
+      # Core system tools
+      just
+      
+      # Qt dependencies for GUI (moved from systemd services)
+      qt6.qtbase
+      qt6.qtwayland
+      xorg.libX11
+      xorg.libXext
+      xorg.libXrender
+      xorg.libXrandr
+      xorg.libXfixes
+      libGL
+      
+      # Development tools
+      nodejs
+      pnpm
+      python312
+      python312Packages.pip
+      python312Packages.virtualenv
+      
+      # Libraries needed for audio processing
+      libffi
+      openssl
+      zlib
+      
+      # Additional system libraries
+      gcc
+      gnumake
+      pkg-config
+      ninja
+      
+      # Audio tools (using pipewire instead of conflicting pulseaudio)
+      pipewire
+      alsa-utils
+    ];
+  in
+  {
+    devShells.default = pkgs.mkShell {
+      buildInputs = systemPackages ++ (with pythonPackages; [
+        # Individual packages instead of the combined pythonEnv that needs building
+        pyaudio
+        numpy
+        sounddevice
+        torch
+        transformers
+        openai-whisper
+        onnxruntime
+        soundfile
+        librosa
+        pulsectl
+        pyyaml
+        python-dotenv
+        loguru
+        kokoroPackage
+        pytest
+      ]);
+      
+      # Environment variables
+      PIP_DISABLE_PIP_VERSION_CHECK = "1";
+      HF_HOME = "$HOME/.cache/huggingface";
+      TRANSFORMERS_CACHE = "$HOME/.cache/transformers";
+      HF_HUB_CACHE = "$HOME/.cache/huggingface/hub";
+      
+      # Setup hooks
+      shellHook = ''
+        export PYTHONPATH="$PWD:$PYTHONPATH"
+        export HF_HOME="$HOME/.cache/huggingface"
+        export TRANSFORMERS_CACHE="$HOME/.cache/transformers"
+        export HF_HUB_CACHE="$HOME/.cache/huggingface/hub"
+        
+        # Create cache directories
+        mkdir -p "$HOME/.cache/huggingface"
+        mkdir -p "$HOME/.cache/transformers"
+        mkdir -p "$HOME/.cache/huggingface/hub"
+        
+        echo "Real-time Translator development environment ready!"
+        echo "Use 'python3 -m src.main' to start the application"
+        echo ""
+        echo "Note: Make sure your PipeWire virtual sinks are set up."
+        echo "Run this once to set up virtual sinks if not already done:"
+        echo "  python install_pipewire_config.py"
+        echo "  # Or manually: systemctl --user restart pipewire pipewire-pulse"
+      '';
+    };
+    
+    packages.default = appPackage;
+    
+    apps.default = {
+      type = "app";
+      program = "${appPackage}/bin/real-time-translator";
+    };
+  }
+);
 }
