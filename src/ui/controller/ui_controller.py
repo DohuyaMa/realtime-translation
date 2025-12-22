@@ -4,7 +4,7 @@ from loguru import logger
 import threading
 import time
 
-from ...controller import ConcreteTranslatorController
+from ...controller.translator_controller import ConcreteTranslatorController
 from ...controller.controller import Device
 
 

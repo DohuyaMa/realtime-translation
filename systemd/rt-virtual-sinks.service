@@ -5,8 +5,8 @@ Wants=pipewire.service pipewire-pulse.service
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/pactl load-module module-null-sink sink_name=rt_virtual_input sink_properties=device.description="RT Virtual Input"
-ExecStart=/usr/bin/pactl load-module module-null-sink sink_name=rt_virtual_output sink_properties=device.description="RT Virtual Output (Microphone)"
+ExecStart=/run/wrappers/bin/pactl load-module module-null-sink sink_name=rt_virtual_input sink_properties=device.description="RT Virtual Input"
+ExecStart=/run/wrappers/bin/pactl load-module module-null-sink sink_name=rt_virtual_output sink_properties=device.description="RT Virtual Output (Microphone)"
 # The monitor source rt_virtual_output.monitor is automatically created by PipeWire
 # Teams/Zoom will use this as the microphone input
 RemainAfterExit=yes

@@ -3,41 +3,31 @@
 import sys
 import os
 import argparse
-import subprocess
 from loguru import logger
 import yaml
+from PySide6.QtWidgets import QApplication
 
 # Import the new architecture components
-from .controller import ConcreteTranslatorController
+from .controller.translator_controller import ConcreteTranslatorController
 from .adapters import DirectAdapter
 from .ui.widgets.main_window import MainWindow
+from .ui.controller.ui_controller import UIController
 
 
-def ensure_pipewire_nodes():
-    """Ensure that the required PipeWire nodes exist."""
-    try:
-        # Check for sinks
-        result = subprocess.check_output(
-            ["pactl", "list", "sinks", "short"],
-            text=True
-        )
-        if "rt_virtual_input" not in result or "rt_virtual_output" not in result:
-            sys.exit("Virtual PipeWire sinks not found. Please set up PipeWire configuration first.")
+def create_adapter(mode: str = "direct", **kwargs):
+    """Create the appropriate adapter based on the mode.
+    
+    Args:
+        mode: Adapter mode (direct or ipc)
+        **kwargs: Additional arguments to pass to the adapter
         
-        # Check for sources (monitors)
-        result = subprocess.check_output(
-            ["pactl", "list", "sources", "short"],
-            text=True
-        )
-        if "rt_virtual_output.monitor" not in result:
-            sys.exit("Virtual PipeWire source (monitor) not found. Please set up PipeWire configuration first.")
-            
-        logger.info("PipeWire nodes verified successfully")
-        
-    except subprocess.CalledProcessError as e:
-        sys.exit(f"Failed to check PipeWire nodes: {e}")
-    except FileNotFoundError:
-        sys.exit("pactl command not found. Please ensure PipeWire is installed.")
+    Returns:
+        An adapter instance
+    """
+    if mode == "direct":
+        return DirectAdapter(**kwargs)
+    raise ValueError(f"Unknown adapter mode: {mode}")
+
 
 def setup_logging(log_level: str = "INFO"):
     """Set up logging configuration.
@@ -64,6 +54,7 @@ def setup_logging(log_level: str = "INFO"):
         retention="1 week",
         level=log_level
     )
+
 
 def load_config() -> dict:
     """Load application configuration.
@@ -106,6 +97,7 @@ def load_config() -> dict:
     
     return config
 
+
 def parse_args():
     """Parse command line arguments.
     
@@ -134,19 +126,19 @@ def parse_args():
         help="Path to custom config file"
     )
     
+    parser.add_argument(
+        "--mode",
+        type=str,
+        default="direct",
+        choices=["direct", "ipc"],
+        help="Adapter mode (direct or ipc)"
+    )
+    
     return parser.parse_args()
+
 
 def main():
     """Main application entry point."""
-    # Check PipeWire nodes before proceeding
-    ensure_pipewire_nodes()
-    
-    # Set up HuggingFace environment variables to avoid PEP 668 issues in Nix
-    import os
-    os.environ.setdefault("HF_HOME", os.path.expanduser("~/real-time-translator-cache/huggingface"))
-    os.environ.setdefault("TRANSFORMERS_CACHE", os.path.expanduser("~/real-time-translator-cache/transformers"))
-    os.environ.setdefault("HF_HUB_CACHE", os.path.expanduser("~/real-time-translator-cache/huggingface/hub"))
-    
     # Parse command line arguments
     args = parse_args()
     
@@ -173,21 +165,25 @@ def main():
             except Exception as e:
                 logger.error(f"Error loading custom config file: {e}")
         
+        # Create QApplication before creating the window
+        app = QApplication(sys.argv)
+        
         # Create and show main window with controller
-        adapter = DirectAdapter()
-        controller = ConcreteTranslatorController(adapter)
-        window = MainWindow(controller=controller)
+        adapter = create_adapter(args.mode)
+        backend_controller = ConcreteTranslatorController(adapter)
+        ui_controller = UIController(backend_controller)
+        window = MainWindow(controller=ui_controller)
         
         if not config['ui']['start_minimized']:
             window.show()
         
         # Start application event loop
-        app = window.app_instance  # Get the QApplication instance from MainWindow
         sys.exit(app.exec())
         
     except Exception as e:
         logger.error(f"Application error: {e}")
         sys.exit(1)
+
 
 if __name__ == "__main__":
     main()

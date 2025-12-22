@@ -1,0 +1,16 @@
+[Unit]
+Description=Real-time Translator Application
+After=graphical-session.target pipewire.service
+Wants=graphical-session.target
+Requires=rt-virtual-sinks.service
+
+[Service]
+Type=exec
+ExecStart=%h/.nix-profile/bin/python -m src.main
+Restart=on-failure
+RestartSec=5
+Environment="PATH=%h/.nix-profile/bin:/run/wrappers/bin:/etc/profiles/per-user/%h/bin:/nix/var/nix/profiles/default/bin:/run/current-system/sw/bin"
+Environment="PYTHONPATH=%h/.nix-profile/bin:/run/wrappers/bin:/etc/profiles/per-user/%h/bin:/nix/var/nix/profiles/default/bin:/run/current-system/sw/bin"
+
+[Install]
+WantedBy=default.target

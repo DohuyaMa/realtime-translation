@@ -3,14 +3,24 @@ from typing import Dict, List
 from loguru import logger
 
 from ..translation_system import TranslationSystem
-from ..controller.controller import TranslatorController, Device
+from ..controller.controller import Device
+from ..core.preflight.pipewire import PipeWirePreflight
+from ..core.env import setup_ml_env
 
 
 class DirectAdapter:
     """Direct adapter that wraps the existing TranslationSystem implementation."""
     
-    def __init__(self, source_lang: str = "auto", target_lang: str = "en", sample_rate: int = 16000):
+    def __init__(self, source_lang: str = "auto", target_lang: str = "en", sample_rate: int = 16000, skip_preflight: bool = False):
         """Initialize the DirectAdapter with a TranslationSystem instance."""
+        # Check PipeWire availability before proceeding (unless explicitly skipped)
+        if not skip_preflight:
+            if not PipeWirePreflight.check():
+                raise RuntimeError("PipeWire preflight check failed. Please ensure PipeWire virtual sinks are set up.")
+        
+        # Set up environment variables
+        setup_ml_env()
+        
         self.translation_system = TranslationSystem(
             source_lang=source_lang,
             target_lang=target_lang,

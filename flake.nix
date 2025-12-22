@@ -33,6 +33,7 @@
             transformers
             openai-whisper
             onnxruntime
+            pyside6
             
             # Audio processing
             soundfile
@@ -72,7 +73,7 @@
 
           config = pkgs.lib.mkIf config.rt-translator.enable {
             # Include the package in home.packages for easy access
-            home.packages = [ 
+            home.packages = [
               pythonEnv
               # Runtime wrappers
               captureService
@@ -80,6 +81,9 @@
               translateService
               ttsService
               whisperService
+              # Pipewire utilities
+              pkgs.pipewire
+              pkgs.pulseaudio  # for pactl
             ];
 
             # Configure systemd user services
@@ -197,7 +201,45 @@
                   WantedBy = [ "default.target" ];
                 };
               };
+              
+              "rt-app" = {
+                description = "Real-time Translator Application";
+                after = [ "graphical-session.target" "pipewire.service" "rt-virtual-sinks.service" ];
+                wants = [ "graphical-session.target" ];
+                requires = [ "rt-virtual-sinks.service" ];
+                path = [ pythonEnv pkgs.pipewire pkgs.pulseaudio ];
+                serviceConfig = {
+                  Type = "simple";
+                  ExecStart = "${pythonEnv.interpreter} -m src.main";
+                  Restart = "on-failure";
+                  RestartSec = 5;
+                  Environment = [
+                    "PYTHONPATH=${pythonEnv}/${pythonEnv.sitePackages}"
+                  ];
+                };
+                install = {
+                  WantedBy = [ "default.target" ];
+                };
+              };
             };
+            
+            # Ensure pipewire is properly configured in the user environment
+            xdg.configFile."pipewire/pipewire.conf.d/99-real-time-translator.conf".text = ''
+              context.modules = [
+                { name = "libpipewire-module-rtkit" }
+                { name = "libpipewire-module-protocol-native" }
+                { name = "libpipewire-module-protocol-pulse" }
+                { name = "libpipewire-module-protocol-simple" }
+                { name = "libpipewire-module-spa-device-factory" }
+                { name = "libpipewire-module-spa-node-factory" }
+                { name = "libpipewire-module-client-node" }
+                { name = "libpipewire-module-client-device" }
+                { name = "libpipewire-module-adapter" }
+                { name = "libpipewire-module-access" }
+                { name = "libpipewire-module-metadata" }
+                { name = "libpipewire-module-portal" }
+              ]
+            '';
 
             # Configure systemd user sockets
             systemd.user.sockets = {
@@ -271,7 +313,6 @@ in
       src = ./.;
       
       nativeBuildInputs = with pkgs; [ makeWrapper python312 ];
-      
       propagatedBuildInputs = with pythonPackages; [
         # Core dependencies
         pyaudio
@@ -283,7 +324,9 @@ in
         transformers
         openai-whisper
         onnxruntime
+        pyside6
         
+        # Audio processing
         # Audio processing
         soundfile
         librosa
@@ -353,8 +396,9 @@ in
       ninja
       
       # Audio tools (using pipewire instead of conflicting pulseaudio)
-      pipewire
-      alsa-utils
+      pkgs.pipewire
+      pkgs.pulseaudio      # for pactl compatibility
+      pkgs.alsa-utils
     ];
   in
   {
@@ -368,6 +412,7 @@ in
         transformers
         openai-whisper
         onnxruntime
+        pyside6
         soundfile
         librosa
         pulsectl

@@ -1,0 +1,1 @@
+"""Preflight checks for the real-time translation system."""

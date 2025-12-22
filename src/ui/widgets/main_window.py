@@ -1,18 +1,18 @@
 """Refactored main window for the real-time translation application using controller pattern."""
-from PyQt6.QtWidgets import (
+from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QComboBox, QPushButton, QLabel, QProgressBar,
     QCheckBox, QGroupBox, QSystemTrayIcon, QMenu,
     QFrame, QSplitter, QApplication
 )
-from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QIcon, QAction
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QIcon, QAction
 import sys
 from loguru import logger
 from typing import Optional, Dict
 
 from ..controller import UIController
-from ...controller import ConcreteTranslatorController
+from ...controller.translator_controller import ConcreteTranslatorController
 from ...adapters import DirectAdapter
 from .status_logger import StatusLogger, StatusManager
 from .service_status_panel import ServiceStatusPanel
@@ -23,19 +23,8 @@ class MainWindow(QMainWindow):
     def __init__(self, controller: Optional[UIController] = None):
         super().__init__()
         
-        # Store reference to QApplication
-        self.app_instance = QApplication.instance()
-        if self.app_instance is None:
-            self.app_instance = QApplication([])
-        
         # UI controller (abstraction over backend)
         self.ui_controller: Optional[UIController] = controller
-        
-        # If no controller is provided, create a default one with DirectAdapter
-        if self.ui_controller is None:
-            adapter = DirectAdapter()
-            backend_controller = ConcreteTranslatorController(adapter)
-            self.ui_controller = UIController(backend_controller)
         
         # Status manager for separating status display from logging
         self.status_logger = StatusLogger()
@@ -411,7 +400,7 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'tray_icon'):
             self.tray_icon.hide()
         # Use QApplication.quit() instead of sys.exit(0) as per context recommendations
-        from PyQt6.QtWidgets import QApplication
+        from PySide6.QtWidgets import QApplication
         app = QApplication.instance()
         if app is not None:
             app.quit()
