@@ -5,7 +5,7 @@ This document explains the dependencies and setup process using the Nix package 
 ## Dependencies Analysis
 
 ### Python Dependencies
-- **PyQt5**: GUI framework for the application interface
+- **PySide6**: GUI framework for the application interface
 - **pyaudio**: Audio input/output handling
 - **numpy**: Numerical operations for audio processing
 - **sounddevice**: Cross-platform audio I/O

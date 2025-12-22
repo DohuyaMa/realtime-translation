@@ -8,8 +8,8 @@ import os
 # Add the src directory to the Python path so we can import our modules
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
-from ..controller import ConcreteTranslatorController
-from ..adapters import DirectAdapter
+from src.controller import ConcreteTranslatorController
+from src.adapters import DirectAdapter
 
 
 class KirigamiController(QObject):

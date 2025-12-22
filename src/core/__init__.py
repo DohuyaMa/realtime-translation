@@ -1,0 +1,1 @@
+"""Core components for the real-time translation system."""

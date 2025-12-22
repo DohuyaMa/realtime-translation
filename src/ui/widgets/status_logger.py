@@ -1,10 +1,9 @@
 """Status and logging component for the real-time translation system."""
-from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QTextEdit, 
-    QPushButton, QLabel, QSplitter
+from PySide6.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout,
+    QPushButton, QLabel, QSplitter, QPlainTextEdit
 )
-from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QTextCursor
+from PySide6.QtCore import Qt, QTimer
 from typing import List, Tuple
 import datetime
 from loguru import logger
@@ -41,9 +40,9 @@ class StatusLogger(QWidget):
         self.status_area.setMinimumHeight(30)
         
         # Log view area (scrollable)
-        self.log_view = QTextEdit()
+        self.log_view = QPlainTextEdit()
         self.log_view.setReadOnly(True)
-        self.log_view.setMaximumBlockCount(1000)  # Limit displayed lines
+        # Instead of setMaximumBlockCount, we'll manually manage the content
         
         # Control buttons
         button_layout = QHBoxLayout()
@@ -77,10 +76,17 @@ class StatusLogger(QWidget):
         timestamp = datetime.datetime.now().strftime("%H:%M:%S")
         formatted_message = f"[{timestamp}] {level}: {message}"
         
-        # Add to log view
-        self.log_view.moveCursor(QTextCursor.MoveOperation.End)
-        self.log_view.insertPlainText(formatted_message + "\n")
-        self.log_view.moveCursor(QTextCursor.MoveOperation.End)
+        # Add to log view - QPlainTextEdit doesn't have the same cursor methods
+        self.log_view.appendPlainText(formatted_message)
+        
+        # Manually limit the number of lines to prevent memory issues
+        current_text = self.log_view.toPlainText()
+        lines = current_text.split('\n')
+        if len(lines) > 1000:  # Keep only the last 1000 lines
+            self.log_view.setPlainText('\n'.join(lines[-1000:]))
+        
+        # Scroll to bottom
+        self.log_view.verticalScrollBar().setValue(self.log_view.verticalScrollBar().maximum())
         
         # Store in internal list as well (for potential external access)
         self._messages.append((timestamp, level, message))
@@ -112,7 +118,7 @@ class StatusLogger(QWidget):
     
     def copy_log(self):
         """Copy the log content to clipboard."""
-        clipboard = self.log_view.app().clipboard()
+        clipboard = self.log_view.application().clipboard()
         clipboard.setText(self.log_view.toPlainText())
     
     def get_recent_messages(self, count: int = 10) -> List[Tuple[str, str, str]]:

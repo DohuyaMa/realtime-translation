@@ -1,9 +1,9 @@
 """Service status panel widget for the real-time translation system."""
-from PyQt6.QtWidgets import (
-    QWidget, QGroupBox, QGridLayout, QLabel, 
+from PySide6.QtWidgets import (
+    QWidget, QGroupBox, QGridLayout, QLabel,
     QPushButton, QVBoxLayout
 )
-from PyQt6.QtCore import pyqtSignal
+from PySide6.QtCore import Signal as pyqtSignal
 from typing import Dict, List
 
 
