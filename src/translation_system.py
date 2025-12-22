@@ -174,12 +174,72 @@ class TranslationSystem:
             # Stop capture if client is available
             if self.capture_client:
                 self.capture_client.send_message('stop_capture', {})
-                 
+                  
             self.is_running = False
             logger.info("Translation system stopped")
              
         except Exception as e:
             logger.error(f"Error stopping translation system: {e}")
+
+    def start_service(self, service_name: str):
+        """Start a specific service."""
+        try:
+            if service_name == 'capture' and self.capture_client:
+                self.capture_client.send_message('start_capture', {})
+                logger.info(f"{service_name} service started")
+                return True
+            elif service_name == 'whisper' and self.whisper_client:
+                self.whisper_client.send_message('start_service', {})
+                logger.info(f"{service_name} service started")
+                return True
+            elif service_name == 'translate' and self.translate_client:
+                self.translate_client.send_message('start_service', {})
+                logger.info(f"{service_name} service started")
+                return True
+            elif service_name == 'tts' and self.tts_client:
+                self.tts_client.send_message('start_service', {})
+                logger.info(f"{service_name} service started")
+                return True
+            elif service_name == 'playback' and self.playback_client:
+                self.playback_client.send_message('start_service', {})
+                logger.info(f"{service_name} service started")
+                return True
+            else:
+                logger.warning(f"Service {service_name} not available or client not connected")
+                return False
+        except Exception as e:
+            logger.error(f"Failed to start {service_name} service: {e}")
+            return False
+
+    def stop_service(self, service_name: str):
+        """Stop a specific service."""
+        try:
+            if service_name == 'capture' and self.capture_client:
+                self.capture_client.send_message('stop_capture', {})
+                logger.info(f"{service_name} service stopped")
+                return True
+            elif service_name == 'whisper' and self.whisper_client:
+                self.whisper_client.send_message('stop_service', {})
+                logger.info(f"{service_name} service stopped")
+                return True
+            elif service_name == 'translate' and self.translate_client:
+                self.translate_client.send_message('stop_service', {})
+                logger.info(f"{service_name} service stopped")
+                return True
+            elif service_name == 'tts' and self.tts_client:
+                self.tts_client.send_message('stop_service', {})
+                logger.info(f"{service_name} service stopped")
+                return True
+            elif service_name == 'playback' and self.playback_client:
+                self.playback_client.send_message('stop_service', {})
+                logger.info(f"{service_name} service stopped")
+                return True
+            else:
+                logger.warning(f"Service {service_name} not available or client not connected")
+                return False
+        except Exception as e:
+            logger.error(f"Failed to stop {service_name} service: {e}")
+            return False
 
     def set_languages(self, source_lang: str, target_lang: str = "en"):
         """Set source and target languages.
@@ -251,14 +311,35 @@ class TranslationSystem:
             'target_language': self.target_lang
         }
         
-        if self.capture_client:
+        # Check connection status for each service
+        services = [
+            ('capture', self.capture_client),
+            ('whisper', self.whisper_client),
+            ('translate', self.translate_client),
+            ('tts', self.tts_client),
+            ('playback', self.playback_client)
+        ]
+        
+        for service_name, client in services:
             try:
-                status = self.capture_client.send_message('get_status', {})
-                if status and status.get('status') == 'success':
-                    stats.update(status.get('data', {}))
-            except:
-                pass
-             
+                if client:
+                    # Check if we can communicate with the service
+                    # For now, we'll just check if the client is connected by attempting a simple message
+                    if service_name == 'capture':
+                        status = client.send_message('get_status', {})
+                        if status and status.get('status') == 'success':
+                            stats.update(status.get('data', {}))
+                            stats[f'{service_name}_connected'] = True
+                        else:
+                            stats[f'{service_name}_connected'] = False
+                    else:
+                        # For other services, just check if the client exists and can connect
+                        stats[f'{service_name}_connected'] = True
+                else:
+                    stats[f'{service_name}_connected'] = False
+            except Exception:
+                stats[f'{service_name}_connected'] = False
+              
         return stats
 
     def cleanup(self):
@@ -282,3 +363,24 @@ class TranslationSystem:
     def __del__(self):
         """Cleanup on deletion."""
         self.cleanup()
+    def all_services_connected(self) -> bool:
+        """Check if all services are connected."""
+        return all([
+            self.capture_client is not None,
+            self.whisper_client is not None,
+            self.translate_client is not None,
+            self.tts_client is not None,
+            self.playback_client is not None
+        ])
+
+    def set_input_device(self, device_name: str):
+        """Set the input device for capture service."""
+        if self.capture_client:
+            try:
+                response = self.capture_client.send_message('set_input_device', {
+                    'device_name': device_name
+                })
+                return response
+            except Exception as e:
+                logger.error(f"Failed to set input device: {e}")
+                return None

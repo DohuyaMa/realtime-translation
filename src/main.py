@@ -4,12 +4,13 @@ import sys
 import os
 import argparse
 import subprocess
-from PyQt6.QtWidgets import QApplication
-from PyQt6.QtCore import Qt
 from loguru import logger
 import yaml
 
-from .ui.main_window import MainWindow
+# Import the new architecture components
+from .controller import ConcreteTranslatorController
+from .adapters import DirectAdapter
+from .ui.widgets.main_window import MainWindow
 
 
 def ensure_pipewire_nodes():
@@ -172,21 +173,16 @@ def main():
             except Exception as e:
                 logger.error(f"Error loading custom config file: {e}")
         
-        # Create QApplication
-        app = QApplication(sys.argv)
-        app.setApplicationName("Real-Time Translator")
-        app.setApplicationDisplayName("Real-Time Translator")
-        
-        # Enable High DPI scaling (attributes have changed in PyQt6)
-        # For PyQt6, we'll just skip these attributes as they're handled differently
-        
-        # Create and show main window
-        window = MainWindow()
+        # Create and show main window with controller
+        adapter = DirectAdapter()
+        controller = ConcreteTranslatorController(adapter)
+        window = MainWindow(controller=controller)
         
         if not config['ui']['start_minimized']:
             window.show()
         
         # Start application event loop
+        app = window.app_instance  # Get the QApplication instance from MainWindow
         sys.exit(app.exec())
         
     except Exception as e:
