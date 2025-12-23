@@ -89,7 +89,7 @@
             # Configure systemd user services
             systemd.user.services = {
               "rt-capture" = {
-                description = "RT Capture service";
+                description = "RT-Capture-service";
                 requires = [ "rt-capture.socket" ];
                 after = [ "rt-capture.socket" ];
                 path = [ pythonEnv ];
@@ -109,7 +109,7 @@
               };
               
               "rt-playback" = {
-                description = "RT Playback service";
+                description = "RT-Playback-service";
                 requires = [ "rt-playback.socket" ];
                 after = [ "rt-playback.socket" ];
                 path = [ pythonEnv ];
@@ -129,7 +129,7 @@
               };
               
               "rt-translate" = {
-                description = "RT Translation service";
+                description = "RT-Translate-service";
                 requires = [ "rt-translate.socket" ];
                 after = [ "rt-translate.socket" ];
                 path = [ pythonEnv ];
@@ -149,7 +149,7 @@
               };
               
               "rt-tts" = {
-                description = "RT TTS service";
+                description = "RT-TTS-service";
                 requires = [ "rt-tts.socket" ];
                 after = [ "rt-tts.socket" ];
                 path = [ pythonEnv ];
@@ -169,7 +169,7 @@
               };
               
               "rt-whisper" = {
-                description = "RT Whisper service";
+                description = "RT-Whisper-service";
                 requires = [ "rt-whisper.socket" ];
                 after = [ "rt-whisper.socket" ];
                 path = [ pythonEnv ];
@@ -188,25 +188,10 @@
                 };
               };
               
-              "rt-virtual-sinks" = {
-                description = "Create RT Virtual Sinks";
-                after = [ "pipewire.service" ];
-                wants = [ "pipewire.service" ];
-                serviceConfig = {
-                  Type = "oneshot";
-                  ExecStart = "${pkgs.bash}/bin/bash -c \"${pkgs.pipewire}/bin/pactl load-module module-null-sink sink_name=rt_virtual_input sink_properties=device.description='RT Virtual Input' && ${pkgs.pipewire}/bin/pactl load-module module-null-sink sink_name=rt_virtual_output sink_properties=device.description='RT Virtual Output (Microphone)'\"";
-                  RemainAfterExit = "yes";
-                };
-                install = {
-                  WantedBy = [ "default.target" ];
-                };
-              };
-              
               "rt-app" = {
                 description = "Real-time Translator Application";
-                after = [ "graphical-session.target" "pipewire.service" "rt-virtual-sinks.service" ];
+                after = [ "graphical-session.target" "pipewire.service" ];
                 wants = [ "graphical-session.target" ];
-                requires = [ "rt-virtual-sinks.service" ];
                 path = [ pythonEnv pkgs.pipewire pkgs.pulseaudio ];
                 serviceConfig = {
                   Type = "simple";
@@ -224,27 +209,33 @@
             };
             
             # Ensure pipewire is properly configured in the user environment
-            xdg.configFile."pipewire/pipewire.conf.d/99-real-time-translator.conf".text = ''
+            xdg.configFile."pipewire/pipewire.conf.d/30-rt-virtual-sinks.conf".text = ''
               context.modules = [
-                { name = "libpipewire-module-rtkit" }
-                { name = "libpipewire-module-protocol-native" }
-                { name = "libpipewire-module-protocol-pulse" }
-                { name = "libpipewire-module-protocol-simple" }
-                { name = "libpipewire-module-spa-device-factory" }
-                { name = "libpipewire-module-spa-node-factory" }
-                { name = "libpipewire-module-client-node" }
-                { name = "libpipewire-module-client-device" }
-                { name = "libpipewire-module-adapter" }
-                { name = "libpipewire-module-access" }
-                { name = "libpipewire-module-metadata" }
-                { name = "libpipewire-module-portal" }
+                {
+                  name = libpipewire-module-null-sink
+                  args = {
+                    node.name = "rt_virtual_input"
+                    node.description = "RT-Virtual-Input"
+                    media.class = "Audio/Sink"
+                    stream.props = { audio.position = [ FL FR ]; }
+                  }
+                }
+                {
+                  name = libpipewire-module-null-sink
+                  args = {
+                    node.name = "rt_virtual_output"
+                    node.description = "RT-Virtual-Output"
+                    media.class = "Audio/Sink"
+                    stream.props = { audio.position = [ FL FR ]; }
+                  }
+                }
               ]
             '';
 
             # Configure systemd user sockets
             systemd.user.sockets = {
               "rt-capture" = {
-                description = "RT Capture socket";
+                description = "RT-Capture-socket";
                 wantedBy = [ "sockets.target" ];
                 socketConfig = {
                   ListenStream = "%t/rt-capture.sock";
@@ -253,7 +244,7 @@
               };
               
               "rt-playback" = {
-                description = "RT Playback socket";
+                description = "RT-Playback-socket";
                 wantedBy = [ "sockets.target" ];
                 socketConfig = {
                   ListenStream = "%t/rt-playback.sock";
@@ -262,7 +253,7 @@
               };
               
               "rt-translate" = {
-                description = "RT Translation socket";
+                description = "RT-Translation-socket";
                 wantedBy = [ "sockets.target" ];
                 socketConfig = {
                   ListenStream = "%t/rt-translate.sock";
@@ -271,7 +262,7 @@
               };
               
               "rt-tts" = {
-                description = "RT TTS socket";
+                description = "RT-TTS-socket";
                 wantedBy = [ "sockets.target" ];
                 socketConfig = {
                   ListenStream = "%t/rt-tts.sock";
@@ -280,7 +271,7 @@
               };
               
               "rt-whisper" = {
-                description = "RT Whisper socket";
+                description = "RT-Whisper-socket";
                 wantedBy = [ "sockets.target" ];
                 socketConfig = {
                   ListenStream = "%t/rt-whisper.sock";
@@ -294,6 +285,9 @@ in
 {
   # Home Manager module
   homeManagerModules.rt-translator = rtTranslatorModule;
+
+  # NixOS module for production deployment
+  nixosModules.virtual-sinks = import ./nixosModules/virtual-sinks.nix;
 
   # System-specific outputs using flake-utils
 } // flake-utils.lib.eachSystem ["x86_64-linux"] (system:
@@ -396,9 +390,9 @@ in
       ninja
       
       # Audio tools (using pipewire instead of conflicting pulseaudio)
-      pkgs.pipewire
-      pkgs.pulseaudio      # for pactl compatibility
-      pkgs.alsa-utils
+      pipewire
+      pulseaudio      # for pactl compatibility
+      alsa-utils
     ];
   in
   {
@@ -428,27 +422,32 @@ in
       HF_HOME = "$HOME/.cache/huggingface";
       TRANSFORMERS_CACHE = "$HOME/.cache/transformers";
       HF_HUB_CACHE = "$HOME/.cache/huggingface/hub";
-      
-      # Setup hooks
-      shellHook = ''
-        export PYTHONPATH="$PWD:$PYTHONPATH"
-        export HF_HOME="$HOME/.cache/huggingface"
-        export TRANSFORMERS_CACHE="$HOME/.cache/transformers"
-        export HF_HUB_CACHE="$HOME/.cache/huggingface/hub"
-        
-        # Create cache directories
-        mkdir -p "$HOME/.cache/huggingface"
-        mkdir -p "$HOME/.cache/transformers"
-        mkdir -p "$HOME/.cache/huggingface/hub"
-        
-        echo "Real-time Translator development environment ready!"
-        echo "Use 'python3 -m src.main' to start the application"
-        echo ""
-        echo "Note: Make sure your PipeWire virtual sinks are set up."
-        echo "Run this once to set up virtual sinks if not already done:"
-        echo "  python install_pipewire_config.py"
-        echo "  # Or manually: systemctl --user restart pipewire pipewire-pulse"
-      '';
+             # Setup hooks
+             shellHook = ''
+               export PYTHONPATH="$PWD:$PYTHONPATH"
+               export HF_HOME="$HOME/.cache/huggingface"
+               export TRANSFORMERS_CACHE="$HOME/.cache/transformers"
+               export HF_HUB_CACHE="$HOME/.cache/huggingface/hub"
+               
+               # Create cache directories
+               mkdir -p "$HOME/.cache/huggingface"
+               mkdir -p "$HOME/.cache/transformers"
+               mkdir -p "$HOME/.cache/huggingface/hub"
+               
+               # Restart PipeWire and create virtual sinks for devShell
+               # (devShell is isolated and doesn't use systemd user services)
+               systemctl --user restart pipewire pipewire-pulse || true
+               pactl load-module module-null-sink sink_name=rt_virtual_input sink_properties=device.description="RT-Virtual-Input" || true
+               pactl load-module module-null-sink sink_name=rt_virtual_output sink_properties=device.description="RT-Virtual-Output" || true
+               
+               echo "Real-time Translator development environment ready!"
+               echo "Use 'python3 -m src.main' to start the application"
+               echo ""
+               echo "PipeWire virtual sinks have been created:"
+               echo "  - rt_virtual_input (RT-Virtual-Input)"
+               echo "  - rt_virtual_output (RT-Virtual-Output)"
+               echo "These are available for audio routing in the development environment."
+             '';
     };
     
     packages.default = appPackage;
