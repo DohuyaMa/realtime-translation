@@ -73,8 +73,14 @@ class TranslationSystem:
                 self.playback_client.connect()
                 logger.info("Connected to all modular services")
             except Exception as e:
-                logger.error(f"Failed to connect to services: {e}")
+                logger.warning(f"Failed to connect to services: {e}")
                 # We'll continue but services need to be started separately
+                # Set clients to None if connection fails to avoid errors later
+                self.capture_client = None
+                self.whisper_client = None
+                self.translate_client = None
+                self.tts_client = None
+                self.playback_client = None
                 
         except Exception as e:
             logger.error(f"Failed to initialize components: {e}")

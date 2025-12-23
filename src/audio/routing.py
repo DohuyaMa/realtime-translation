@@ -43,8 +43,8 @@ class AudioRouter:
                         {
                             'name': s.name,
                             'description': s.description,
-                            'channels': s.channel_count,
-                            'sample_rate': s.rate
+                            'channels': getattr(s, 'channel_count', 2),
+                            'sample_rate': getattr(s, 'rate', 48000)
                         }
                         for s in sources
                     ],
@@ -52,8 +52,8 @@ class AudioRouter:
                         {
                             'name': s.name,
                             'description': s.description,
-                            'channels': s.channel_count,
-                            'sample_rate': s.rate
+                            'channels': getattr(s, 'channel_count', 2),
+                            'sample_rate': getattr(s, 'rate', 48000)
                         }
                         for s in sinks
                     ]
@@ -164,15 +164,15 @@ class AudioRouter:
             return {'active': False, 'latency_ms': 0, 'buffer_size': 0}
             
         try:
-            latency_us = device.latency
-            buffer_size = device.configured_latency
+            latency_us = getattr(device, 'latency', 0)
+            buffer_size = getattr(device, 'configured_latency', 0)
             
             return {
                 'active': True,
                 'latency_ms': latency_us / 1000 if latency_us else 0,
                 'buffer_size': buffer_size,
-                'sample_rate': device.rate,
-                'channels': device.channel_count
+                'sample_rate': getattr(device, 'rate', 48000),
+                'channels': getattr(device, 'channel_count', 2)
             }
         except Exception as e:
             logger.error(f"Failed to get device stats: {e}")
