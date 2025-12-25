@@ -48,7 +48,7 @@ nix develop
 ```
 
 This will provide:
-- Python 3.12 with all required packages including kokoro TTS
+- Python 3.13 with all required packages including kokoro TTS
 - System tools (git, docker, nodejs, etc.)
 - Audio subsystem tools
 - AI/ML tools (ollama)
@@ -105,10 +105,17 @@ just ollama-pull-models
 
 ## Development Notes
 
-The Nix setup uses Poetry2Nix approach to handle Python dependencies. The flake.nix file defines:
+The Nix setup uses a modular approach with flake-parts to handle the build configuration. The main flake.nix file imports from the modular structure in `flake-global/`. This approach separates concerns and makes the configuration more maintainable.
+
+The flake.nix file defines:
 - A Python environment with all required packages
 - System dependencies needed for audio processing
 - Development tools for building and testing
 - Runtime services needed by the application
+
+The modular structure includes:
+- `flake-global/prod/`: Production-specific configurations
+- `flake-global/dev/`: Development-specific configurations
+- `flake-global/home-manager-module.nix`: Home Manager module for the application
 
 The development shell provides all necessary tools for development, including Python packages, system libraries, and development utilities.

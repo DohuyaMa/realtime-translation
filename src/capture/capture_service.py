@@ -12,6 +12,7 @@ import sys
 import base64
 
 from ..common.ipc import IPCServer
+from ..status_logger import StatusManager
 
 
 class AudioCaptureService:
@@ -54,11 +55,16 @@ class AudioCaptureService:
         self.audio_queue = queue.Queue(maxsize=5)
         self.process_thread: Optional[threading.Thread] = None
         
+        # Status manager
+        self.status = StatusManager()
+        
         # Monitoring
         self.peak_level = 0.0
         self.rms_level = 0.0
         
         logger.info(f"Audio capture service initialized: {sample_rate}Hz, {channels} channels")
+        self.status.log_info(f"Audio capture service initialized: {sample_rate}Hz, {channels} channels")
+        self.status.set_status("Initializing capture device...")
     
     def ensure_pipewire_nodes(self):
         """Ensure that the required PipeWire nodes exist."""
@@ -87,6 +93,8 @@ class AudioCaptureService:
         self.ipc_server.start()
         
         logger.info("Audio capture service started")
+        self.status.set_status("Ready to capture audio...")
+        self.status.log_info("Audio capture service started")
     
     def stop(self):
         """Stop the audio capture service."""
@@ -105,6 +113,7 @@ class AudioCaptureService:
         """PyAudio callback function."""
         if status:
             logger.warning(f"Audio callback status: {status}")
+            self.status.log_warning(f"Audio callback status: {status}")
             
         try:
             audio_data = np.frombuffer(in_data, dtype=np.float32)
@@ -114,11 +123,14 @@ class AudioCaptureService:
             
             if not self.audio_queue.full():
                 self.audio_queue.put(audio_data)
+                self.status.log_debug(f"Captured frame size={len(audio_data)}")
             else:
                 logger.warning("Audio queue full, dropping frame")
+                self.status.log_warning("Audio queue full, dropping frame")
                 
         except Exception as e:
             logger.error(f"Error processing audio data: {e}")
+            self.status.log_error(f"Error processing audio data: {e}")
         
         return (None, pyaudio.paContinue)
     
@@ -166,6 +178,8 @@ class AudioCaptureService:
             
             self.is_running = True
             logger.info("Audio capture started")
+            self.status.set_status("Capturing audio...")
+            self.status.log_info("Audio capture started")
             
             # Start processing thread
             self.process_thread = threading.Thread(target=self._process_audio)
@@ -176,6 +190,7 @@ class AudioCaptureService:
             
         except Exception as e:
             logger.error(f"Failed to start audio capture: {e}")
+            self.status.log_error(f"Failed to start audio capture: {e}")
             return {"status": "error", "message": str(e)}
     
     def _handle_stop_capture(self, message: Dict) -> Dict[str, Any]:
@@ -191,8 +206,11 @@ class AudioCaptureService:
                 self.stream.close()
             except Exception as e:
                 logger.error(f"Error stopping audio stream: {e}")
+                self.status.log_error(f"Error stopping audio stream: {e}")
         
         logger.info("Audio capture stopped")
+        self.status.set_status("Capture stopped")
+        self.status.log_info("Audio capture stopped")
         return {"status": "success", "message": "Capture stopped"}
     
     def _handle_get_status(self, message: Dict) -> Dict[str, Any]:
@@ -240,6 +258,9 @@ def main():
         sample_rate=args.sample_rate,
         channels=args.channels
     )
+    
+    # Log service initialization
+    logger.info(f"Capture service initialized with socket: {args.socket_path}")
     
     def signal_handler(signum, frame):
         logger.info("Received shutdown signal")

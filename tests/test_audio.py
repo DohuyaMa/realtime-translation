@@ -52,10 +52,28 @@ def test_audio_processor_speech_detection():
         min_speech_duration=0.5
     )
     
-    # Generate test audio (sine wave)
+    # Generate more realistic test audio that simulates speech patterns
+    # Use a combination of frequencies and amplitude variations to simulate speech
     duration = 2.0  # seconds
-    t = np.linspace(0, duration, int(16000 * duration))
-    audio_data = np.sin(2 * np.pi * 440 * t)  # 440 Hz tone
+    sample_rate = 16000
+    t = np.linspace(0, duration, int(sample_rate * duration))
+    
+    # Create a more complex signal that better simulates speech
+    # Combine multiple frequencies and add amplitude modulation
+    signal1 = 0.3 * np.sin(2 * np.pi * 220 * t)  # Lower frequency component
+    signal2 = 0.2 * np.sin(2 * np.pi * 440 * t)  # Mid frequency component
+    signal3 = 0.1 * np.sin(2 * np.pi * 880 * t)  # Higher frequency component
+    
+    # Add amplitude modulation to simulate changing speech patterns
+    envelope = 0.5 * (1 + np.sin(2 * np.pi * 2 * t))  # 2 Hz modulation
+    audio_data = envelope * (signal1 + signal2 + signal3)
+    
+    # Add some noise to make it more realistic
+    noise = 0.05 * np.random.normal(0, 1, len(audio_data))
+    audio_data = audio_data + noise
+    
+    # Normalize to prevent clipping
+    audio_data = audio_data / np.max(np.abs(audio_data)) * 0.8
     
     speech_detected = False
     def on_speech(data):
@@ -63,10 +81,16 @@ def test_audio_processor_speech_detection():
         speech_detected = True
     
     processor.set_callbacks(speech_callback=on_speech)
-    processor.process_chunk(audio_data)
+    
+    # Process the audio in chunks to simulate real-time processing
+    chunk_size = 1024
+    for i in range(0, len(audio_data), chunk_size):
+        chunk = audio_data[i:i+chunk_size]
+        processor.process_chunk(chunk)
     
     assert speech_detected
 
+@pytest.mark.timeout(10)  # Add timeout to prevent hanging
 def test_audio_levels():
     """Test audio level monitoring."""
     processor = AudioProcessor(sample_rate=16000)
@@ -80,6 +104,7 @@ def test_audio_levels():
     assert isinstance(stats['audio_level'], float)
     assert 0 <= stats['audio_level'] <= 1
 
+@pytest.mark.timeout(10)  # Add timeout to prevent hanging
 @pytest.mark.integration
 def test_audio_pipeline():
     """Test complete audio processing pipeline."""

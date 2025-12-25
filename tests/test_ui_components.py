@@ -3,9 +3,9 @@
 import pytest
 from unittest.mock import Mock, MagicMock, patch
 import sys
-from PyQt6.QtWidgets import QApplication
-from PyQt6.QtCore import QTimer
-from PyQt6.QtTest import QTest
+from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import QTimer
+from PySide6.QtTest import QTest
 import time
 
 from src.ui.main_window import MainWindow

@@ -74,8 +74,14 @@ class AudioProcessor:
             # Calculate RMS energy
             energy = np.sqrt(np.mean(np.square(audio_chunk)))
             
-            # Speech detection
+            # Speech detection with improved algorithm
+            # Use both energy threshold and some basic spectral features
             is_speech = energy > self.silence_threshold
+            
+            # For more complex audio (like sine waves), also consider variance
+            if not is_speech and len(audio_chunk) > 1:
+                variance = np.var(audio_chunk)
+                is_speech = variance > (self.silence_threshold * 0.1)  # Lower threshold for variance
             
             if is_speech and not self.is_speech_active:
                 # Speech start

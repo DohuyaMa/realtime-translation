@@ -10,6 +10,7 @@ import base64
 import sys
 
 from ..common.ipc import IPCServer
+from ..status_logger import StatusManager
 
 
 class PlaybackService:
@@ -52,7 +53,12 @@ class PlaybackService:
         self.audio_queue = []
         self.playback_lock = threading.Lock()
         
+        # Status manager
+        self.status = StatusManager()
+        
         logger.info(f"Playback service initialized: {sample_rate}Hz, {channels} channels")
+        self.status.log_info(f"Playback service initialized: {sample_rate}Hz, {channels} channels")
+        self.status.set_status("Initializing playback device...")
     
     def start(self):
         """Start the playback service."""
@@ -75,6 +81,8 @@ class PlaybackService:
         
         self.is_running = True
         logger.info("Playback service started")
+        self.status.set_status("Ready for playback...")
+        self.status.log_info("Playback service started")
     
     def stop(self):
         """Stop the playback service."""
@@ -99,6 +107,9 @@ class PlaybackService:
                 if not audio_data_b64:
                     return {"status": "error", "message": "No audio data provided"}
                 
+                self.status.set_status("Playing audio...")
+                self.status.log_debug(f"Playing chunk size={len(audio_data_b64)}")
+                
                 # Decode base64 audio data
                 audio_bytes = base64.b64decode(audio_data_b64)
                 
@@ -110,9 +121,13 @@ class PlaybackService:
                     try:
                         self.stream.write(audio_array.tobytes())
                         logger.debug(f"Played audio: {len(audio_array)} samples")
+                        self.status.log_debug(f"Played audio: {len(audio_array)} samples")
                     except Exception as e:
                         logger.error(f"Error writing audio to stream: {e}")
+                        self.status.log_error(f"Error writing audio to stream: {e}")
                         return {"status": "error", "message": str(e)}
+                
+                self.status.log_info("Playback finished")
                 
                 return {
                     "status": "success",
@@ -121,6 +136,7 @@ class PlaybackService:
                 
             except Exception as e:
                 logger.error(f"Error playing audio: {e}")
+                self.status.log_error(f"Error playing audio: {e}")
                 return {"status": "error", "message": str(e)}
     
     def _handle_get_status(self, message: Dict) -> Dict[str, Any]:

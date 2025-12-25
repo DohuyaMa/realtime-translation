@@ -8,6 +8,7 @@ import base64
 import sys
 
 from ..common.ipc import IPCServer
+from ..status_logger import StatusManager
 from ..models.tts_engine import TTSEngine
 
 
@@ -40,16 +41,23 @@ class TTSService:
         self.ipc_server.register_handler('play_audio', self._handle_play_audio)
         
         # State
+        # State
         self.is_running = False
         self.processing_lock = threading.Lock()
         
+        # Status manager
+        self.status = StatusManager()
+        
         logger.info("TTS service initialized")
-    
+        self.status.log_info("TTS service initialized")
+        self.status.set_status("Initializing TTS engine...")
     def start(self):
         """Start the TTS service."""
         self.ipc_server.start()
         self.is_running = True
         logger.info("TTS service started")
+        self.status.set_status("Ready for TTS synthesis...")
+        self.status.log_info("TTS service started")
     
     def stop(self):
         """Stop the TTS service."""
@@ -67,6 +75,10 @@ class TTSService:
                 if not text:
                     return {"status": "error", "message": "No text provided"}
                 
+                self.status.set_status("Synthesizing audio...")
+                self.status.log_debug(f"TTS segment length={len(text)}")
+                self.status.log_info(f"Synthesizing text: {text}")
+                
                 # Synthesize speech
                 audio_data = self.tts_engine.synthesize(text, play_audio=False)
                 
@@ -74,6 +86,8 @@ class TTSService:
                 if audio_data is not None:
                     audio_bytes = audio_data.astype(audio_data.dtype).tobytes()
                     audio_b64 = base64.b64encode(audio_bytes).decode('utf-8')
+                    
+                    self.status.log_info("TTS audio generated")
                     
                     return {
                         "status": "success",
@@ -85,10 +99,12 @@ class TTSService:
                         }
                     }
                 else:
+                    self.status.log_error("Failed to synthesize audio")
                     return {"status": "error", "message": "Failed to synthesize audio"}
                 
             except Exception as e:
                 logger.error(f"Error synthesizing text: {e}")
+                self.status.log_error(f"Error synthesizing text: {e}")
                 return {"status": "error", "message": str(e)}
     
     def _handle_play_audio(self, message: Dict) -> Dict[str, Any]:
