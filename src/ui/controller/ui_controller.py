@@ -20,6 +20,8 @@ class UIController:
         self._last_status = {}
         self._polling_thread = None
         self._polling_active = False
+        # Store original adapter to allow reconfiguration
+        self._original_controller = controller
         
     def set_status_callback(self, callback: Callable):
         """Set callback for status updates."""
@@ -191,6 +193,64 @@ class UIController:
                 **audio_levels
             }
             self._update_callback(update_data)
+    
+    def reconfigure_controller(self, use_wyoming=False, wyoming_host="localhost", wyoming_port=10300):
+        """Reconfigure the controller with new Wyoming settings."""
+        try:
+            # Check if the current adapter supports reconfiguration
+            current_adapter = self._controller._adapter
+            
+            if hasattr(current_adapter, 'reconfigure_wyoming'):
+                # Use the reconfigure method if available
+                success = current_adapter.reconfigure_wyoming(
+                    use_wyoming=use_wyoming,
+                    wyoming_host=wyoming_host,
+                    wyoming_port=wyoming_port
+                )
+                return success
+            else:
+                # Fallback to creating a new controller (original behavior)
+                # Get current status before reconfiguring
+                current_status = self._controller.get_status()
+                was_running = current_status.get('running', False)
+                
+                # Stop the current pipeline if it's running
+                if was_running:
+                    self._controller.stop_pipeline()
+                
+                # Get the current languages
+                source_lang = current_status.get('source_language', 'auto')
+                target_lang = current_status.get('target_language', 'en')
+                
+                # Create a new adapter with the Wyoming settings
+                from ...adapters.direct_adapter import DirectAdapter
+                new_adapter = DirectAdapter(
+                    source_lang=source_lang,
+                    target_lang=target_lang,
+                    use_wyoming=use_wyoming,
+                    wyoming_host=wyoming_host,
+                    wyoming_port=wyoming_port
+                )
+                
+                # Create a new controller with the new adapter
+                from ...controller.translator_controller import ConcreteTranslatorController
+                new_controller = ConcreteTranslatorController(new_adapter)
+                
+                # Replace the current controller
+                old_controller = self._controller
+                self._controller = new_controller
+                
+                # If the pipeline was running, start it again with new settings
+                if was_running:
+                    self._controller.start_pipeline()
+                
+                # Clean up the old controller
+                old_controller.cleanup()
+                
+                return True
+        except Exception as e:
+            logger.error(f"Error reconfiguring controller: {e}")
+            return False
     
     def cleanup(self):
         """Clean up resources."""

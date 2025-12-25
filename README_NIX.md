@@ -105,7 +105,7 @@ just ollama-pull-models
 
 ## Development Notes
 
-The Nix setup uses a modular approach with flake-parts to handle the build configuration. The main flake.nix file imports from the modular structure in `flake-global/`. This approach separates concerns and makes the configuration more maintainable.
+The Nix setup uses a modular approach to handle the build configuration. The main flake.nix file imports components from the modular structure in `flake-global/`. This approach separates concerns and makes the configuration more maintainable.
 
 The flake.nix file defines:
 - A Python environment with all required packages
