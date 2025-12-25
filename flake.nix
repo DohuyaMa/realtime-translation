@@ -19,17 +19,19 @@
     flake-utils.lib.eachSystem ["x86_64-linux"] (system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
-        flakeGlobal = flake-global.legacyPackages.${system};
+        # Access packages from flake-global which uses flake-parts
+        # The flake-global uses flake-parts, so outputs are in perSystem
+        flakeGlobalPerSystem = flake-global.legacyPackages.${system} or flake-global.perSystem.${system} or {};
       in
       {
         # Import packages from the modular flake
-        packages = flakeGlobal.packages or {};
+        packages = flakeGlobalPerSystem.packages or {};
         
         # Import devShells from the modular flake
-        devShells = flakeGlobal.devShells or {};
+        devShells = flakeGlobalPerSystem.devShells or {};
         
         # Import apps from the modular flake
-        apps = flakeGlobal.apps or {};
+        apps = flakeGlobalPerSystem.apps or {};
       }
     ) // {
       # Home Manager module
