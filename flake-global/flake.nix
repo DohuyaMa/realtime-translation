@@ -14,7 +14,7 @@
     };
   };
 
-  outputs = { self, nixpkgs, flake-utils, home-manager, flake-parts }:
+  outputs = inputs@{ self, nixpkgs, flake-utils, home-manager, flake-parts, ... }:
     flake-parts.lib.mkFlake { inherit inputs; } {
       systems = [ "x86_64-linux" "aarch64-linux" "aarch64-darwin" "x86_64-darwin" ];
 
@@ -33,11 +33,6 @@
       flake = {
         homeManagerModules = {
           rt-translator = import ./home-manager-module.nix;
-        };
-
-        # NixOS module for production deployment
-        nixosModules = {
-          virtual-sinks = import ../nixosModules/virtual-sinks.nix;
         };
       };
     };
