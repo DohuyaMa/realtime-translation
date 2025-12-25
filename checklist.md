@@ -11,12 +11,12 @@
 ### Python Packages (to add to configuration.nix)
 ```nix
 environment.systemPackages = with pkgs; [
-  python312Packages.onnxruntime
-  python312Packages.numpy
-  python312Packages.colorlog
-  python312Packages.phonemizer
-  python312Packages.sounddevice
-  python312Packages.soundfile
+  python313Packages.onnxruntime
+  python313Packages.numpy
+  python313Packages.colorlog
+  python313Packages.phonemizer
+  python313Packages.sounddevice
+  python313Packages.soundfile
   espeak-ng  # Required for phonemizer
 ];
 ```
@@ -72,12 +72,12 @@ Already configured in system:
     # Existing packages...
     
     # Kokoro dependencies
-    python312Packages.onnxruntime
-    python312Packages.numpy
-    python312Packages.colorlog
-    python312Packages.phonemizer
-    python312Packages.sounddevice
-    python312Packages.soundfile
+    python313Packages.onnxruntime
+    python313Packages.numpy
+    python313Packages.colorlog
+    python313Packages.phonemizer
+    python313Packages.sounddevice
+    python313Packages.soundfile
     espeak-ng
   ];
 

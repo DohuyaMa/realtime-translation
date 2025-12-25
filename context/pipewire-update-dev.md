@@ -809,7 +809,7 @@ systemctl --user restart pipewire pipewire-pulse
 ```nix
 devShells.default = pkgs.mkShell {
   buildInputs = [
-    python312
+    python313
     pkgs.pipewire
     pkgs.pulseaudio   # pactl (DEV only)
     pkgs.alsa-utils

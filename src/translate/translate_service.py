@@ -7,6 +7,7 @@ import time
 import sys
 
 from ..common.ipc import IPCServer
+from ..status_logger import StatusManager
 from transformers import pipeline, AutoTokenizer, AutoModelForSeq2SeqLM
 
 
@@ -43,7 +44,12 @@ class TranslationService:
         self.is_running = False
         self.processing_lock = threading.Lock()
         
+        # Status manager
+        self.status = StatusManager()
+        
         logger.info(f"Translation service initialized: {source_lang}->{target_lang}")
+        self.status.log_info(f"Translation service initialized: {source_lang}->{target_lang}")
+        self.status.set_status("Initializing translation model...")
     
     def _initialize_model(self):
         """Initialize the translation model."""
@@ -65,15 +71,20 @@ class TranslationService:
             )
             
             logger.info(f"Translation model loaded: {model_name}")
+            self.status.log_info(f"Translation model loaded: {model_name}")
+            self.status.set_status("Translation model loaded")
             
         except Exception as e:
             logger.warning(f"Could not load specific translation model: {e}")
+            self.status.log_warning(f"Could not load specific translation model: {e}")
             logger.info("Using default translation model")
+            self.status.log_info("Using default translation model")
             # Fallback to a general model
             try:
                 self.translator = pipeline("translation", model="Helsinki-NLP/opus-mt-en-de")
             except Exception as e2:
                 logger.error(f"Could not load fallback translation model: {e2}")
+                self.status.log_error(f"Could not load fallback translation model: {e2}")
                 raise
     
     def start(self):
@@ -81,6 +92,8 @@ class TranslationService:
         self.ipc_server.start()
         self.is_running = True
         logger.info("Translation service started")
+        self.status.set_status("Ready for translation...")
+        self.status.log_info("Translation service started")
     
     def stop(self):
         """Stop the translation service."""
@@ -96,9 +109,14 @@ class TranslationService:
                 if not text:
                     return {"status": "error", "message": "No text provided"}
                 
+                self.status.set_status("Translating text...")
+                self.status.log_info(f"Original text: {text}")
+                
                 # Perform translation
                 result = self.translator(text)
                 translated_text = result[0]['translation_text'] if isinstance(result, list) else result.get('translation_text', '')
+                
+                self.status.log_info(f"Translated text: {translated_text}")
                 
                 return {
                     "status": "success",
@@ -112,6 +130,7 @@ class TranslationService:
                 
             except Exception as e:
                 logger.error(f"Error translating text: {e}")
+                self.status.log_error(f"Error translating text: {e}")
                 return {"status": "error", "message": str(e)}
     
     def _handle_get_status(self, message: Dict) -> Dict[str, Any]:

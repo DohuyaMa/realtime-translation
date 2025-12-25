@@ -179,6 +179,7 @@ class TestIPCCommunication:
         
         assert length_unpacked == message_length
     
+    @pytest.mark.timeout(10)  # Add timeout to prevent hanging
     def test_ipc_server_unknown_message_type(self):
         """Test server behavior with unknown message type."""
         server = IPCServer(self.socket_path)

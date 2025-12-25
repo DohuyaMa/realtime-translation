@@ -9,6 +9,7 @@ A modular real-time speech translation system that captures audio from a microph
 - [Usage](#usage)
 - [Services](#services)
 - [Systemd Integration](#systemd-integration)
+- [Nix Flake Structure](#nix-flake-structure)
 - [Troubleshooting](#troubleshooting)
 
 ## Architecture
@@ -185,6 +186,33 @@ In Teams or Zoom audio settings:
 ## Systemd Integration
 
 The system includes systemd socket activation for efficient resource management:
+
+## Nix Flake Structure
+
+The project uses a modular Nix flake configuration to separate concerns and improve maintainability. The main flake.nix file imports from a modular structure in the `flake-global/` directory.
+
+### Directory Structure
+
+```
+flake-global/
+├── flake.nix              # Main flake using flake-parts
+├── flake-parts.nix        # Flake-parts configuration framework
+├── home-manager-module.nix # Home Manager module for the application
+├── prod/                  # Production-specific configurations
+│   ├── packages.nix       # Production packages
+│   └── apps.nix           # Application definitions
+└── dev/                   # Development-specific configurations
+    └── devshell.nix       # Development shell environment
+```
+
+### Components
+
+- **Production configurations** (`flake-global/prod/`): Contains packages and apps definitions optimized for production use
+- **Development configurations** (`flake-global/dev/`): Defines the development shell with all necessary tools and dependencies
+- **Home Manager module** (`flake-global/home-manager-module.nix`): Provides integration with Home Manager for user environment setup
+- **NixOS module**: Available in `nixosModules/virtual-sinks.nix` for system-level PipeWire virtual sink configuration
+
+This modular approach allows for better separation of development and production environments while maintaining a consistent interface through the main flake.nix file.
 
 ### Socket Files
 - `rt-capture.socket` - Capture service socket

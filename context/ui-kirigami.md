@@ -172,7 +172,7 @@ UI пише:
 { pkgs, rt-runtime }:
 
 let
-  py = pkgs.python312.withPackages (ps: with ps; [
+  py = pkgs.python313.withPackages (ps: with ps; [
     pyside6
   ]);
 in

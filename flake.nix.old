@@ -12,7 +12,7 @@
         pkgs = nixpkgs.legacyPackages.${system};
 
         # Python packages
-        pythonPackages = pkgs.python312Packages;
+        pythonPackages = pkgs.python313Packages;
         
         # Use the official kokoro package from nixpkgs
         kokoroPackage = pythonPackages.kokoro;
@@ -95,9 +95,9 @@
           # Development tools
           nodejs
           pnpm
-          python312
-          python312Packages.pip
-          python312Packages.virtualenv
+          python313
+          python313Packages.pip
+          python313Packages.virtualenv
           
           # Libraries needed for audio processing
           libffi

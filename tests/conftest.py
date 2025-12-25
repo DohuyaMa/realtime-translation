@@ -2,6 +2,12 @@ import pytest
 import os
 import sys
 import logging
+import multiprocessing
+
+# Set multiprocessing start method to 'spawn' to avoid hanging tests
+# This prevents issues with fork() creating copies of complex states
+if __name__ == "__main__":
+    multiprocessing.set_start_method("spawn", force=True)
 
 # Add project root to Python path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -11,6 +17,17 @@ logging.basicConfig(
     level=logging.DEBUG,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
+
+def pytest_configure(config):
+    """Configure pytest."""
+    config.addinivalue_line(
+        "markers",
+        "integration: mark test as integration test"
+    )
+    config.addinivalue_line(
+        "markers",
+        "gpu: mark test as requiring GPU"
+    )
 
 @pytest.fixture(autouse=True)
 def setup_test_env():

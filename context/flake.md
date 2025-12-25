@@ -72,7 +72,7 @@ home-manager = {
 ## 3. ❌ `ExecStart = python -m src.*` **без PYTHONPATH**
 
 ```nix
-ExecStart = "${pkgs.python312}/bin/python -m src.capture.capture_service ..."
+ExecStart = "${pkgs.python313}/bin/python -m src.capture.capture_service ..."
 ```
 
 ### Проблема
@@ -104,7 +104,7 @@ home.packages = [ pythonEnv ];
 але:
 
 ```nix
-ExecStart = "${pkgs.python312}/bin/python ..."
+ExecStart = "${pkgs.python313}/bin/python ..."
 ```
 
 ### Наслідок

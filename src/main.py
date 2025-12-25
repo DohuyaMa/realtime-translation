@@ -14,20 +14,27 @@ from .ui.widgets.main_window import MainWindow
 from .ui.controller.ui_controller import UIController
 
 
-def create_adapter(mode: str = "direct", **kwargs):
+def create_adapter(mode: str = "direct", use_wyoming: bool = False, wyoming_host: str = "localhost", wyoming_port: int = 10300, **kwargs):
     """Create the appropriate adapter based on the mode.
     
     Args:
         mode: Adapter mode (direct or ipc)
+        use_wyoming: Whether to use Wyoming whisper service
+        wyoming_host: Wyoming service host
+        wyoming_port: Wyoming service port
         **kwargs: Additional arguments to pass to the adapter
         
     Returns:
         An adapter instance
     """
     if mode == "direct":
-        return DirectAdapter(**kwargs)
+        return DirectAdapter(
+            use_wyoming=use_wyoming,
+            wyoming_host=wyoming_host,
+            wyoming_port=wyoming_port,
+            **kwargs
+        )
     raise ValueError(f"Unknown adapter mode: {mode}")
-
 
 def setup_logging(log_level: str = "INFO"):
     """Set up logging configuration.
@@ -134,6 +141,26 @@ def parse_args():
         help="Adapter mode (direct or ipc)"
     )
     
+    parser.add_argument(
+        "--use-wyoming",
+        action="store_true",
+        help="Use Wyoming whisper service instead of local model"
+    )
+    
+    parser.add_argument(
+        "--wyoming-host",
+        type=str,
+        default="localhost",
+        help="Wyoming service host"
+    )
+    
+    parser.add_argument(
+        "--wyoming-port",
+        type=int,
+        default=10300,
+        help="Wyoming service port"
+    )
+    
     return parser.parse_args()
 
 
@@ -154,6 +181,20 @@ def main():
         if args.minimize:
             config['ui']['start_minimized'] = True
         
+        # Create QApplication before creating the window
+        app = QApplication(sys.argv)
+        
+        # Create and show main window with controller
+        adapter = create_adapter(
+            args.mode,
+            use_wyoming=args.use_wyoming,
+            wyoming_host=args.wyoming_host,
+            wyoming_port=args.wyoming_port
+        )
+        backend_controller = ConcreteTranslatorController(adapter)
+        ui_controller = UIController(backend_controller)
+        window = MainWindow(controller=ui_controller)
+        
         if args.config:
             try:
                 with open(args.config, 'r') as f:
@@ -164,15 +205,6 @@ def main():
                                 config[section].update(values)
             except Exception as e:
                 logger.error(f"Error loading custom config file: {e}")
-        
-        # Create QApplication before creating the window
-        app = QApplication(sys.argv)
-        
-        # Create and show main window with controller
-        adapter = create_adapter(args.mode)
-        backend_controller = ConcreteTranslatorController(adapter)
-        ui_controller = UIController(backend_controller)
-        window = MainWindow(controller=ui_controller)
         
         if not config['ui']['start_minimized']:
             window.show()

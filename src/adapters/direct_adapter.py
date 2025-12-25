@@ -11,7 +11,7 @@ from ..core.env import setup_ml_env
 class DirectAdapter:
     """Direct adapter that wraps the existing TranslationSystem implementation."""
     
-    def __init__(self, source_lang: str = "auto", target_lang: str = "en", sample_rate: int = 16000, skip_preflight: bool = False):
+    def __init__(self, source_lang: str = "auto", target_lang: str = "en", sample_rate: int = 16000, skip_preflight: bool = False, use_wyoming: bool = False, wyoming_host: str = "localhost", wyoming_port: int = 10300):
         """Initialize the DirectAdapter with a TranslationSystem instance."""
         # Check PipeWire availability before proceeding (unless explicitly skipped)
         if not skip_preflight:
@@ -26,6 +26,11 @@ class DirectAdapter:
             target_lang=target_lang,
             sample_rate=sample_rate
         )
+        
+        # Store configuration for Wyoming service
+        self.use_wyoming = use_wyoming
+        self.wyoming_host = wyoming_host
+        self.wyoming_port = wyoming_port
         
         # Store reference to audio router for direct device management in dev mode
         self.audio_router = self.translation_system.audio_router
