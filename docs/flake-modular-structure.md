@@ -4,14 +4,12 @@ This document explains the modular flake configuration that has been implemented
 
 ## Overview
 
-The original monolithic `flake.nix` file has been refactored into a modular structure using flake-parts. This approach separates concerns and makes it easier to manage different aspects of the build configuration.
+The original monolithic `flake.nix` file has been refactored into a modular structure by extracting different components into separate files. This approach separates concerns and makes it easier to manage different aspects of the build configuration.
 
 ## Directory Structure
 
 ```
 flake-global/
-├── flake.nix              # Main flake using flake-parts
-├── flake-parts.nix        # Flake-parts configuration framework
 ├── home-manager-module.nix # Home Manager module for the application
 ├── prod/                  # Production-specific configurations
 │   ├── packages.nix       # Production packages
@@ -22,10 +20,10 @@ flake-global/
 
 ## Components
 
-### Main Flake (`flake-global/flake.nix`)
-- Uses flake-parts to organize the modular configuration
+### Main Flake (`flake.nix`)
+- Imports modular components from the `flake-global/` directory
 - Defines system targets for multiple architectures
-- Imports production and development configurations
+- Integrates production and development configurations
 
 ### Production Configuration (`flake-global/prod/`)
 - **packages.nix**: Defines all production packages including:
@@ -57,17 +55,23 @@ flake-global/
 
 ## Integration with Main Flake
 
-The main `flake.nix` file now imports the modular structure through a flake input:
+The main `flake.nix` file now imports the modular structure by directly importing the individual Nix files:
 
 ```nix
-inputs = {
-  # ... other inputs
-  flake-global = {
-    url = "path:./flake-global";
-    inputs.nixpkgs.follows = "nixpkgs";
-    inputs.home-manager.follows = "home-manager";
-  };
-};
+let
+  # Import modular configurations directly
+  rtTranslatorModule = import ./flake-global/home-manager-module.nix;
+  
+  # Import production packages
+  prodPackages = import ./flake-global/prod/packages.nix;
+  
+  # Import development shell
+  devShellConfig = import ./flake-global/dev/devshell.nix;
+  
+  # Import apps
+  appsConfig = import ./flake-global/prod/apps.nix;
+in
+# ... rest of the flake configuration
 ```
 
 This maintains backward compatibility while providing the benefits of the modular approach.
@@ -86,7 +90,7 @@ nix run     # Runs the application defined in flake-global/prod/apps.nix
 ```
 
 ### For Home Manager Integration
-The Home Manager module can be used by importing `flake-global.home-manager-module.nix`.
+The Home Manager module can be used by importing `flake-global/home-manager-module.nix`.
 
 ## Migration Notes
 

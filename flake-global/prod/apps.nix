@@ -1,10 +1,9 @@
-{ self, ... }:
-
+{ packages }:
 {
   apps = {
     default = {
       type = "app";
-      program = "${self.packages.default}/bin/real-time-translator";
+      program = "${packages.default}/bin/real-time-translator";
     };
   };
 }

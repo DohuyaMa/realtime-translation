@@ -27,6 +27,18 @@ def create_adapter(mode: str = "direct", use_wyoming: bool = False, wyoming_host
     Returns:
         An adapter instance
     """
+    # Load Wyoming settings from config if not explicitly provided
+    from .core.config import get_config_manager
+    config_manager = get_config_manager()
+    
+    # Only override with config values if not explicitly provided in function call
+    if 'use_wyoming' not in kwargs:
+        use_wyoming = config_manager.get('wyoming.use_wyoming', use_wyoming)
+    if 'wyoming_host' not in kwargs:
+        wyoming_host = config_manager.get('wyoming.host', wyoming_host)
+    if 'wyoming_port' not in kwargs:
+        wyoming_port = config_manager.get('wyoming.port', wyoming_port)
+    
     if mode == "direct":
         return DirectAdapter(
             use_wyoming=use_wyoming,
@@ -69,40 +81,9 @@ def load_config() -> dict:
     Returns:
         Dictionary containing configuration
     """
-    config = {
-        'audio': {
-            'sample_rate': 16000,
-            'chunk_size': 1024,
-            'use_virtual_devices': True
-        },
-        'translation': {
-            'source_lang': 'auto',
-            'target_lang': 'en',
-            'whisper_model': 'medium'
-        },
-        'ui': {
-            'minimize_to_tray': True,
-            'start_minimized': False
-        }
-    }
-    
-    # Load user config if exists
-    config_dir = os.path.join(os.path.expanduser("~"), ".config", "real-time-translator")
-    config_file = os.path.join(config_dir, "config.yml")
-    
-    if os.path.exists(config_file):
-        try:
-            with open(config_file, 'r') as f:
-                user_config = yaml.safe_load(f)
-                if user_config:
-                    # Update config with user settings
-                    for section, values in user_config.items():
-                        if section in config:
-                            config[section].update(values)
-        except Exception as e:
-            logger.error(f"Error loading config file: {e}")
-    
-    return config
+    from .core.config import get_config_manager
+    config_manager = get_config_manager()
+    return config_manager.get_all()
 
 
 def parse_args():

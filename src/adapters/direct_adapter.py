@@ -20,11 +20,13 @@ class DirectAdapter:
         
         # Set up environment variables
         setup_ml_env()
-        
         self.translation_system = TranslationSystem(
             source_lang=source_lang,
             target_lang=target_lang,
-            sample_rate=sample_rate
+            sample_rate=sample_rate,
+            use_wyoming=use_wyoming,
+            wyoming_host=wyoming_host,
+            wyoming_port=wyoming_port
         )
         
         # Store configuration for Wyoming service
@@ -34,7 +36,55 @@ class DirectAdapter:
         
         # Store reference to audio router for direct device management in dev mode
         self.audio_router = self.translation_system.audio_router
-    
+    def reconfigure_wyoming(self, use_wyoming: bool, wyoming_host: str = "localhost", wyoming_port: int = 10300):
+        """Reconfigure the adapter to use Wyoming services or local services."""
+        try:
+            # Store new Wyoming settings
+            self.use_wyoming = use_wyoming
+            self.wyoming_host = wyoming_host
+            self.wyoming_port = wyoming_port
+            
+            # Get current pipeline status
+            current_status = self.translation_system.get_stats()
+            was_running = current_status.get('running', False)
+            
+            # Stop the current pipeline if it's running
+            if was_running:
+                self.translation_system.stop()
+            
+            # Store current language settings
+            source_lang = self.translation_system.source_lang
+            target_lang = self.translation_system.target_lang
+            sample_rate = self.translation_system.sample_rate
+            
+            # Clean up the current translation system
+            self.translation_system.cleanup()
+            
+            # Create a new translation system with the new Wyoming configuration
+            # We need to update the socket path to use the appropriate whisper service
+            from ..translation_system import TranslationSystem
+            self.translation_system = TranslationSystem(
+                source_lang=source_lang,
+                target_lang=target_lang,
+                sample_rate=sample_rate,
+                use_wyoming=use_wyoming,
+                wyoming_host=wyoming_host,
+                wyoming_port=wyoming_port
+            )
+            
+            # The TranslationSystem constructor handles the whisper client initialization
+            # based on the use_wyoming parameter
+            
+            # If the pipeline was running, start it again with new configuration
+            if was_running:
+                self.translation_system.start()
+            
+            logger.info(f"Wyoming reconfiguration completed. Now using Wyoming: {use_wyoming}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to reconfigure Wyoming settings: {e}")
+            return False
+
     def start_pipeline(self) -> bool:
         """Start the entire translation pipeline."""
         try:

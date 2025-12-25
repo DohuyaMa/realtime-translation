@@ -16,7 +16,10 @@ class TranslationSystem:
         self,
         source_lang: str = "auto",
         target_lang: str = "en",
-        sample_rate: int = 16000
+        sample_rate: int = 16000,
+        use_wyoming: bool = False,
+        wyoming_host: str = "localhost",
+        wyoming_port: int = 10300
     ):
         """Initialize translation system.
         
@@ -24,10 +27,16 @@ class TranslationSystem:
             source_lang: Source language code (uk for Ukrainian, pl for Polish, or auto)
             target_lang: Target language code (en for English)
             sample_rate: Audio sample rate
+            use_wyoming: Whether to use Wyoming whisper service
+            wyoming_host: Wyoming service host
+            wyoming_port: Wyoming service port
         """
         self.source_lang = source_lang
         self.target_lang = target_lang
         self.sample_rate = sample_rate
+        self.use_wyoming = use_wyoming
+        self.wyoming_host = wyoming_host
+        self.wyoming_port = wyoming_port
         
         # Components
         self.audio_router: Optional[AudioRouter] = None
@@ -59,7 +68,11 @@ class TranslationSystem:
             
             # Initialize IPC clients for modular services
             self.capture_client = IPCClient("/tmp/rt-capture.sock")
-            self.whisper_client = IPCClient("/tmp/rt-whisper.sock")
+            # Use different whisper socket based on Wyoming configuration
+            if use_wyoming:
+                self.whisper_client = IPCClient("/tmp/rt-hybrid-whisper.sock")
+            else:
+                self.whisper_client = IPCClient("/tmp/rt-whisper.sock")
             self.translate_client = IPCClient("/tmp/rt-translate.sock")
             self.tts_client = IPCClient("/tmp/rt-tts.sock")
             self.playback_client = IPCClient("/tmp/rt-playback.sock")

@@ -5,7 +5,7 @@ from PySide6.QtWidgets import (
     QCheckBox, QGroupBox, QSystemTrayIcon, QMenu,
     QFrame, QSplitter, QApplication
 )
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QIcon, QAction
 import sys
 from loguru import logger
@@ -16,6 +16,7 @@ from ...controller.translator_controller import ConcreteTranslatorController
 from ...adapters import DirectAdapter
 from .status_logger import StatusLogger, StatusManager
 from .service_status_panel import ServiceStatusPanel
+from .settings_dialog import SettingsButton
 
 
 class MainWindow(QMainWindow):
@@ -36,6 +37,11 @@ class MainWindow(QMainWindow):
         # UI state
         self.is_translating = False
         self.update_timer: Optional[QTimer] = None
+        
+        # Wyoming settings
+        self._current_use_wyoming = False
+        self._current_wyoming_host = "localhost"
+        self._current_wyoming_port = 10300
         
         # Connect UI controller callbacks
         self.ui_controller.set_status_callback(self.handle_status_update)
@@ -141,7 +147,6 @@ class MainWindow(QMainWindow):
         
         # Service status panel
         upper_layout.addWidget(self.service_status_panel)
-        
         # Status and controls
         status_layout = QHBoxLayout()
         
@@ -149,6 +154,11 @@ class MainWindow(QMainWindow):
         self.translate_button = QPushButton("Start Translation")
         self.translate_button.clicked.connect(self.toggle_translation)
         status_layout.addWidget(self.translate_button)
+        
+        # Settings button
+        self.settings_button = SettingsButton()
+        self.settings_button.settings_applied.connect(self.on_settings_changed)
+        status_layout.addWidget(self.settings_button)
         
         # Always on top
         self.always_on_top = QCheckBox("Always on Top")
@@ -160,6 +170,7 @@ class MainWindow(QMainWindow):
         self.minimize_to_tray.setChecked(True)
         status_layout.addWidget(self.minimize_to_tray)
         
+        upper_layout.addLayout(status_layout)
         upper_layout.addLayout(status_layout)
         
         # Add upper widget to splitter
@@ -376,6 +387,82 @@ class MainWindow(QMainWindow):
         except Exception as e:
             logger.error(f"Failed to control {service_name} service: {e}")
             self.status_manager.log_error(f"Error controlling {service_name} service: {e}")
+        
+    def on_settings_changed(self, settings):
+        """Handle settings changes from the settings dialog."""
+        logger.info(f"Settings changed: {settings}")
+        
+        # Store current settings for future reference
+        self.current_settings = settings
+        
+        # Check if Wyoming settings have changed
+        use_wyoming = settings.get('use_wyoming', False)
+        wyoming_host = settings.get('wyoming_host', 'localhost')
+        wyoming_port = settings.get('wyoming_port', 10300)
+        
+        wyoming_changed = (
+            hasattr(self, '_current_use_wyoming') and
+            (self._current_use_wyoming != use_wyoming or
+             self._current_wyoming_host != wyoming_host or
+             self._current_wyoming_port != wyoming_port)
+        )
+        
+        # Store current Wyoming settings
+        self._current_use_wyoming = use_wyoming
+        self._current_wyoming_host = wyoming_host
+        self._current_wyoming_port = wyoming_port
+        
+        # If Wyoming settings have changed, we need to reconfigure the controller
+        if wyoming_changed:
+            # Stop the current pipeline if it's running
+            if self.is_translating:
+                self.ui_controller.stop_pipeline()
+                self.translate_button.setText("Start Translation")
+                self.is_translating = False
+            
+            # Reconfigure the controller with new Wyoming settings
+            success = self.ui_controller.reconfigure_controller(
+                use_wyoming=use_wyoming,
+                wyoming_host=wyoming_host,
+                wyoming_port=wyoming_port
+            )
+            
+            if success:
+                self.status_manager.log_info("Wyoming configuration updated successfully")
+                
+                # If we were translating before, start the pipeline again with new settings
+                if self.is_translating:
+                    self.ui_controller.start_pipeline()
+            else:
+                self.status_manager.log_error("Failed to update Wyoming configuration")
+                return
+        else:
+            # Apply language settings only if Wyoming settings didn't change
+            source_lang = settings.get('source_lang', 'auto')
+            target_lang = settings.get('target_lang', 'en')
+            self.ui_controller.set_languages(source_lang, target_lang)
+            
+            # Update language combo boxes
+            self._update_language_combo(self.source_lang_combo, source_lang)
+        
+        # Update UI elements to reflect new settings
+        self.status_manager.log_info("Settings applied successfully")
+        
+    def _update_language_combo(self, combo, lang_code):
+        """Update a language combo box to show the correct language."""
+        lang_display_map = {
+            'auto': 'Auto',
+            'uk': 'Ukrainian (uk)',
+            'pl': 'Polish (pl)',
+            'en': 'English (en)',
+            'de': 'German (de)',
+            'fr': 'French (fr)',
+            'es': 'Spanish (es)'
+        }
+        display_text = lang_display_map.get(lang_code, 'Auto')
+        index = combo.findText(display_text)
+        if index >= 0:
+            combo.setCurrentIndex(index)
         
     def handle_status_update(self, message: str):
         """Handle status updates from UI controller."""

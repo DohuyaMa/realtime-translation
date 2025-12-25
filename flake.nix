@@ -8,34 +8,45 @@
       url = "github:nix-community/home-manager";
       inputs.nixpkgs.follows = "nixpkgs";
     };
-    flake-global = {
-      url = "path:./flake-global";
-      inputs.nixpkgs.follows = "nixpkgs";
-      inputs.home-manager.follows = "home-manager";
-    };
   };
 
-  outputs = { self, nixpkgs, flake-utils, home-manager, flake-global }:
+  outputs = { self, nixpkgs, flake-utils, home-manager }:
+    let
+      # Import modular configurations directly
+      rtTranslatorModule = import ./flake-global/home-manager-module.nix;
+      
+      # Import production packages
+      prodPackages = import ./flake-global/prod/packages.nix;
+      
+      # Import development shell
+      devShellConfig = import ./flake-global/dev/devshell.nix;
+      
+      # Import apps
+      appsConfig = import ./flake-global/prod/apps.nix;
+    in
     flake-utils.lib.eachSystem ["x86_64-linux"] (system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
-        # Access packages from flake-global which uses flake-parts
-        # The flake-global uses flake-parts, so outputs are in perSystem
-        flakeGlobalPerSystem = flake-global.legacyPackages.${system} or flake-global.perSystem.${system} or {};
+        # Get packages for this system
+        systemProdPackages = prodPackages { inherit pkgs; };
+        # Get devShell for this system
+        systemDevShell = devShellConfig { inherit pkgs; };
+        # Get apps for this system
+        systemApps = appsConfig { packages = systemProdPackages.packages; };
       in
       {
-        # Import packages from the modular flake
-        packages = flakeGlobalPerSystem.packages or {};
+        # Import packages from the modular configuration
+        packages = systemProdPackages.packages;
         
-        # Import devShells from the modular flake
-        devShells = flakeGlobalPerSystem.devShells or {};
+        # Import devShells from the modular configuration
+        devShells = systemDevShell.devShells;
         
-        # Import apps from the modular flake
-        apps = flakeGlobalPerSystem.apps or {};
+        # Import apps from the modular configuration
+        apps = systemApps.apps;
       }
     ) // {
       # Home Manager module
-      homeManagerModules.rt-translator = flake-global.homeManagerModules.rt-translator;
+      homeManagerModules.rt-translator = rtTranslatorModule;
 
       # NixOS module for production deployment
       nixosModules.virtual-sinks = import ./nixosModules/virtual-sinks.nix;

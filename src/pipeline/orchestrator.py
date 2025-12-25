@@ -37,9 +37,22 @@ class PipelineOrchestrator:
         
         logger.info("Pipeline orchestrator initialized")
     
-    def start_services(self):
+    def start_services(self, use_wyoming=False, wyoming_host="localhost", wyoming_port=10300):
         """Start all pipeline services."""
         logger.info("Starting pipeline services...")
+        
+        # Determine which whisper service to use
+        if use_wyoming:
+            whisper_module = 'src.whisper.hybrid_whisper_service'
+            whisper_args = [
+                '--socket-path', self.socket_paths['whisper'],
+                '--use-wyoming',
+                '--wyoming-host', wyoming_host,
+                '--wyoming-port', str(wyoming_port)
+            ]
+        else:
+            whisper_module = 'src.whisper.whisper_service'
+            whisper_args = ['--socket-path', self.socket_paths['whisper']]
         
         # Start each service as a subprocess
         service_configs = [
@@ -49,13 +62,13 @@ class PipelineOrchestrator:
                 'args': ['--socket-path', self.socket_paths['capture']]
             },
             {
-                'name': 'whisper', 
-                'module': 'src.whisper.whisper_service',
-                'args': ['--socket-path', self.socket_paths['whisper']]
+                'name': 'whisper',
+                'module': whisper_module,
+                'args': whisper_args
             },
             {
                 'name': 'translate',
-                'module': 'src.translate.translate_service', 
+                'module': 'src.translate.translate_service',
                 'args': ['--socket-path', self.socket_paths['translate']]
             },
             {
@@ -178,7 +191,7 @@ class PipelineOrchestrator:
         except Exception as e:
             logger.error(f"Error processing audio chunk: {e}")
     
-    def run(self):
+    def run(self, use_wyoming=False, wyoming_host="localhost", wyoming_port=10300):
         """Run the orchestrator."""
         def signal_handler(signum, frame):
             logger.info("Received shutdown signal")
@@ -188,7 +201,7 @@ class PipelineOrchestrator:
         signal.signal(signal.SIGINT, signal_handler)
         signal.signal(signal.SIGTERM, signal_handler)
         
-        self.start_services()
+        self.start_services(use_wyoming=use_wyoming, wyoming_host=wyoming_host, wyoming_port=wyoming_port)
         
         try:
             # Keep the orchestrator running
@@ -202,8 +215,17 @@ class PipelineOrchestrator:
 
 def main():
     """Main entry point for the pipeline orchestrator."""
+    import argparse
+    
+    parser = argparse.ArgumentParser(description="Pipeline Orchestrator for Real-time Translation")
+    parser.add_argument('--use-wyoming', action='store_true', help='Use Wyoming service instead of local model')
+    parser.add_argument('--wyoming-host', default='localhost', help='Wyoming service host')
+    parser.add_argument('--wyoming-port', type=int, default=10300, help='Wyoming service port')
+    
+    args = parser.parse_args()
+    
     orchestrator = PipelineOrchestrator()
-    orchestrator.run()
+    orchestrator.run(use_wyoming=args.use_wyoming, wyoming_host=args.wyoming_host, wyoming_port=args.wyoming_port)
 
 
 if __name__ == "__main__":

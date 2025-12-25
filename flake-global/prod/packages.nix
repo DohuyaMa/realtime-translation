@@ -56,7 +56,7 @@ let
   appPackage = pkgs.stdenv.mkDerivation {
     pname = "real-time-translator";
     version = "0.1.0";
-    src = ../../../.;  # Go up 3 levels to reach project root
+    src = ../../.;  # Go up 2 levels to reach project root from flake-global/prod/
     
     nativeBuildInputs = with pkgs; [ makeWrapper python313 ];
     propagatedBuildInputs = with pythonPackages; [
@@ -71,7 +71,7 @@ let
       ctranslate2
       onnxruntime
       pyside6
-      pyside6
+      
       
       # Audio processing
       soundfile
