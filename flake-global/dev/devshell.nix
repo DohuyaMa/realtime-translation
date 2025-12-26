@@ -82,7 +82,6 @@ in
       
       # Setup hooks
       shellHook = ''
-         export PYTHONPATH="$PWD:$PYTHONPATH"
          export HF_HOME="$HOME/.cache/huggingface"
          export TRANSFORMERS_CACHE="$HOME/.cache/transformers"
          export HF_HUB_CACHE="$HOME/.cache/huggingface/hub"

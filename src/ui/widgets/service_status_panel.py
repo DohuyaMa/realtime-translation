@@ -12,6 +12,8 @@ class ServiceStatusPanel(QGroupBox):
     
     # Signal emitted when a service control button is clicked
     service_control_requested = pyqtSignal(str, bool)  # service_name, should_start
+    # Signal emitted when a service settings button is clicked
+    service_settings_requested = pyqtSignal(str)  # service_name
     
     def __init__(self, parent=None):
         super().__init__("Service Status", parent)
@@ -54,12 +56,19 @@ class ServiceStatusPanel(QGroupBox):
             layout.addWidget(status_text, idx, 2)
             self._status_labels[f"{service_key}_text"] = status_text
             
+            # Settings button
+            settings_btn = QPushButton(f"Set {self._services[service_key].replace(' Service', '')}")
+            settings_btn.clicked.connect(
+                lambda checked, s=service_key: self._on_service_settings_clicked(s)
+            )
+            layout.addWidget(settings_btn, idx, 3)
+            
             # Control button
             control_btn = QPushButton("Start")
             control_btn.clicked.connect(
                 lambda checked, s=service_key: self._on_service_control_clicked(s)
             )
-            layout.addWidget(control_btn, idx, 3)
+            layout.addWidget(control_btn, idx, 4)
             self._control_buttons[service_key] = control_btn
     
     def _on_service_control_clicked(self, service_name: str):
@@ -67,6 +76,10 @@ class ServiceStatusPanel(QGroupBox):
         button = self._control_buttons[service_name]
         should_start = button.text() == "Start"
         self.service_control_requested.emit(service_name, should_start)
+    
+    def _on_service_settings_clicked(self, service_name: str):
+        """Handle service settings button click."""
+        self.service_settings_requested.emit(service_name)
     
     def update_service_status(self, service_name: str, connected: bool, can_control: bool = True):
         """Update the status of a specific service."""

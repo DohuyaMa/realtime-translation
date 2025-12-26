@@ -27,8 +27,9 @@
     flake-utils.lib.eachSystem ["x86_64-linux"] (system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
+        lib = nixpkgs.lib;
         # Get packages for this system
-        systemProdPackages = prodPackages { inherit pkgs; };
+        systemProdPackages = prodPackages { inherit pkgs lib; projectRoot = self; };
         # Get devShell for this system
         systemDevShell = devShellConfig { inherit pkgs; };
         # Get apps for this system

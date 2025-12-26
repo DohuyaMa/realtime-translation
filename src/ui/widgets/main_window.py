@@ -54,6 +54,7 @@ class MainWindow(QMainWindow):
         # Start event polling to get updates from backend
         self.ui_controller.start_event_polling(interval=0.5)  # Poll every 500ms
         self.service_status_panel.service_control_requested.connect(self.on_service_control_requested)
+        self.service_status_panel.service_settings_requested.connect(self.on_service_settings_requested)
         
         # Start event polling to get updates from backend
         self.ui_controller.start_event_polling(interval=0.5)  # Poll every 500ms
@@ -157,7 +158,7 @@ class MainWindow(QMainWindow):
         
         # Settings button
         self.settings_button = SettingsButton()
-        self.settings_button.settings_applied.connect(self.on_settings_changed)
+        self.settings_button.settings_applied.connect(self.on_general_settings_changed)
         status_layout.addWidget(self.settings_button)
         
         # Always on top
@@ -387,10 +388,75 @@ class MainWindow(QMainWindow):
         except Exception as e:
             logger.error(f"Failed to control {service_name} service: {e}")
             self.status_manager.log_error(f"Error controlling {service_name} service: {e}")
+    
+    def on_service_settings_requested(self, service_name: str):
+        """Handle service settings requests from the service status panel."""
+        logger.info(f"Service settings requested for: {service_name}")
         
-    def on_settings_changed(self, settings):
-        """Handle settings changes from the settings dialog."""
-        logger.info(f"Settings changed: {settings}")
+        # Create service-specific settings dialog
+        from .service_settings_dialog import ServiceSettingsDialog
+        current_settings = {}
+        
+        if service_name == 'whisper':
+            current_settings = {
+                'use_wyoming': getattr(self, '_current_use_wyoming', False),
+                'wyoming_host': getattr(self, '_current_wyoming_host', 'localhost'),
+                'wyoming_port': getattr(self, '_current_wyoming_port', 10300)
+            }
+        elif service_name == 'translate':
+            current_settings = {
+                'source_lang': getattr(self, '_current_source_lang', 'auto'),
+                'target_lang': getattr(self, '_current_target_lang', 'en')
+            }
+        elif service_name == 'tts':
+            current_settings = {
+                'tts_voice': getattr(self, '_current_tts_voice', 'Default'),
+                'speech_speed': getattr(self, '_current_speech_speed', 100)
+            }
+        elif service_name == 'capture':
+            current_settings = {
+                'sample_rate': getattr(self, '_current_sample_rate', 16000),
+                'input_device': getattr(self, '_current_input_device', 'Default')
+            }
+        elif service_name == 'playback':
+            current_settings = {
+                'output_device': getattr(self, '_current_output_device', 'Default'),
+                'volume': getattr(self, '_current_volume', 80)
+            }
+        
+        dialog = ServiceSettingsDialog(service_name, current_settings, self)
+        dialog.settings_changed.connect(self.on_service_specific_settings_changed)
+        dialog.exec()
+    
+    def on_service_specific_settings_changed(self, service_name: str, settings: dict):
+        """Handle service-specific settings changes."""
+        logger.info(f"Service settings changed for {service_name}: {settings}")
+        
+        # Store the settings for future reference
+        for key, value in settings.items():
+            setattr(self, f'_current_{service_name}_{key}', value)
+        
+        # Apply settings using the UI controller
+        success = self.ui_controller.update_service_config(service_name, settings)
+        
+        if success:
+            self.status_manager.log_info(f"Settings applied for {service_name} service")
+            
+            # Store the settings for future reference
+            for key, value in settings.items():
+                setattr(self, f'_current_{service_name}_{key}', value)
+                
+            # Special handling for certain settings
+            if service_name == 'translate':
+                # Update language combo boxes
+                source_lang = settings.get('source_lang', 'auto')
+                self._update_language_combo(self.source_lang_combo, source_lang)
+        else:
+            self.status_manager.log_error(f"Failed to apply settings for {service_name} service")
+        
+    def on_general_settings_changed(self, settings):
+        """Handle general settings changes from the settings dialog."""
+        logger.info(f"General settings changed: {settings}")
         
         # Store current settings for future reference
         self.current_settings = settings
@@ -446,7 +512,13 @@ class MainWindow(QMainWindow):
             self._update_language_combo(self.source_lang_combo, source_lang)
         
         # Update UI elements to reflect new settings
+        # Update UI elements to reflect new settings
         self.status_manager.log_info("Settings applied successfully")
+    
+    def on_settings_changed(self, settings):
+        """Handle settings changes from the settings dialog - legacy method."""
+        # This is now an alias to the new method
+        self.on_general_settings_changed(settings)
         
     def _update_language_combo(self, combo, lang_code):
         """Update a language combo box to show the correct language."""
@@ -469,7 +541,6 @@ class MainWindow(QMainWindow):
         # Use the status manager to separate status display from logging
         self.status_manager.set_status(message)
         self.status_manager.log_info(message)
-        
     def closeEvent(self, event):
         """Handle window close event."""
         if self.minimize_to_tray.isChecked():
