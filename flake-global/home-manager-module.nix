@@ -33,24 +33,16 @@ let
     # Kokoro TTS dependencies
     kokoroPackage
   ]);
-
-  # Runtime wrapper for services
-  serviceWrapper = name: modulePath: pkgs.writeShellApplication {
-    name = "rt-${name}-service";
-    runtimeInputs = [ pythonEnv pkgs.coreutils ];
+  # Define virtual sinks service
+  virtualSinksService = pkgs.writeShellApplication {
+    name = "rt-virtual-sinks-service";
+    runtimeInputs = [ pkgs.pipewire pkgs.pulseaudio ];
     text = ''
-      export PYTHONPATH="${pythonEnv}/lib/python3.12/site-packages:$PYTHONPATH"
-      exec ${pythonEnv.interpreter} -m ${modulePath} "$@"
+      pactl load-module module-null-sink sink_name=rt_virtual_input sink_properties=device.description="RT Virtual Input"
+      pactl load-module module-null-sink sink_name=rt_virtual_output sink_properties=device.description="RT Virtual Output (Microphone)"
     '';
   };
-
-  # Create service wrappers
-  captureService = serviceWrapper "capture" "src.capture.capture_service";
-  playbackService = serviceWrapper "playback" "src.playback.playback_service";
-  translateService = serviceWrapper "translate" "src.translate.translate_service";
-  ttsService = serviceWrapper "tts" "src.tts.tts_service";
-  whisperService = serviceWrapper "whisper" "src.whisper.whisper_service";
-  hybridWhisperService = serviceWrapper "whisper-hybrid" "src.whisper.hybrid_whisper_service";
+};
 
 in
 {
@@ -62,13 +54,13 @@ in
     # Include the package in home.packages for easy access
     home.packages = [
       pythonEnv
-      # Runtime wrappers
-      captureService
-      playbackService
-      translateService
-      ttsService
-      whisperService
-      hybridWhisperService
+      # Import the services from the flake packages
+      pkgs.rt-capture-service
+      pkgs.rt-playback-service
+      pkgs.rt-translate-service
+      pkgs.rt-tts-service
+      pkgs.rt-whisper-service
+      pkgs.rt-whisper-hybrid-service
       # Pipewire utilities
       pkgs.pipewire
       pkgs.pulseaudio  # for pactl
@@ -80,18 +72,15 @@ in
         description = "RT-Capture-service";
         requires = [ "rt-capture.socket" ];
         after = [ "rt-capture.socket" ];
-        path = [ pythonEnv ];
+        path = [ pkgs.rt-capture-service ];
         serviceConfig = {
           Type = "simple";
-          ExecStart = "${captureService}/bin/rt-capture-service --socket-path %t/rt-capture.sock";
+          ExecStart = "${pkgs.rt-capture-service}/bin/rt-capture-service --socket-path %t/rt-capture.sock";
           Restart = "always";
           RestartSec = 5;
           Nice = -5;
           CPUSchedulingPolicy = "rr";
           IOSchedulingClass = "best-effort";
-          Environment = [
-            "PYTHONPATH=${pythonEnv}/${pythonEnv.sitePackages}"
-          ];
         };
         
         install = {
@@ -104,18 +93,15 @@ in
         description = "RT-Playback-service";
         requires = [ "rt-playback.socket" ];
         after = [ "rt-playback.socket" ];
-        path = [ pythonEnv ];
+        path = [ pkgs.rt-playback-service ];
         serviceConfig = {
           Type = "simple";
-          ExecStart = "${playbackService}/bin/rt-playback-service --socket-path %t/rt-playback.sock";
+          ExecStart = "${pkgs.rt-playback-service}/bin/rt-playback-service --socket-path %t/rt-playback.sock";
           Restart = "always";
           RestartSec = 5;
           Nice = -5;
           CPUSchedulingPolicy = "rr";
           IOSchedulingClass = "best-effort";
-          Environment = [
-            "PYTHONPATH=${pythonEnv}/${pythonEnv.sitePackages}"
-          ];
         };
         install = {
           WantedBy = [ "default.target" ];
@@ -127,18 +113,15 @@ in
         description = "RT-Translate-service";
         requires = [ "rt-translate.socket" ];
         after = [ "rt-translate.socket" ];
-        path = [ pythonEnv ];
+        path = [ pkgs.rt-translate-service ];
         serviceConfig = {
           Type = "simple";
-          ExecStart = "${translateService}/bin/rt-translate-service --socket-path %t/rt-translate.sock";
+          ExecStart = "${pkgs.rt-translate-service}/bin/rt-translate-service --socket-path %t/rt-translate.sock";
           Restart = "always";
           RestartSec = 5;
           Nice = -5;
           CPUSchedulingPolicy = "rr";
           IOSchedulingClass = "best-effort";
-          Environment = [
-            "PYTHONPATH=${pythonEnv}/${pythonEnv.sitePackages}"
-          ];
         };
         install = {
           WantedBy = [ "default.target" ];
@@ -150,18 +133,15 @@ in
         description = "RT-TTS-service";
         requires = [ "rt-tts.socket" ];
         after = [ "rt-tts.socket" ];
-        path = [ pythonEnv ];
+        path = [ pkgs.rt-tts-service ];
         serviceConfig = {
           Type = "simple";
-          ExecStart = "${ttsService}/bin/rt-tts-service --socket-path %t/rt-tts.sock";
+          ExecStart = "${pkgs.rt-tts-service}/bin/rt-tts-service --socket-path %t/rt-tts.sock";
           Restart = "always";
           RestartSec = 5;
           Nice = -5;
           CPUSchedulingPolicy = "rr";
           IOSchedulingClass = "best-effort";
-          Environment = [
-            "PYTHONPATH=${pythonEnv}/${pythonEnv.sitePackages}"
-          ];
         };
         install = {
           WantedBy = [ "default.target" ];
@@ -173,18 +153,15 @@ in
         description = "RT-Whisper-service";
         requires = [ "rt-whisper.socket" ];
         after = [ "rt-whisper.socket" ];
-        path = [ pythonEnv ];
+        path = [ pkgs.rt-whisper-service ];
         serviceConfig = {
           Type = "simple";
-          ExecStart = "${whisperService}/bin/rt-whisper-service --socket-path %t/rt-whisper.sock";
+          ExecStart = "${pkgs.rt-whisper-service}/bin/rt-whisper-service --socket-path %t/rt-whisper.sock";
           Restart = "always";
           RestartSec = 5;
           Nice = -5;
           CPUSchedulingPolicy = "rr";
           IOSchedulingClass = "best-effort";
-          Environment = [
-            "PYTHONPATH=${pythonEnv}/${pythonEnv.sitePackages}"
-          ];
         };
         install = {
           WantedBy = [ "default.target" ];
@@ -196,15 +173,54 @@ in
         description = "Real-time Translator Application";
         after = [ "graphical-session.target" "pipewire.service" ];
         wants = [ "graphical-session.target" ];
-        path = [ pythonEnv pkgs.pipewire pkgs.pulseaudio ];
+        requires = [ "rt-virtual-sinks.service" ];
+        path = [ pkgs.real-time-translator pkgs.pipewire pkgs.pulseaudio ];
         serviceConfig = {
-          Type = "simple";
-          ExecStart = "${pythonEnv.interpreter} -m src.main";
+          Type = "exec";
+          ExecStart = "${pkgs.real-time-translator}/bin/real-time-translator";
           Restart = "on-failure";
           RestartSec = 5;
           Environment = [
-            "PYTHONPATH=${pythonEnv}/${pythonEnv.sitePackages}"
+            "PATH=%h/.nix-profile/bin:/run/wrappers/bin:/etc/profiles/per-user/%h/bin:/nix/var/nix/profiles/default/bin:/run/current-system/sw/bin"
           ];
+        };
+        install = {
+          WantedBy = [ "default.target" ];
+        };
+      };
+      
+      "rt-hybrid-whisper" = {
+        description = "RT-Hybrid-Whisper-service (Wyoming Integration)";
+        requires = [ "rt-hybrid-whisper.socket" ];
+        after = [ "rt-hybrid-whisper.socket" "network.target" ];
+        path = [ pkgs.rt-whisper-hybrid-service ];
+        serviceConfig = {
+          Type = "simple";
+          ExecStart = "${pkgs.rt-whisper-hybrid-service}/bin/rt-whisper-hybrid-service --socket-path %t/rt-hybrid-whisper.sock --use-wyoming --wyoming-host localhost --wyoming-port 10300";
+          Restart = "always";
+          RestartSec = 5;
+          Nice = -5;
+          CPUSchedulingPolicy = "rr";
+          IOSchedulingClass = "best-effort";
+          Environment = [
+            "PYTHONUNBUFFERED=1"
+          ];
+        };
+        install = {
+          WantedBy = [ "default.target" ];
+          Also = [ "rt-hybrid-whisper.socket" ];
+        };
+      };
+      
+      "rt-virtual-sinks" = {
+        description = "Create RT Virtual Sinks";
+        after = [ "pipewire.service" "pipewire-pulse.service" ];
+        wants = [ "pipewire.service" "pipewire-pulse.service" ];
+        path = [ pkgs.pipewire pkgs.pulseaudio ];
+        serviceConfig = {
+          Type = "oneshot";
+          ExecStart = "${virtualSinksService}/bin/rt-virtual-sinks-service";
+          RemainAfterExit = true;
         };
         install = {
           WantedBy = [ "default.target" ];
@@ -282,6 +298,15 @@ in
           SocketMode = "0660";
         };
       };
+      
+      "rt-hybrid-whisper" = {
+        description = "RT-Hybrid-Whisper-socket";
+        wantedBy = [ "sockets.target" ];
+        socketConfig = {
+          ListenStream = "%t/rt-hybrid-whisper.sock";
+          SocketMode = "0660";
+        };
+      };
     };
   };
-}
+};

@@ -69,7 +69,7 @@ class TranslationSystem:
             # Initialize IPC clients for modular services
             self.capture_client = IPCClient("/tmp/rt-capture.sock")
             # Use different whisper socket based on Wyoming configuration
-            if use_wyoming:
+            if self.use_wyoming:
                 self.whisper_client = IPCClient("/tmp/rt-hybrid-whisper.sock")
             else:
                 self.whisper_client = IPCClient("/tmp/rt-whisper.sock")

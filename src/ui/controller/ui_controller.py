@@ -252,6 +252,46 @@ class UIController:
             logger.error(f"Error reconfiguring controller: {e}")
             return False
     
+    def update_service_config(self, service_name: str, config: dict):
+        """Update configuration for a specific service."""
+        try:
+            if service_name == 'whisper':
+                # Handle whisper service configuration updates
+                use_wyoming = config.get('use_wyoming', False)
+                wyoming_host = config.get('wyoming_host', 'localhost')
+                wyoming_port = config.get('wyoming_port', 10300)
+                
+                # Reconfigure the controller with new Wyoming settings
+                return self.reconfigure_controller(
+                    use_wyoming=use_wyoming,
+                    wyoming_host=wyoming_host,
+                    wyoming_port=wyoming_port
+                )
+            elif service_name == 'translate':
+                # Update translation languages
+                source_lang = config.get('source_lang', 'auto')
+                target_lang = config.get('target_lang', 'en')
+                return self.set_languages(source_lang, target_lang)
+            elif service_name == 'tts':
+                # TTS configuration would be handled by the TTS service directly
+                # For now, just log the configuration change
+                logger.info(f"TTS service configuration updated: {config}")
+                return True
+            elif service_name == 'capture':
+                # Capture configuration would be handled by the capture service directly
+                logger.info(f"Capture service configuration updated: {config}")
+                return True
+            elif service_name == 'playback':
+                # Playback configuration would be handled by the playback service directly
+                logger.info(f"Playback service configuration updated: {config}")
+                return True
+            else:
+                logger.warning(f"Unknown service: {service_name}")
+                return False
+        except Exception as e:
+            logger.error(f"Error updating {service_name} configuration: {e}")
+            return False
+    
     def cleanup(self):
         """Clean up resources."""
         self._controller.cleanup()
