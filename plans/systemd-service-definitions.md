@@ -47,7 +47,7 @@ This plan creates proper Nix modules for systemd services using flake-parts stru
 ## Architectural Invariants
 - no PYTHONPATH usage in systemd services
 - each service uses separate buildPythonApplication
-- runtime paths XDG-compliant (%t/rt/)
+- runtime paths XDG-compliant (%t/rt%)
 
 ## Target Audience
 - maintainers
@@ -71,3 +71,23 @@ parts/systemd/sockets.nix:
 - What changed from original plan
 - What was removed as obsolete
 - What should be refactored later
+
+## Completed / Coordinating with Parallel Execution
+
+### Completed Items
+- [x] Create systemd service definitions using flake-parts structure — Services created in parts/systemd/user/*.nix by Roo
+- [x] Update services to use new buildPythonApplication packages — All services now use individual buildPythonApplication packages by Roo
+- [x] Remove PYTHONPATH from service definitions — PYTHONPATH dependencies eliminated from all systemd services by Roo
+- [x] Create proper socket configurations with new paths — Socket definitions created with XDG-compliant paths by Roo
+
+### Notes for Parallel Execution
+- Systemd services now use proper buildPythonApplication packages
+- No more PYTHONPATH dependencies in service definitions
+- Socket configurations use XDG-compliant runtime paths
+- Services are properly modularized in flake-parts structure
+- Ready for integration with home-manager module
+- All Nix modules created in parts/systemd/ and parts/pipewire/ directories
+- Services use separate buildPythonApplication packages instead of PYTHONPATH
+- Socket activation properly configured for services that require it
+- Virtual sinks service configured for audio routing
+- App service created for main application

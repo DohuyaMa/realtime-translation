@@ -13,6 +13,7 @@ from loguru import logger
 
 from ..status_logger import StatusManager
 from .wyoming_client import WyomingWhisperService
+from ..core.runtime import get_runtime_config
 
 PCM_DTYPE = np.int16
 SAMPLE_RATE = 16000
@@ -184,7 +185,7 @@ def _handle_wyoming_result(conn, result):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--socket-path", required=True)
+    parser.add_argument("--socket-path", default=get_runtime_config().get_hybrid_whisper_socket_path(), required=False)
     parser.add_argument("--model", default="medium")
     parser.add_argument("--device", default="auto")
     parser.add_argument("--compute-type", default="float16")

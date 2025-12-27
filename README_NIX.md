@@ -15,7 +15,7 @@ This document explains the dependencies and setup process using the Nix package 
 - **onnxruntime**: ONNX runtime for model execution
 - **soundfile**: Audio file reading/writing
 - **librosa**: Audio signal processing
-- **pipewire-python**: PipeWire audio system integration
+- ****: PipeWire audio system integration
 - **pulsectl**: PulseAudio control library
 - **PyYAML**: YAML configuration file parsing
 - **python-dotenv**: Environment variable management

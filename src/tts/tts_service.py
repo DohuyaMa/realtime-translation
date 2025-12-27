@@ -10,6 +10,7 @@ import sys
 from ..common.ipc import IPCServer
 from ..status_logger import StatusManager
 from ..models.tts_engine import TTSEngine
+from ..core.runtime import get_runtime_config
 
 
 class TTSService:
@@ -150,7 +151,7 @@ def main():
     import signal
     
     parser = argparse.ArgumentParser(description="Text-to-Speech Service")
-    parser.add_argument("--socket-path", default="/tmp/rt-tts.sock", 
+    parser.add_argument("--socket-path", default=get_runtime_config().get_tts_socket_path(),
                        help="Path to UNIX socket for IPC")
     parser.add_argument("--sample-rate", type=int, default=16000, 
                        help="Audio sample rate")

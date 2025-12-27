@@ -1,4 +1,4 @@
-{ pkgs, lib, ... }:
+{ pkgs, lib, projectSource ? ./. }:
 
 let
   # Import individual service packages from parts/python
@@ -6,25 +6,25 @@ let
   buildPythonApplication = python3.pkgs.buildPythonApplication;
   fetchPypi = pkgs.fetchPypi;
   
-  capturePackage = import ./../../parts/python/capture.nix {
+  capturePackage = import (projectSource + "/parts/python/capture.nix") {
     inherit lib python3 buildPythonApplication fetchPypi pkgs;
   };
-  playbackPackage = import ./../../parts/python/playback.nix {
+  playbackPackage = import (projectSource + "/parts/python/playback.nix") {
     inherit lib python3 buildPythonApplication fetchPypi pkgs;
   };
-  translatePackage = import ./../../parts/python/translate.nix {
+  translatePackage = import (projectSource + "/parts/python/translate.nix") {
     inherit lib python3 buildPythonApplication fetchPypi pkgs;
   };
-  ttsPackage = import ./../../parts/python/tts.nix {
+  ttsPackage = import (projectSource + "/parts/python/tts.nix") {
     inherit lib python3 buildPythonApplication fetchPypi pkgs;
   };
-  whisperPackage = import ./../../parts/python/whisper.nix {
+  whisperPackage = import (projectSource + "/parts/python/whisper.nix") {
     inherit lib python3 buildPythonApplication fetchPypi pkgs;
   };
-  hybridWhisperPackage = import ./../../parts/python/hybrid-whisper.nix {
+  hybridWhisperPackage = import (projectSource + "/parts/python/hybrid-whisper.nix") {
     inherit lib python3 buildPythonApplication fetchPypi pkgs;
   };
-  uiPackage = import ./../../parts/python/ui.nix {
+  uiPackage = import (projectSource + "/parts/python/ui.nix") {
     inherit lib python3 buildPythonApplication fetchPypi pkgs;
   };
 

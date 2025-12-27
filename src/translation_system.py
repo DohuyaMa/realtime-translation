@@ -7,6 +7,7 @@ from loguru import logger
 
 from .audio.routing import AudioRouter
 from .common.ipc import IPCClient
+from .core.runtime import get_runtime_config
 
 
 class TranslationSystem:
@@ -67,15 +68,15 @@ class TranslationSystem:
             logger.info(f"Using virtual audio devices: {input_device}, {output_device}")
             
             # Initialize IPC clients for modular services
-            self.capture_client = IPCClient("/tmp/rt-capture.sock")
+            self.capture_client = IPCClient(get_runtime_config().get_capture_socket_path())
             # Use different whisper socket based on Wyoming configuration
             if self.use_wyoming:
-                self.whisper_client = IPCClient("/tmp/rt-hybrid-whisper.sock")
+                self.whisper_client = IPCClient(get_runtime_config().get_hybrid_whisper_socket_path())
             else:
-                self.whisper_client = IPCClient("/tmp/rt-whisper.sock")
-            self.translate_client = IPCClient("/tmp/rt-translate.sock")
-            self.tts_client = IPCClient("/tmp/rt-tts.sock")
-            self.playback_client = IPCClient("/tmp/rt-playback.sock")
+                self.whisper_client = IPCClient(get_runtime_config().get_whisper_socket_path())
+            self.translate_client = IPCClient(get_runtime_config().get_translate_socket_path())
+            self.tts_client = IPCClient(get_runtime_config().get_tts_socket_path())
+            self.playback_client = IPCClient(get_runtime_config().get_playback_socket_path())
             
             # Connect to services
             try:

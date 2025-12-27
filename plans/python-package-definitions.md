@@ -75,10 +75,10 @@ parts/python/*.nix:
 ## Completed / Coordinating with Parallel Execution
 
 ### Completed Items
-- [x] Task 1 — Created individual buildPythonApplication definitions for each service
-- [x] Task 2 — Separated dependencies for each service
-- [x] Task 3 — Updated service entry points to work with console scripts
-- [ ] Task 4 — Test that each package builds and runs correctly
+- [x] Create individual buildPythonApplication definitions for each service — Individual packages created in parts/python/*.nix by Roo
+- [x] Separate dependencies for each service — Each service now has only required dependencies by Roo
+- [x] Update service entry points to work with console scripts — Console scripts defined for each service by Roo
+- [ ] Test that each package builds and runs correctly — Testing to be completed by Roo
 
 ### Notes for Parallel Execution
 - Task 4 (testing) can be executed after all package definitions are in place
