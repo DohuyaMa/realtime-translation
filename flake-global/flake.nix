@@ -18,16 +18,25 @@
     flake-parts.lib.mkFlake { inherit inputs; } {
       systems = [ "x86_64-linux" "aarch64-linux" "aarch64-darwin" "x86_64-darwin" ];
 
-      perSystem = { config, self', inputs', pkgs, system, ... }: {
-        # Import production packages
-        packages = (import ./prod/packages.nix { inherit pkgs; }).packages;
-        
-        # Import development shell
-        devShells = (import ./dev/devshell.nix { inherit pkgs; }).devShells;
-        
-        # Import apps
-        apps = (import ./prod/apps.nix { self = self'; }).apps;
-      };
+      perSystem = { config, self', inputs', pkgs, system, ... }:
+        let
+          lib = nixpkgs.lib;
+          # Import production packages
+          packages = (import ./prod/packages.nix { inherit pkgs lib; }).packages;
+          
+          # Import apps (using the packages we just defined)
+          apps = (import ./prod/apps.nix { self = self'; packages = packages; }).apps;
+        in
+        {
+          # Import production packages
+          packages = packages;
+          
+          # Import development shell
+          devShells = (import ./dev/devshell.nix { inherit pkgs; }).devShells;
+          
+          # Import apps
+          apps = apps;
+        };
 
       # Home Manager module
       flake = {

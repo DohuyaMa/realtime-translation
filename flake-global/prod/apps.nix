@@ -3,7 +3,7 @@
   apps = {
     default = {
       type = "app";
-      program = "${packages.default}/bin/real-time-translator";
+      program = "${packages.default}/bin/translator-ui";
     };
   };
 }

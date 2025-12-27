@@ -177,7 +177,7 @@ in
         path = [ pkgs.real-time-translator pkgs.pipewire pkgs.pulseaudio ];
         serviceConfig = {
           Type = "exec";
-          ExecStart = "${pkgs.real-time-translator}/bin/real-time-translator";
+          ExecStart = "${pkgs.real-time-translator}/bin/translator-ui";
           Restart = "on-failure";
           RestartSec = 5;
           Environment = [

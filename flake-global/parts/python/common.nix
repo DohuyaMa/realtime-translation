@@ -1,17 +1,21 @@
-# This file exists to create the directory structure
-{ pkgs }:
+{ lib
+, buildPythonApplication
+, python3
+, src
+, pname
+, dependencies
+}:
 
-{
-  # Common Python dependencies for all services
-  commonDeps = pythonPkgs: with pythonPkgs; [
-    pyyaml
-    python-dotenv
-    loguru
-    pyaudio
-    numpy
-    sounddevice
-    soundfile
-    librosa
-    pulsectl
-  ];
+buildPythonApplication {
+  inherit pname src;
+  version = "0.1.0";
+
+  pyproject = true;
+
+  propagatedBuildInputs = dependencies;
+
+  meta = with lib; {
+    license = licenses.mit;
+    maintainers = [ ];
+  };
 }
