@@ -1,4 +1,4 @@
-{ packages }:
+{ self, packages }:
 {
   apps = {
     default = {
