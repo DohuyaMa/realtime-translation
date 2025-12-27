@@ -10,6 +10,7 @@ from loguru import logger
 from typing import List, Optional
 
 from ..common.ipc import IPCClient
+from ..core.runtime import get_runtime_config
 
 
 class PipelineOrchestrator:
@@ -18,12 +19,13 @@ class PipelineOrchestrator:
     def __init__(self):
         """Initialize the pipeline orchestrator."""
         # Define socket paths for each service
+        runtime_config = get_runtime_config()
         self.socket_paths = {
-            'capture': '/tmp/rt-capture.sock',
-            'whisper': '/tmp/rt-whisper.sock', 
-            'translate': '/tmp/rt-translate.sock',
-            'tts': '/tmp/rt-tts.sock',
-            'playback': '/tmp/rt-playback.sock'
+            'capture': runtime_config.get_capture_socket_path(),
+            'whisper': runtime_config.get_whisper_socket_path(),
+            'translate': runtime_config.get_translate_socket_path(),
+            'tts': runtime_config.get_tts_socket_path(),
+            'playback': runtime_config.get_playback_socket_path()
         }
         
         # Service processes

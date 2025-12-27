@@ -8,9 +8,16 @@
       url = "github:nix-community/home-manager";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    flake-parts = {
+      url = "github:hercules-ci/flake-parts";
+      inputs.nixpkgs-lib.follows = "nixpkgs";
+    };
+    nix-unit = {
+      url = "github:nix-community/nix-unit";
+    };
   };
 
-  outputs = { self, nixpkgs, flake-utils, home-manager }:
+  outputs = { self, nixpkgs, flake-utils, home-manager, flake-parts, nix-unit }:
     let
       # Import modular configurations directly
       rtTranslatorModule = import ./flake-global/home-manager-module.nix;
@@ -29,7 +36,7 @@
         pkgs = nixpkgs.legacyPackages.${system};
         lib = nixpkgs.lib;
         # Get packages for this system
-        systemProdPackages = prodPackages { inherit pkgs lib; projectRoot = self; };
+        systemProdPackages = prodPackages { inherit pkgs lib; projectSource = self; };
         # Get devShell for this system
         systemDevShell = devShellConfig { inherit pkgs; };
         # Get apps for this system
@@ -51,5 +58,40 @@
 
       # NixOS module for production deployment
       nixosModules.virtual-sinks = import ./nixosModules/virtual-sinks.nix;
+
+      # Nix-unit tests for structural validation
+      tests = {
+        "all python services are defined" = {
+          expr = builtins.attrNames (self.packages.x86_64-linux or {});
+          expected = [
+            "capture"
+            "whisper"
+            "translate"
+            "tts"
+            "playback"
+            "app"
+            "hybrid-whisper"
+            "ui"
+          ];
+        };
+
+        "systemd services exist" = {
+          expr = builtins.attrNames (self.nixosModules or {});
+          expected = [
+            "virtual-sinks"
+          ];
+        };
+
+        "flake inputs are properly defined" = {
+          expr = builtins.attrNames self.inputs;
+          expected = [
+            "nixpkgs"
+            "flake-utils"
+            "home-manager"
+            "flake-parts"
+            "nix-unit"
+          ];
+        };
+      };
     };
 }

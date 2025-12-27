@@ -11,6 +11,7 @@ import sys
 
 from ..common.ipc import IPCServer
 from ..status_logger import StatusManager
+from ..core.runtime import get_runtime_config
 
 
 class PlaybackService:
@@ -177,7 +178,7 @@ def main():
     import signal
     
     parser = argparse.ArgumentParser(description="Audio Playback Service")
-    parser.add_argument("--socket-path", default="/tmp/rt-playback.sock", 
+    parser.add_argument("--socket-path", default=get_runtime_config().get_playback_socket_path(),
                        help="Path to UNIX socket for IPC")
     parser.add_argument("--sample-rate", type=int, default=16000, 
                        help="Audio sample rate")

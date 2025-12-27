@@ -14,7 +14,7 @@ onnxruntime>=1.15.0
 # Audio processing
 soundfile>=0.10.3
 librosa>=0.8.1
-pipewire-python>=0.1.2
+>=0.1.2
 pulsectl>=22.1.0
 
 # Utilities

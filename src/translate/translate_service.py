@@ -8,6 +8,7 @@ import sys
 
 from ..common.ipc import IPCServer
 from ..status_logger import StatusManager
+from ..core.runtime import get_runtime_config
 from transformers import pipeline, AutoTokenizer, AutoModelForSeq2SeqLM
 
 
@@ -173,7 +174,7 @@ def main():
     import signal
     
     parser = argparse.ArgumentParser(description="Translation Service")
-    parser.add_argument("--socket-path", default="/tmp/rt-translate.sock", 
+    parser.add_argument("--socket-path", default=get_runtime_config().get_translate_socket_path(),
                        help="Path to UNIX socket for IPC")
     parser.add_argument("--source-lang", default="uk", 
                        help="Source language code")
