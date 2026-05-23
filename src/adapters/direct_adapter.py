@@ -36,6 +36,9 @@ class DirectAdapter:
         
         # Store reference to audio router for direct device management in dev mode
         self.audio_router = self.translation_system.audio_router
+
+        # Track which services have been "started" in devShell mode (no IPC clients)
+        self._devshell_started: set = set()
     def reconfigure_wyoming(self, use_wyoming: bool, wyoming_host: str = "localhost", wyoming_port: int = 10300):
         """Reconfigure the adapter to use Wyoming services or local services."""
         try:
@@ -74,11 +77,14 @@ class DirectAdapter:
             
             # The TranslationSystem constructor handles the whisper client initialization
             # based on the use_wyoming parameter
-            
+
+            # Update audio_router reference to point to the new TranslationSystem's router
+            self.audio_router = self.translation_system.audio_router
+
             # If the pipeline was running, start it again with new configuration
             if was_running:
                 self.translation_system.start()
-            
+
             logger.info(f"Wyoming reconfiguration completed. Now using Wyoming: {use_wyoming}")
             return True
         except Exception as e:
@@ -116,7 +122,7 @@ class DirectAdapter:
                 # For services that can be started directly without IPC
                 if name in ['capture', 'whisper', 'translate', 'tts', 'playback']:
                     logger.info(f"Service {name} not started (no IPC client in devShell mode)")
-                    # Return True to avoid UI errors in devShell mode
+                    self._devshell_started.add(name)
                     return True
                 else:
                     logger.warning(f"Cannot start {name} service: not recognized")
@@ -140,7 +146,7 @@ class DirectAdapter:
                 # For services that can be stopped directly without IPC
                 if name in ['capture', 'whisper', 'translate', 'tts', 'playback']:
                     logger.info(f"Service {name} not stopped (no IPC client in devShell mode)")
-                    # Return True to avoid UI errors in devShell mode
+                    self._devshell_started.discard(name)
                     return True
                 else:
                     logger.warning(f"Cannot stop {name} service: not recognized")
@@ -153,7 +159,16 @@ class DirectAdapter:
     
     def get_status(self) -> Dict:
         """Get system status."""
-        return self.translation_system.get_stats()
+        status = self.translation_system.get_stats()
+        # In devShell mode all IPC clients are None; reflect manually-started services.
+        devshell_mode = all(
+            getattr(self.translation_system, f'{s}_client', None) is None
+            for s in ('capture', 'whisper', 'translate', 'tts', 'playback')
+        )
+        if devshell_mode:
+            for name in ('capture', 'whisper', 'translate', 'tts', 'playback'):
+                status[f'{name}_connected'] = name in self._devshell_started
+        return status
     
     def set_languages(self, source_lang: str, target_lang: str = "en") -> bool:
         """Set source and target languages."""
@@ -199,62 +214,42 @@ class DirectAdapter:
     
     def set_input_device(self, device_id: str) -> bool:
         """Set the input device."""
+        if not device_id or device_id.lower() == "default":
+            return True   # placeholder — nothing to set
         try:
-            # Check if the translation system has IPC clients available
             if self.translation_system.capture_client is not None:
-                # Use IPC client if available
                 result = self.translation_system.set_input_device(device_id)
                 return result is not None
-            else:
-                # In devShell mode, use audio router directly
-                if self.audio_router:
-                    try:
-                        self.audio_router.set_default_source(device_id)
-                        logger.info(f"Set input device directly: {device_id}")
-                        return True
-                    except Exception as e:
-                        logger.error(f"Failed to set input device directly: {e}")
-                        return False
-                else:
-                    logger.error("Audio router not available")
-                    return False
+            if self.audio_router:
+                self.audio_router.set_default_source(device_id)
+                logger.info(f"Set input device directly: {device_id}")
+                return True
+            logger.error("Audio router not available")
+            return False
         except Exception as e:
             logger.error(f"Failed to set input device: {e}")
             return False
-    
+
     def set_output_device(self, device_id: str) -> bool:
         """Set the output device."""
+        if not device_id or device_id.lower() == "default":
+            return True   # placeholder — nothing to set
         try:
-            # Check if the translation system has IPC clients available
-            if self.translation_system.playback_client is not None:
-                # Use IPC client if available
-                # Currently, TranslationSystem doesn't have a set_output_device method for IPC
-                # We'll implement direct setting as fallback
-                pass
-            
-            # In devShell mode, use audio router directly
             if self.audio_router:
-                try:
-                    self.audio_router.set_default_sink(device_id)
-                    logger.info(f"Set output device directly: {device_id}")
-                    return True
-                except Exception as e:
-                    logger.error(f"Failed to set output device directly: {e}")
-                    return False
-            else:
-                logger.error("Audio router not available")
-                return False
+                self.audio_router.set_default_sink(device_id)
+                logger.info(f"Set output device directly: {device_id}")
+                return True
+            logger.error("Audio router not available")
+            return False
         except Exception as e:
             logger.error(f"Failed to set output device: {e}")
             return False
     
     def get_audio_levels(self) -> Dict[str, float]:
         """Get current audio input/output levels."""
-        # Extract audio levels from the stats
-        stats = self.translation_system.get_stats()
         return {
-            'input': stats.get('audio_level', 0.0),
-            'output': 0.0  # Output level not currently tracked in TranslationSystem
+            'input': self.translation_system._audio_level_input,
+            'output': 0.0,
         }
     
     def toggle_translation(self, enabled: bool) -> bool:

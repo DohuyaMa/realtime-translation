@@ -16,6 +16,7 @@ class AudioRouter:
         """Initialize audio router."""
         self.pulse = pulsectl.Pulse('real-time-translator')
         self._lock = threading.Lock()
+        self._closed = False
         self.virtual_input = VIRTUAL_INPUT_SINK
         self.virtual_output = VIRTUAL_OUTPUT_SINK
 
@@ -181,6 +182,9 @@ class AudioRouter:
     def cleanup(self):
         """Clean up audio routing."""
         with self._lock:
+            if self._closed:
+                return
+            self._closed = True
             try:
                 logger.info("Audio routing cleanup completed")
             except Exception as e:
@@ -189,5 +193,7 @@ class AudioRouter:
                 self.pulse.close()
 
     def __del__(self):
-        """Cleanup on deletion."""
-        self.cleanup()
+        try:
+            self.cleanup()
+        except Exception:
+            pass

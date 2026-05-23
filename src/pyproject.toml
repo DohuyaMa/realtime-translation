@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "real-time-translator"
+version = "0.1.0"
+description = "Real-time translation system with audio capture, processing, and playback"
+authors = [
+    {name = "Your Name", email = "your.email@example.com"}
+]
+
+[project.scripts]
+translator-capture = "capture.capture_service:main"
+translator-playback = "playback.playback_service:main"
+translator-whisper = "whisper.whisper_service:main"
+translator-hybrid-whisper = "whisper.hybrid_whisper_service:main"
+translator-translate = "translate.translate_service:main"
+translator-tts = "tts.tts_service:main"
+translator-ui = "main:main"

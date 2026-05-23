@@ -21,6 +21,8 @@ from .settings_dialog import SettingsButton
 
 class MainWindow(QMainWindow):
     """Main window for the real-time translation application using controller pattern."""
+    _update_signal = Signal(object)
+
     def __init__(self, controller: Optional[UIController] = None):
         super().__init__()
         
@@ -44,6 +46,7 @@ class MainWindow(QMainWindow):
         self._current_wyoming_port = 10300
         
         # Connect UI controller callbacks
+        self._update_signal.connect(self._apply_ui_update)
         self.ui_controller.set_status_callback(self.handle_status_update)
         self.ui_controller.set_update_callback(self.update_ui_from_controller)
         
@@ -51,13 +54,9 @@ class MainWindow(QMainWindow):
         self.setup_tray_icon()
         self.refresh_device_lists()
         
-        # Start event polling to get updates from backend
-        self.ui_controller.start_event_polling(interval=0.5)  # Poll every 500ms
         self.service_status_panel.service_control_requested.connect(self.on_service_control_requested)
         self.service_status_panel.service_settings_requested.connect(self.on_service_settings_requested)
-        
-        # Start event polling to get updates from backend
-        self.ui_controller.start_event_polling(interval=0.5)  # Poll every 500ms
+        self.ui_controller.start_event_polling(interval=0.5)
         
     def init_ui(self):
         """Initialize the user interface."""
@@ -171,7 +170,6 @@ class MainWindow(QMainWindow):
         self.minimize_to_tray.setChecked(True)
         status_layout.addWidget(self.minimize_to_tray)
         
-        upper_layout.addLayout(status_layout)
         upper_layout.addLayout(status_layout)
         
         # Add upper widget to splitter
@@ -338,34 +336,24 @@ class MainWindow(QMainWindow):
             self.ui_controller.update_ui()
     
     def update_ui_from_controller(self, update_data: Dict):
-        """Update UI elements from controller data."""
-        # Update audio levels
+        """Called from UIController polling thread — marshals to main thread via signal."""
+        self._update_signal.emit(update_data)
+
+    def _apply_ui_update(self, update_data: Dict):
+        """Apply UI update — always runs on the main Qt thread."""
+        # Audio level
         input_level = int(update_data.get('input', 0) * 100)
         self.input_level.setValue(input_level)
-        
-        # Update status message if speech is detected
-        if update_data.get('is_speech', False):
-            self.status_manager.set_status('Speech detected')
-            self.status_manager.log_info('Speech detected')
-        
-        # Update service status indicators
-        self.update_service_status_display(update_data)
-    
-    def update_ui_from_controller(self, update_data: Dict):
-        """Update UI elements from controller data."""
-        # Update audio levels
-        input_level = int(update_data.get('input', 0) * 100)
-        self.input_level.setValue(input_level)
-        
-        # Update status message if speech is detected
-        if update_data.get('is_speech', False):
-            self.status_manager.set_status('Speech detected')
-            self.status_manager.log_info('Speech detected')
-        
-        # Update service status indicators using the service status panel
+
+        # Recognized / translated text panels
+        for text in update_data.get('pending_recognized', []):
+            self.status_manager.log_recognized(text)
+        for text in update_data.get('pending_translated', []):
+            self.status_manager.log_translated(text)
+
+        # Service status indicators
         from .service_status_panel import ServiceStatusManager
-        service_manager = ServiceStatusManager(self.service_status_panel)
-        service_manager.update_status(update_data)
+        ServiceStatusManager(self.service_status_panel).update_status(update_data)
     
     def on_service_control_requested(self, service_name: str, should_start: bool):
         """Handle service control requests from the service status panel."""

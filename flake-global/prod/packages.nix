@@ -6,25 +6,25 @@ let
   buildPythonApplication = python3.pkgs.buildPythonApplication;
   fetchPypi = pkgs.fetchPypi;
   
-  capturePackage = pkgs.callPackage ../../parts/python/capture.nix {
+  capturePackage = pkgs.callPackage ../parts/python/capture.nix {
     inherit python3 lib;
   };
-  playbackPackage = pkgs.callPackage ../../parts/python/playback.nix {
+  playbackPackage = pkgs.callPackage ../parts/python/playback.nix {
     inherit python3 lib;
   };
-  translatePackage = pkgs.callPackage ../../parts/python/translate.nix {
+  translatePackage = pkgs.callPackage ../parts/python/translate.nix {
     inherit python3 lib;
   };
-  ttsPackage = pkgs.callPackage ../../parts/python/tts.nix {
+  ttsPackage = pkgs.callPackage ../parts/python/tts.nix {
     inherit python3 lib;
   };
-  whisperPackage = pkgs.callPackage ../../parts/python/whisper.nix {
+  whisperPackage = pkgs.callPackage ../parts/python/whisper.nix {
     inherit python3 lib;
   };
-  hybridWhisperPackage = pkgs.callPackage ../../parts/python/hybrid-whisper.nix {
+  hybridWhisperPackage = pkgs.callPackage ../parts/python/hybrid-whisper.nix {
     inherit python3 lib;
   };
-  uiPackage = pkgs.callPackage ../../parts/python/ui.nix {
+  uiPackage = pkgs.callPackage ../parts/python/ui.nix {
     inherit python3 lib;
   };
 

@@ -51,25 +51,18 @@ class UIController:
             self._polling_thread.join(timeout=1.0)  # Wait up to 1 second for thread to finish
     
     def _poll_for_changes(self, interval: float):
-        """Background thread function to poll for changes and trigger events."""
+        """Background thread function to poll and push all updates to the UI."""
         while self._polling_active:
             try:
                 current_status = self._controller.get_status()
-                
-                # Compare with last status to detect changes
-                if current_status != self._last_status:
-                    # Trigger update callback with the new status
-                    if self._update_callback:
-                        audio_levels = self._controller.get_audio_levels()
-                        update_data = {
-                            **current_status,
-                            **audio_levels
-                        }
-                        self._update_callback(update_data)
-                    
-                    # Store the new status
-                    self._last_status = current_status
-                
+                # Always call the update callback so that:
+                # - audio levels refresh every tick
+                # - pending_recognized / pending_translated are never dropped
+                if self._update_callback:
+                    audio_levels = self._controller.get_audio_levels()
+                    update_data = {**current_status, **audio_levels}
+                    self._update_callback(update_data)
+                self._last_status = current_status
                 time.sleep(interval)
             except Exception as e:
                 logger.error(f"Error in polling thread: {e}")

@@ -1,18 +1,107 @@
 """Main coordinator for the real-time translation system using modular architecture."""
 
-from typing import Optional, Dict
+import base64
+import json
+import os
+import socket
+import struct
 import threading
-import queue
+from typing import Optional, Dict, List
 from loguru import logger
+import numpy as np
 
 from .audio.routing import AudioRouter
 from .common.ipc import IPCClient
 from .core.runtime import get_runtime_config
 
 
+class WhisperSocketClient:
+    """Client for whisper/hybrid-whisper using their native little-endian length-prefixed protocol.
+
+    Protocol: each frame = 4-byte little-endian length + payload.
+    Control frames are JSON; audio frames are raw int16 PCM bytes.
+    Results arrive as newline-delimited JSON on the same connection after "stop".
+    """
+
+    def __init__(self, socket_path: str):
+        self.socket_path = socket_path
+
+    def _send_frame(self, sock: socket.socket, data: bytes) -> None:
+        sock.sendall(struct.pack("<I", len(data)) + data)
+
+    def transcribe(self, audio_int16: np.ndarray, language: Optional[str] = None) -> List[str]:
+        """Send audio and return list of transcribed text segments.
+
+        Opens a fresh connection per call (required by whisper's session model).
+        """
+        if not os.path.exists(self.socket_path):
+            logger.debug(f"Whisper socket not found: {self.socket_path}")
+            return []
+
+        try:
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            sock.connect(self.socket_path)
+        except OSError as e:
+            logger.error(f"Cannot connect to whisper at {self.socket_path}: {e}")
+            return []
+
+        texts: List[str] = []
+        try:
+            start_cmd: Dict = {"cmd": "start"}
+            if language and language != "auto":
+                start_cmd["language"] = language
+            self._send_frame(sock, json.dumps(start_cmd).encode())
+
+            raw = audio_int16.tobytes()
+            for i in range(0, len(raw), 4096):
+                self._send_frame(sock, raw[i:i + 4096])
+
+            self._send_frame(sock, json.dumps({"cmd": "stop"}).encode())
+
+            sock.settimeout(15.0)
+            buf = b""
+            try:
+                while True:
+                    chunk = sock.recv(4096)
+                    if not chunk:
+                        break
+                    buf += chunk
+                    while b"\n" in buf:
+                        line, buf = buf.split(b"\n", 1)
+                        line = line.strip()
+                        if line:
+                            try:
+                                msg = json.loads(line)
+                                if msg.get("type") == "segment":
+                                    text = msg.get("text", "").strip()
+                                    if text:
+                                        texts.append(text)
+                            except Exception:
+                                pass
+            except socket.timeout:
+                pass
+        except Exception as e:
+            logger.error(f"Whisper transcription error: {e}")
+        finally:
+            try:
+                sock.close()
+            except Exception:
+                pass
+
+        return texts
+
+
+def _try_connect(client: IPCClient) -> bool:
+    try:
+        client.connect()
+        return True
+    except Exception:
+        return False
+
+
 class TranslationSystem:
     """Main coordinator for the real-time translation system."""
-    
+
     def __init__(
         self,
         source_lang: str = "auto",
@@ -20,387 +109,402 @@ class TranslationSystem:
         sample_rate: int = 16000,
         use_wyoming: bool = False,
         wyoming_host: str = "localhost",
-        wyoming_port: int = 10300
+        wyoming_port: int = 10300,
     ):
-        """Initialize translation system.
-        
-        Args:
-            source_lang: Source language code (uk for Ukrainian, pl for Polish, or auto)
-            target_lang: Target language code (en for English)
-            sample_rate: Audio sample rate
-            use_wyoming: Whether to use Wyoming whisper service
-            wyoming_host: Wyoming service host
-            wyoming_port: Wyoming service port
-        """
         self.source_lang = source_lang
         self.target_lang = target_lang
         self.sample_rate = sample_rate
         self.use_wyoming = use_wyoming
         self.wyoming_host = wyoming_host
         self.wyoming_port = wyoming_port
-        
-        # Components
+
         self.audio_router: Optional[AudioRouter] = None
-        
-        # IPC clients for modular services
+
+        # IPC clients — whisper has its own protocol, tracked separately
         self.capture_client: Optional[IPCClient] = None
-        self.whisper_client: Optional[IPCClient] = None
+        self.whisper_client: Optional[IPCClient] = None   # kept for API compat
         self.translate_client: Optional[IPCClient] = None
         self.tts_client: Optional[IPCClient] = None
         self.playback_client: Optional[IPCClient] = None
-        
-        # State
+
         self.is_running = False
         self.translation_enabled = True
         self.status_callback: Optional[callable] = None
-        
-        # Initialize components
+
+        self._capture_thread: Optional[threading.Thread] = None
+
+        # Audio level (updated every ~20 ms from capture callback)
+        self._audio_level_input: float = 0.0
+
+        # Pending recognized/translated text — consumed by get_stats() poll
+        self._pending_recognized: List[str] = []
+        self._pending_translated: List[str] = []
+        self._pipeline_lock = threading.Lock()
+
         self._initialize_components()
-        
         logger.info(f"Translation system initialized: {source_lang}->{target_lang}")
 
+    # ------------------------------------------------------------------
+    # Initialisation / reconnection
+    # ------------------------------------------------------------------
+
     def _initialize_components(self):
-        """Initialize system components."""
         try:
-            # Set up audio routing with fixed device names
             self.audio_router = AudioRouter()
             input_device, output_device = self.audio_router.get_virtual_devices()
             logger.info(f"Using virtual audio devices: {input_device}, {output_device}")
-            
-            # Initialize IPC clients for modular services
-            self.capture_client = IPCClient(get_runtime_config().get_capture_socket_path())
-            # Use different whisper socket based on Wyoming configuration
-            if self.use_wyoming:
-                self.whisper_client = IPCClient(get_runtime_config().get_hybrid_whisper_socket_path())
-            else:
-                self.whisper_client = IPCClient(get_runtime_config().get_whisper_socket_path())
-            self.translate_client = IPCClient(get_runtime_config().get_translate_socket_path())
-            self.tts_client = IPCClient(get_runtime_config().get_tts_socket_path())
-            self.playback_client = IPCClient(get_runtime_config().get_playback_socket_path())
-            
-            # Connect to services
-            try:
-                self.capture_client.connect()
-                self.whisper_client.connect()
-                self.translate_client.connect()
-                self.tts_client.connect()
-                self.playback_client.connect()
-                logger.info("Connected to all modular services")
-            except Exception as e:
-                logger.warning(f"Failed to connect to services: {e}")
-                # We'll continue but services need to be started separately
-                # Set clients to None if connection fails to avoid errors later
-                self.capture_client = None
-                self.whisper_client = None
-                self.translate_client = None
-                self.tts_client = None
-                self.playback_client = None
-                
         except Exception as e:
-            logger.error(f"Failed to initialize components: {e}")
+            logger.error(f"Failed to initialize AudioRouter: {e}")
             raise
 
-    def process_audio_chunk(self, audio_data):
-        """Process an audio chunk through the translation pipeline.
-        
-        Args:
-            audio_data: Audio samples to process
-        """
-        if not self.translation_enabled:
-            return
-            
-        try:
-            # Send audio to whisper service for recognition
-            if self.whisper_client:
-                import base64
-                audio_bytes = audio_data.astype(audio_data.dtype).tobytes()
-                audio_b64 = base64.b64encode(audio_bytes).decode('utf-8')
-                
-                result = self.whisper_client.send_message('process_audio', {
-                    'data': audio_b64,
-                    'format': str(audio_data.dtype),
-                    'sample_rate': self.sample_rate
-                })
-                
-                if result and result.get('status') == 'success':
-                    text = result['data']['text']
-                    logger.info(f"Recognized: {text}")
-                    
-                    # Translate the text
-                    if self.translate_client:
-                        translation_result = self.translate_client.send_message('translate_text', {
-                            'text': text
-                        })
-                        
-                        if translation_result and translation_result.get('status') == 'success':
-                            translated_text = translation_result['data']['translated_text']
-                            logger.info(f"Translated: {translated_text}")
-                            
-                            # Synthesize the translated text
-                            if self.tts_client:
-                                synthesis_result = self.tts_client.send_message('synthesize_text', {
-                                    'text': translated_text
-                                })
-                                
-                                if synthesis_result and synthesis_result.get('status') == 'success':
-                                    audio_data_b64 = synthesis_result['data']['audio_data']
-                                    
-                                    # Play the synthesized audio
-                                    if self.playback_client:
-                                        self.playback_client.send_message('play_audio', {
-                                            'audio_data': audio_data_b64
-                                        })
-                                        
-                                        if self.status_callback:
-                                            self.status_callback({
-                                                'status': 'translation_complete',
-                                                'original_text': text,
-                                                'translated_text': translated_text,
-                                                'duration': synthesis_result['data'].get('duration', 0)
-                                            })
-        except Exception as e:
-            logger.error(f"Error processing audio chunk: {e}")
+        self._connect_ipc_clients()
 
-    def _handle_silence(self):
-        """Handle detected silence period."""
-        if self.status_callback:
-            self.status_callback({
-                'status': 'silence_detected'
-            })
+    def _ipc_service_map(self):
+        cfg = get_runtime_config()
+        return [
+            ("capture",   "capture_client",   cfg.get_capture_socket_path()),
+            ("translate", "translate_client", cfg.get_translate_socket_path()),
+            ("tts",       "tts_client",       cfg.get_tts_socket_path()),
+            ("playback",  "playback_client",  cfg.get_playback_socket_path()),
+        ]
+
+    def _connect_ipc_clients(self):
+        """Try to connect to each service; leave as None if socket unavailable."""
+        for name, attr, path in self._ipc_service_map():
+            if getattr(self, attr) is None and os.path.exists(path):
+                client = IPCClient(path)
+                if _try_connect(client):
+                    setattr(self, attr, client)
+                    logger.info(f"Connected to {name} service")
+                else:
+                    logger.debug(f"{name} socket exists but connection refused")
+            elif not os.path.exists(path):
+                logger.debug(f"{name} socket not found: {path}")
+
+    def _whisper_socket_path(self) -> str:
+        cfg = get_runtime_config()
+        return (cfg.get_hybrid_whisper_socket_path()
+                if self.use_wyoming else cfg.get_whisper_socket_path())
+
+    # ------------------------------------------------------------------
+    # Start / Stop
+    # ------------------------------------------------------------------
 
     def start(self):
-        """Start the translation system."""
         if self.is_running:
             logger.warning("Translation system already running")
             return
-             
-        try:
-            # Start capture if client is available
-            if self.capture_client:
-                self.capture_client.send_message('start_capture', {})
-            self.is_running = True
-            logger.info("Translation system started")
-             
-        except Exception as e:
-            logger.error(f"Failed to start translation system: {e}")
-            raise
+
+        # Reconnect to any services that came up since last attempt
+        self._connect_ipc_clients()
+
+        self.is_running = True
+        self._capture_thread = threading.Thread(
+            target=self._pipeline_loop, daemon=True, name="rt-pipeline"
+        )
+        self._capture_thread.start()
+        logger.info("Translation system started")
 
     def stop(self):
-        """Stop the translation system."""
         if not self.is_running:
             return
-             
-        try:
-            # Stop capture if client is available
-            if self.capture_client:
-                self.capture_client.send_message('stop_capture', {})
-                  
-            self.is_running = False
-            logger.info("Translation system stopped")
-             
-        except Exception as e:
-            logger.error(f"Error stopping translation system: {e}")
+        self.is_running = False
+        if self._capture_thread:
+            self._capture_thread.join(timeout=6.0)
+            self._capture_thread = None
+        logger.info("Translation system stopped")
 
-    def start_service(self, service_name: str):
-        """Start a specific service."""
+    # ------------------------------------------------------------------
+    # Device selection helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _find_input_device() -> Optional[int]:
+        """Pick the best mic: prefer PulseAudio/PipeWire names over raw ALSA."""
+        import sounddevice as sd
+        preferred = ["Stereo Microphone", "Digital Microphone", "Built-in Microphone",
+                     "Microphone", "Mono Microphone"]
+        devices = sd.query_devices()
+        for pattern in preferred:
+            for d in devices:
+                if d["max_input_channels"] > 0 and pattern.lower() in d["name"].lower():
+                    logger.info(f"Selected input device [{d['index']}]: {d['name']}")
+                    return d["index"]
+        default = sd.query_devices(kind="input")
+        logger.info(f"Using default input device: {default['name']}")
+        return None
+
+    @staticmethod
+    def _find_output_device() -> Optional[int]:
+        """Pick the best speaker: prefer PulseAudio/PipeWire names over raw ALSA."""
+        import sounddevice as sd
+        preferred = ["Analog Stereo", "Speaker", "Headphone", "Internal Audio"]
+        devices = sd.query_devices()
+        for pattern in preferred:
+            for d in devices:
+                if d["max_output_channels"] > 0 and pattern.lower() in d["name"].lower():
+                    logger.info(f"Selected output device [{d['index']}]: {d['name']}")
+                    return d["index"]
+        default = sd.query_devices(kind="output")
+        logger.info(f"Using default output device: {default['name']}")
+        return None
+
+    # ------------------------------------------------------------------
+    # Pipeline loop
+    # ------------------------------------------------------------------
+
+    def _pipeline_loop(self):
+        """Capture via sounddevice at 48 kHz (PipeWire native), downsample to
+        16 kHz, chunk into 3-second windows, and drive the full pipeline.
+
+        pyaudio + ALSA is avoided because the ALSA-PipeWire bridge module path
+        differs between build-time and run-time Nix store entries, causing
+        ALSA to reject the 16 kHz sample rate.
+        """
+        import queue as _queue
+        import sounddevice as sd
+
+        CAPTURE_RATE = 48000          # PipeWire native rate
+        WHISPER_RATE = self.sample_rate  # 16000
+        CHUNK_SEC = 3.0
+        chunk_frames = int(CHUNK_SEC * CAPTURE_RATE)
+
+        audio_q: _queue.Queue = _queue.Queue()
+
+        def _cb(indata, frames, cb_time, status):
+            if status:
+                logger.debug(f"Sounddevice input status: {status}")
+            mono = indata[:, 0]
+            # RMS → 0..1 range (speech typically 0.01–0.3 full-scale)
+            rms = float(np.sqrt(np.mean(mono ** 2)))
+            self._audio_level_input = min(rms * 5.0, 1.0)
+            audio_q.put(mono.copy())
+
+        input_device = TranslationSystem._find_input_device()
         try:
-            if service_name == 'capture' and self.capture_client:
-                self.capture_client.send_message('start_capture', {})
-                logger.info(f"{service_name} service started")
-                return True
-            elif service_name == 'whisper' and self.whisper_client:
-                self.whisper_client.send_message('start_service', {})
-                logger.info(f"{service_name} service started")
-                return True
-            elif service_name == 'translate' and self.translate_client:
-                self.translate_client.send_message('start_service', {})
-                logger.info(f"{service_name} service started")
-                return True
-            elif service_name == 'tts' and self.tts_client:
-                self.tts_client.send_message('start_service', {})
-                logger.info(f"{service_name} service started")
-                return True
-            elif service_name == 'playback' and self.playback_client:
-                self.playback_client.send_message('start_service', {})
-                logger.info(f"{service_name} service started")
-                return True
-            else:
-                logger.warning(f"Service {service_name} not available or client not connected")
-                return False
+            stream = sd.InputStream(
+                samplerate=CAPTURE_RATE,
+                channels=1,
+                dtype="float32",
+                blocksize=1024,
+                callback=_cb,
+                device=input_device,
+            )
+            stream.start()
         except Exception as e:
-            logger.error(f"Failed to start {service_name} service: {e}")
+            logger.error(f"Cannot open microphone: {e}")
+            self.is_running = False
+            return
+
+        logger.info(f"Microphone capture started at {CAPTURE_RATE} Hz")
+        buf = np.empty(0, dtype=np.float32)
+        try:
+            while self.is_running:
+                try:
+                    chunk = audio_q.get(timeout=0.5)
+                    buf = np.append(buf, chunk)
+                except _queue.Empty:
+                    continue
+
+                if len(buf) >= chunk_frames:
+                    segment = buf[:chunk_frames]
+                    buf = buf[chunk_frames:]
+
+                    # Downsample float32 48k→16k via linear interpolation
+                    new_len = int(len(segment) * WHISPER_RATE / CAPTURE_RATE)
+                    resampled = np.interp(
+                        np.linspace(0, len(segment) - 1, new_len),
+                        np.arange(len(segment)),
+                        segment,
+                    )
+                    audio_int16 = np.clip(resampled * 32767, -32768, 32767).astype(np.int16)
+
+                    if self.translation_enabled:
+                        threading.Thread(
+                            target=self._process_chunk,
+                            args=(audio_int16,),
+                            daemon=True,
+                        ).start()
+        finally:
+            stream.stop()
+            stream.close()
+            logger.info("Microphone capture stopped")
+
+    def _process_chunk(self, audio_int16: np.ndarray):
+        """whisper → translate → TTS → sounddevice playback."""
+        whisper = WhisperSocketClient(self._whisper_socket_path())
+        lang = None if self.source_lang == "auto" else self.source_lang
+        texts = whisper.transcribe(audio_int16, language=lang)
+
+        for text in texts:
+            if not text:
+                continue
+            logger.info(f"Recognized: {text}")
+            with self._pipeline_lock:
+                self._pending_recognized.append(text)
+
+            translated = self._translate(text)
+            if not translated:
+                continue
+            logger.info(f"Translated: {translated}")
+            with self._pipeline_lock:
+                self._pending_translated.append(translated)
+
+            self._speak(translated)
+
+            if self.status_callback:
+                self.status_callback({
+                    "status": "translation_complete",
+                    "original_text": text,
+                    "translated_text": translated,
+                })
+
+    def _translate(self, text: str) -> Optional[str]:
+        if not self.translate_client:
+            return None
+        try:
+            result = self.translate_client.send_message("translate_text", {"text": text})
+            if result and result.get("status") == "success":
+                return result["data"]["translated_text"]
+            logger.warning(f"Translate service returned: {result}")
+        except Exception as e:
+            logger.error(f"Translate error: {e}")
+            self.translate_client = None   # force reconnect next cycle
+        return None
+
+    def _speak(self, text: str):
+        if not self.tts_client:
+            return
+        try:
+            result = self.tts_client.send_message("synthesize_text", {"text": text})
+            if not (result and result.get("status") == "success"):
+                logger.warning(f"TTS service returned: {result}")
+                return
+            audio_b64 = result["data"]["audio_data"]
+            audio_arr = np.frombuffer(base64.b64decode(audio_b64), dtype=np.float32)
+            samplerate = result["data"].get("sample_rate", 24000)
+            try:
+                import sounddevice as sd
+                out_dev = TranslationSystem._find_output_device()
+                sd.play(audio_arr, samplerate=samplerate, device=out_dev, blocking=True)
+            except Exception as e:
+                logger.error(f"Playback error: {e}")
+        except Exception as e:
+            logger.error(f"TTS error: {e}")
+            self.tts_client = None   # force reconnect next cycle
+
+    # ------------------------------------------------------------------
+    # Service control (IPC, forwarded)
+    # ------------------------------------------------------------------
+
+    def start_service(self, service_name: str) -> bool:
+        try:
+            if service_name == "capture" and self.capture_client:
+                self.capture_client.send_message("start_capture", {})
+            return True
+        except Exception as e:
+            logger.error(f"Failed to start {service_name}: {e}")
             return False
 
-    def stop_service(self, service_name: str):
-        """Stop a specific service."""
+    def stop_service(self, service_name: str) -> bool:
         try:
-            if service_name == 'capture' and self.capture_client:
-                self.capture_client.send_message('stop_capture', {})
-                logger.info(f"{service_name} service stopped")
-                return True
-            elif service_name == 'whisper' and self.whisper_client:
-                self.whisper_client.send_message('stop_service', {})
-                logger.info(f"{service_name} service stopped")
-                return True
-            elif service_name == 'translate' and self.translate_client:
-                self.translate_client.send_message('stop_service', {})
-                logger.info(f"{service_name} service stopped")
-                return True
-            elif service_name == 'tts' and self.tts_client:
-                self.tts_client.send_message('stop_service', {})
-                logger.info(f"{service_name} service stopped")
-                return True
-            elif service_name == 'playback' and self.playback_client:
-                self.playback_client.send_message('stop_service', {})
-                logger.info(f"{service_name} service stopped")
-                return True
-            else:
-                logger.warning(f"Service {service_name} not available or client not connected")
-                return False
+            if service_name == "capture" and self.capture_client:
+                self.capture_client.send_message("stop_capture", {})
+            return True
         except Exception as e:
-            logger.error(f"Failed to stop {service_name} service: {e}")
+            logger.error(f"Failed to stop {service_name}: {e}")
             return False
 
     def set_languages(self, source_lang: str, target_lang: str = "en"):
-        """Set source and target languages.
-        
-        Args:
-            source_lang: Source language code
-            target_lang: Target language code
-        """
         self.source_lang = source_lang
         self.target_lang = target_lang
-         
-        # Update whisper service languages
-        if self.whisper_client:
-            self.whisper_client.send_message('set_languages', {
-                'data': {
-                    'source_lang': source_lang,
-                    'target_lang': target_lang
-                }
-            })
-             
-        # Update translation service languages
-        if self.translate_client:
-            self.translate_client.send_message('set_languages', {
-                'data': {
-                    'source_lang': source_lang,
-                    'target_lang': target_lang
-                }
-            })
-             
+        if self.translate_client and source_lang != "auto":
+            try:
+                self.translate_client.send_message("set_languages", {
+                    "data": {"source_lang": source_lang, "target_lang": target_lang}
+                })
+            except Exception as e:
+                logger.error(f"Failed to update translate languages: {e}")
         logger.info(f"Languages updated: {source_lang}->{target_lang}")
 
-    def set_status_callback(self, callback: callable):
-        """Set callback for system status updates.
-        
-        Args:
-            callback: Function to call with status updates
-        """
-        self.status_callback = callback
-
     def toggle_translation(self, enabled: bool):
-        """Enable or disable translation.
-        
-        Args:
-            enabled: Whether translation should be enabled
-        """
         self.translation_enabled = enabled
         logger.info(f"Translation {'enabled' if enabled else 'disabled'}")
 
-    def get_audio_devices(self) -> Dict[str, Dict]:
-        """Get available audio devices.
-        
-        Returns:
-            Dictionary of available input and output devices
-        """
+    def set_status_callback(self, callback: callable):
+        self.status_callback = callback
+
+    # ------------------------------------------------------------------
+    # Audio devices
+    # ------------------------------------------------------------------
+
+    def get_audio_devices(self) -> Dict:
         if self.audio_router:
             return self.audio_router.list_devices()
-        return {'inputs': {}, 'outputs': {}}
+        return {"inputs": {}, "outputs": {}}
+
+    def set_input_device(self, device_name: str):
+        if self.capture_client:
+            try:
+                return self.capture_client.send_message(
+                    "set_input_device", {"device_name": device_name}
+                )
+            except Exception as e:
+                logger.error(f"Failed to set input device: {e}")
+        return None
+
+    # ------------------------------------------------------------------
+    # Status
+    # ------------------------------------------------------------------
 
     def get_stats(self) -> Dict:
-        """Get system statistics.
-        
-        Returns:
-            Dictionary of current system statistics
-        """
-        stats = {
-            'running': self.is_running,
-            'translation_enabled': self.translation_enabled,
-            'source_language': self.source_lang,
-            'target_language': self.target_lang
+        cfg = get_runtime_config()
+        whisper_path = self._whisper_socket_path()
+        stats: Dict = {
+            "running": self.is_running,
+            "translation_enabled": self.translation_enabled,
+            "source_language": self.source_lang,
+            "target_language": self.target_lang,
+            "whisper_connected": os.path.exists(whisper_path),
+            "audio_level_input": self._audio_level_input,
         }
-        
-        # Check connection status for each service
-        services = [
-            ('capture', self.capture_client),
-            ('whisper', self.whisper_client),
-            ('translate', self.translate_client),
-            ('tts', self.tts_client),
-            ('playback', self.playback_client)
-        ]
-        
-        for service_name, client in services:
-            try:
-                if client:
-                    # Check if we can communicate with the service
-                    # For now, we'll just check if the client is connected by attempting a simple message
-                    if service_name == 'capture':
-                        status = client.send_message('get_status', {})
-                        if status and status.get('status') == 'success':
-                            stats.update(status.get('data', {}))
-                            stats[f'{service_name}_connected'] = True
-                        else:
-                            stats[f'{service_name}_connected'] = False
-                    else:
-                        # For other services, just check if the client exists and can connect
-                        stats[f'{service_name}_connected'] = True
-                else:
-                    stats[f'{service_name}_connected'] = False
-            except Exception:
-                stats[f'{service_name}_connected'] = False
-              
+        for name, attr, path in self._ipc_service_map():
+            stats[f"{name}_connected"] = getattr(self, attr) is not None
+
+        # Drain pending text lists (thread-safe swap)
+        with self._pipeline_lock:
+            stats["pending_recognized"] = list(self._pending_recognized)
+            stats["pending_translated"] = list(self._pending_translated)
+            self._pending_recognized.clear()
+            self._pending_translated.clear()
+
         return stats
 
+    def all_services_connected(self) -> bool:
+        return all([
+            self.translate_client is not None,
+            self.tts_client is not None,
+        ])
+
+    # ------------------------------------------------------------------
+    # Cleanup
+    # ------------------------------------------------------------------
+
     def cleanup(self):
-        """Clean up system resources."""
         self.stop()
-         
         if self.audio_router:
             self.audio_router.cleanup()
-             
-        # Disconnect IPC clients
         for client in [self.capture_client, self.whisper_client,
-                      self.translate_client, self.tts_client, self.playback_client]:
+                       self.translate_client, self.tts_client, self.playback_client]:
             if client:
                 try:
                     client.disconnect()
-                except:
+                except Exception:
                     pass
-             
         logger.info("Translation system cleaned up")
 
     def __del__(self):
-        """Cleanup on deletion."""
-        self.cleanup()
-    def all_services_connected(self) -> bool:
-        """Check if all services are connected."""
-        return all([
-            self.capture_client is not None,
-            self.whisper_client is not None,
-            self.translate_client is not None,
-            self.tts_client is not None,
-            self.playback_client is not None
-        ])
-
-    def set_input_device(self, device_name: str):
-        """Set the input device for capture service."""
-        if self.capture_client:
-            try:
-                response = self.capture_client.send_message('set_input_device', {
-                    'device_name': device_name
-                })
-                return response
-            except Exception as e:
-                logger.error(f"Failed to set input device: {e}")
-                return None
+        try:
+            self.cleanup()
+        except Exception:
+            pass
