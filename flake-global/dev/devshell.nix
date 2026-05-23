@@ -5,6 +5,19 @@ let
   pythonPackages = pkgs.python313Packages;
   kokoroPackage = pythonPackages.kokoro;
 
+  # en_core_web_sm — spaCy model for misaki G2P (kokoro TTS dependency).
+  # spaZy tries to pip install this at runtime (and fails in Nix).
+  en_core_web_sm = pythonPackages.buildPythonPackage {
+    pname = "en_core_web_sm";
+    version = "3.8.0";
+    format = "wheel";
+    src = pkgs.fetchurl {
+      url = "https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl";
+      sha256 = "11gvl30zfa49rwkfnbm5yja7gwaxq37k8szdvvrvzm17nyfl4chr";
+    };
+    doCheck = false;
+  };
+
   # System dependencies for devShell
   systemPackages = with pkgs; [
     # Core system tools
@@ -67,6 +80,8 @@ in
           python-dotenv
           loguru
           kokoroPackage
+          sentencepiece
+          en_core_web_sm
           pytest
         ]))
       ] ++ [

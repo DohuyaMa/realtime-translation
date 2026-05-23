@@ -15,6 +15,8 @@ from ..status_logger import StatusManager
 from .wyoming_client import WyomingWhisperService
 from ..core.runtime import get_runtime_config
 
+_log_timing = time.monotonic
+
 PCM_DTYPE = np.int16
 SAMPLE_RATE = 16000
 
@@ -56,18 +58,32 @@ def run_server(socket_path: str, model_name: str, device: str, compute_type: str
     model = None
     wyoming_service = None
     if not use_wyoming:
-        logger.info("Loading Whisper model: {}", model_name)
-        model = WhisperModel(
-            model_name,
-            device=device,
-            compute_type=compute_type,
-        )
+        t0 = _log_timing()
+        logger.info("Loading Whisper model: {} (device={}, compute={})", model_name, device, compute_type)
+        try:
+            model = WhisperModel(
+                model_name,
+                device=device,
+                compute_type=compute_type,
+            )
+            load_time = _log_timing() - t0
+            logger.info("Whisper model '{}' loaded in {:.1f}s (device={}, compute={})",
+                         model_name, load_time, device, compute_type)
+        except Exception as e:
+            logger.exception("Failed to load Whisper model '{}': {}", model_name, e)
+            raise
     else:
-        logger.info("Using Wyoming whisper service at {}:{}", wyoming_host, wyoming_port)
+        logger.info("Connecting to Wyoming whisper service at {}:{}", wyoming_host, wyoming_port)
+        t0 = _log_timing()
         wyoming_service = WyomingWhisperService(wyoming_host, wyoming_port)
         if not wyoming_service.connect():
-            logger.error("Failed to connect to Wyoming service")
+            connect_time = _log_timing() - t0
+            logger.error("Failed to connect to Wyoming service at {}:{} after {:.1f}s",
+                         wyoming_host, wyoming_port, connect_time)
             return
+        connect_time = _log_timing() - t0
+        logger.info("Connected to Wyoming whisper service at {}:{} in {:.1f}s",
+                     wyoming_host, wyoming_port, connect_time)
 
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     server.bind(socket_path)
@@ -76,9 +92,10 @@ def run_server(socket_path: str, model_name: str, device: str, compute_type: str
     logger.info("rt-whisper listening on {}", socket_path)
 
     # Initialize status manager for logging
-    status = StatusManager()
+    status = StatusManager(component_name="hybrid_whisper")
     service_name = "Wyoming Whisper" if use_wyoming else f"Local Whisper ({model_name})"
-    status.log_info(f"Whisper service initialized with: {service_name}")
+    mode = "wyoming" if use_wyoming else "local"
+    status.log_info(f"Hybrid whisper initialized: mode={mode} {service_name} socket={socket_path}")
 
     while True:
         conn, _ = server.accept()
@@ -126,17 +143,33 @@ def run_server(socket_path: str, model_name: str, device: str, compute_type: str
                     elif cmd == "stop" and session:
                         if use_wyoming:
                             if session.wyoming_service:
+                                status.log_debug("Stopping Wyoming recognition session")
                                 session.wyoming_service.stop_recognition()
                         else:
                             # Local processing
                             audio = session.consume()
                             if audio is not None:
-                                segments, _ = model.transcribe(
+                                audio_len_sec = len(audio) / SAMPLE_RATE
+                                t0 = _log_timing()
+                                segments, info = model.transcribe(
                                     audio,
                                     language=session.language,
                                     vad_filter=True,
                                 )
-                                for s in segments:
+                                transcribe_time = _log_timing() - t0
+                                segments_list = list(segments)
+                                status.log_info(
+                                    f"Transcribed {audio_len_sec:.1f}s audio "
+                                    f"→ {len(segments_list)} segments "
+                                    f"in {transcribe_time:.2f}s "
+                                    f"(RTFX={audio_len_sec/transcribe_time:.1f}x)"
+                                )
+                                if info is not None and info.language:
+                                    status.log_debug(
+                                        f"Detected language={info.language} "
+                                        f"probability={info.language_probability:.2f}"
+                                    )
+                                for s in segments_list:
                                     status.log_info(f"Recognized text: {s.text}")
                                     conn.sendall(
                                         (json.dumps({
@@ -147,6 +180,8 @@ def run_server(socket_path: str, model_name: str, device: str, compute_type: str
                                             "final": True,
                                         }) + "\n").encode()
                                     )
+                            else:
+                                status.log_debug("Session stopped with no audio buffered")
                         session = None
                         status.log_info("Session stopped")
 
@@ -154,33 +189,45 @@ def run_server(socket_path: str, model_name: str, device: str, compute_type: str
                 else:
                     if session:
                         session.feed_audio(payload)
-                        status.log_debug(f"Received audio chunk size={len(payload)}")
+                        if not use_wyoming:
+                            buf_len = len(session.buffer)
+                            status.log_debug(
+                                f"Audio chunk: size={len(payload)} "
+                                f"buf_total={buf_len} ({buf_len/2/SAMPLE_RATE:.1f}s)"
+                            )
+                        else:
+                            status.log_debug(f"Forwarded audio chunk size={len(payload)} to Wyoming")
 
         except Exception as e:
             logger.exception("Client error: {}", e)
-            status.log_error(f"Client error: {e}")
+            status.log_exception(f"Client error: {e}")
         finally:
             conn.close()
-            logger.info("Client disconnected")
-            status.log_info("Client disconnected")
+            status.log_debug("Client disconnected")
 
 
 def _handle_wyoming_result(conn, result):
     """Handle result from Wyoming service and send to client."""
     try:
         # Forward Wyoming result to client
-        if 'text' in result:
+        text = result.get('text', '')
+        if text:
+            logger.debug(f"Wyoming result: text='{text[:80]}{'...' if len(text) > 80 else ''}' "
+                         f"confidence={result.get('confidence', 'N/A')}")
+        if text:
             conn.sendall(
                 (json.dumps({
                     "type": "segment",
-                    "text": result.get('text', ''),
+                    "text": text,
                     "start": result.get('start', 0),
                     "end": result.get('end', 0),
                     "final": True,
                 }) + "\n").encode()
             )
+    except BrokenPipeError:
+        logger.error("Broken pipe sending Wyoming result — client disconnected")
     except Exception as e:
-        logger.error(f"Error sending Wyoming result to client: {e}")
+        logger.exception(f"Error sending Wyoming result to client: {e}")
 
 
 def main():

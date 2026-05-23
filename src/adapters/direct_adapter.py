@@ -1,4 +1,8 @@
 """Direct adapter that wraps the existing TranslationSystem."""
+import os
+import subprocess
+import sys
+import time
 from typing import Dict, List
 from loguru import logger
 
@@ -6,20 +10,31 @@ from ..translation_system import TranslationSystem
 from ..controller.controller import Device
 from ..core.preflight.pipewire import PipeWirePreflight
 from ..core.env import setup_ml_env
+from ..core.runtime import get_runtime_config
 
 
 class DirectAdapter:
     """Direct adapter that wraps the existing TranslationSystem implementation."""
     
-    def __init__(self, source_lang: str = "auto", target_lang: str = "en", sample_rate: int = 16000, skip_preflight: bool = False, use_wyoming: bool = False, wyoming_host: str = "localhost", wyoming_port: int = 10300):
-        """Initialize the DirectAdapter with a TranslationSystem instance."""
+    def __init__(self, source_lang: str = "auto", target_lang: str = "en", sample_rate: int = 16000, skip_preflight: bool = False, use_wyoming: bool = False, wyoming_host: str = "localhost", wyoming_port: int = 10300, auto_spawn_services: bool = True):
         # Check PipeWire availability before proceeding (unless explicitly skipped)
         if not skip_preflight:
+            logger.info("Running PipeWire preflight check...")
             if not PipeWirePreflight.check():
-                raise RuntimeError("PipeWire preflight check failed. Please ensure PipeWire virtual sinks are set up.")
+                logger.error("PipeWire preflight check failed — virtual sinks not found")
+                raise RuntimeError(
+                    "PipeWire preflight check failed. "
+                    "Ensure PipeWire virtual sinks are set up: "
+                    "run `systemctl --user start rt-virtual-sinks` or `nix develop`"
+                )
+            logger.info("PipeWire preflight check passed")
+        else:
+            logger.warning("PipeWire preflight check skipped via skip_preflight=True")
         
         # Set up environment variables
         setup_ml_env()
+        logger.info(f"Initializing DirectAdapter: {source_lang}->{target_lang} "
+                     f"wyoming={use_wyoming} sr={sample_rate}Hz")
         self.translation_system = TranslationSystem(
             source_lang=source_lang,
             target_lang=target_lang,
@@ -39,10 +54,15 @@ class DirectAdapter:
 
         # Track which services have been "started" in devShell mode (no IPC clients)
         self._devshell_started: set = set()
+
+        self._service_processes: Dict[str, subprocess.Popen] = {}
+        self._auto_spawn_services = auto_spawn_services
+
     def reconfigure_wyoming(self, use_wyoming: bool, wyoming_host: str = "localhost", wyoming_port: int = 10300):
         """Reconfigure the adapter to use Wyoming services or local services."""
         try:
             # Store new Wyoming settings
+            old_wyoming = self.use_wyoming
             self.use_wyoming = use_wyoming
             self.wyoming_host = wyoming_host
             self.wyoming_port = wyoming_port
@@ -51,9 +71,12 @@ class DirectAdapter:
             current_status = self.translation_system.get_stats()
             was_running = current_status.get('running', False)
             
-            # Stop the current pipeline if it's running
+            logger.info(f"Reconfiguring: wyoming {old_wyoming}→{use_wyoming} "
+                         f"({wyoming_host}:{wyoming_port}) "
+                         f"pipeline_running={was_running}")
+            
             if was_running:
-                self.translation_system.stop()
+                self.stop_pipeline()
             
             # Store current language settings
             source_lang = self.translation_system.source_lang
@@ -64,7 +87,6 @@ class DirectAdapter:
             self.translation_system.cleanup()
             
             # Create a new translation system with the new Wyoming configuration
-            # We need to update the socket path to use the appropriate whisper service
             from ..translation_system import TranslationSystem
             self.translation_system = TranslationSystem(
                 source_lang=source_lang,
@@ -75,38 +97,117 @@ class DirectAdapter:
                 wyoming_port=wyoming_port
             )
             
-            # The TranslationSystem constructor handles the whisper client initialization
-            # based on the use_wyoming parameter
-
-            # Update audio_router reference to point to the new TranslationSystem's router
             self.audio_router = self.translation_system.audio_router
 
-            # If the pipeline was running, start it again with new configuration
             if was_running:
-                self.translation_system.start()
+                self.start_pipeline()
 
-            logger.info(f"Wyoming reconfiguration completed. Now using Wyoming: {use_wyoming}")
+            logger.info(f"Wyoming reconfiguration completed (wyoming={use_wyoming})")
             return True
         except Exception as e:
-            logger.error(f"Failed to reconfigure Wyoming settings: {e}")
+            logger.exception(f"Failed to reconfigure Wyoming settings: {e}")
             return False
 
+    # ------------------------------------------------------------------
+    # Service subprocess lifecycle
+    # ------------------------------------------------------------------
+
+    def _spawn_service(self, name: str, module: str, args: List[str]) -> None:
+        cmd = [sys.executable, '-m', module] + args
+        logger.info(f"Spawning {name} service: python -m {module} {' '.join(args)}")
+        process = subprocess.Popen(cmd)
+        self._service_processes[name] = process
+
+    def _ensure_essential_services(self) -> None:
+        if not self._auto_spawn_services:
+            return
+        cfg = get_runtime_config()
+        if self.use_wyoming:
+            whisper_socket = cfg.get_hybrid_whisper_socket_path()
+            whisper_module = 'src.whisper.hybrid_whisper_service'
+            whisper_args = [
+                '--socket-path', whisper_socket,
+                '--use-wyoming',
+                '--wyoming-host', self.wyoming_host,
+                '--wyoming-port', str(self.wyoming_port),
+            ]
+        else:
+            whisper_socket = cfg.get_whisper_socket_path()
+            whisper_module = 'src.whisper.whisper_service'
+            whisper_args = ['--socket-path', whisper_socket]
+        if not os.path.exists(whisper_socket):
+            self._spawn_service('whisper', whisper_module, whisper_args)
+        translate_socket = cfg.get_translate_socket_path()
+        if not os.path.exists(translate_socket):
+            self._spawn_service('translate', 'src.translate.translate_service',
+                                ['--socket-path', translate_socket])
+        tts_socket = cfg.get_tts_socket_path()
+        if not os.path.exists(tts_socket):
+            self._spawn_service('tts', 'src.tts.tts_service',
+                                ['--socket-path', tts_socket])
+
+    def _wait_for_services(self, timeout: float = 120.0) -> None:
+        if not self._auto_spawn_services:
+            return
+        spawn_names = set(self._service_processes.keys())
+        if not spawn_names:
+            return
+        cfg = get_runtime_config()
+        check = []
+        if 'whisper' in spawn_names:
+            check.append(('whisper', cfg.get_hybrid_whisper_socket_path()
+                         if self.use_wyoming else cfg.get_whisper_socket_path()))
+        if 'translate' in spawn_names:
+            check.append(('translate', cfg.get_translate_socket_path()))
+        if 'tts' in spawn_names:
+            check.append(('tts', cfg.get_tts_socket_path()))
+        start = time.monotonic()
+        for name, path in check:
+            while not os.path.exists(path):
+                elapsed = time.monotonic() - start
+                if elapsed > timeout:
+                    logger.warning(f"Timed out ({elapsed:.0f}s) waiting for {name} socket: {path}")
+                    break
+                time.sleep(0.5)
+
+    def _stop_subprocesses(self) -> None:
+        if not self._service_processes:
+            return
+        logger.info(f"Terminating {len(self._service_processes)} service subprocess(es)...")
+        for name, proc in self._service_processes.items():
+            try:
+                proc.terminate()
+                proc.wait(timeout=5)
+                logger.debug(f"{name} service subprocess terminated")
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                logger.warning(f"{name} service subprocess killed (SIGKILL)")
+            except Exception:
+                pass
+        self._service_processes.clear()
+        logger.info("All service subprocesses terminated")
+
     def start_pipeline(self) -> bool:
-        """Start the entire translation pipeline."""
         try:
+            logger.info("Starting translation pipeline...")
+            self._ensure_essential_services()
+            self._wait_for_services()
             self.translation_system.start()
+            logger.info("Translation pipeline started")
             return True
         except Exception as e:
-            logger.error(f"Failed to start pipeline: {e}")
+            logger.exception(f"Failed to start pipeline: {e}")
             return False
     
     def stop_pipeline(self) -> bool:
-        """Stop the entire translation pipeline."""
         try:
+            logger.info("Stopping translation pipeline...")
             self.translation_system.stop()
+            self._stop_subprocesses()
+            logger.info("Translation pipeline stopped")
             return True
         except Exception as e:
-            logger.error(f"Failed to stop pipeline: {e}")
+            logger.exception(f"Failed to stop pipeline: {e}")
             return False
     
     def start_service(self, name: str) -> bool:
@@ -262,5 +363,5 @@ class DirectAdapter:
             return False
     
     def cleanup(self) -> None:
-        """Clean up resources."""
+        self._stop_subprocesses()
         self.translation_system.cleanup()

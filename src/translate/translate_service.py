@@ -11,6 +11,8 @@ from ..status_logger import StatusManager
 from ..core.runtime import get_runtime_config
 from transformers import pipeline, AutoTokenizer, AutoModelForSeq2SeqLM
 
+_log_timing = time.monotonic
+
 
 class TranslationService:
     """Translation service for the real-time translation system."""
@@ -32,6 +34,12 @@ class TranslationService:
         self.source_lang = source_lang
         self.target_lang = target_lang
         
+        # Status manager — must be created before _initialize_model
+        self.status = StatusManager(component_name="translate")
+        
+        self.is_running = False
+        self.processing_lock = threading.Lock()
+        
         # Initialize translation model
         self._initialize_model()
         
@@ -40,13 +48,6 @@ class TranslationService:
         self.ipc_server.register_handler('translate_text', self._handle_translate_text)
         self.ipc_server.register_handler('get_status', self._handle_get_status)
         self.ipc_server.register_handler('set_languages', self._handle_set_languages)
-        
-        # State
-        self.is_running = False
-        self.processing_lock = threading.Lock()
-        
-        # Status manager
-        self.status = StatusManager()
         
         logger.info(f"Translation service initialized: {source_lang}->{target_lang}")
         self.status.log_info(f"Translation service initialized: {source_lang}->{target_lang}")
@@ -62,30 +63,32 @@ class TranslationService:
             os.environ.setdefault("HF_HUB_CACHE", os.path.expanduser("~/real-time-translator-cache/huggingface/hub"))
             
             # Initialize translation pipeline
-            # Using a more general model for demonstration
-            # In practice, you might want to use language-specific models
             model_name = f"Helsinki-NLP/opus-mt-{self.source_lang}-{self.target_lang}"
+            self.status.log_info(f"Loading translation model: {model_name}")
+            t0 = _log_timing()
             self.translator = pipeline(
                 "translation",
                 model=model_name,
                 tokenizer=model_name
             )
-            
-            logger.info(f"Translation model loaded: {model_name}")
-            self.status.log_info(f"Translation model loaded: {model_name}")
+            load_time = _log_timing() - t0
+            logger.info(f"Translation model '{model_name}' loaded in {load_time:.1f}s")
+            self.status.log_info(f"Translation model loaded in {load_time:.1f}s: {model_name}")
             self.status.set_status("Translation model loaded")
             
         except Exception as e:
-            logger.warning(f"Could not load specific translation model: {e}")
-            self.status.log_warning(f"Could not load specific translation model: {e}")
-            logger.info("Using default translation model")
-            self.status.log_info("Using default translation model")
+            self.status.log_warning(f"Could not load model '{model_name}': {e}")
+            self.status.log_info("Falling back to default translation model (en↔de)")
             # Fallback to a general model
             try:
-                self.translator = pipeline("translation", model="Helsinki-NLP/opus-mt-en-de")
+                fallback_model = "Helsinki-NLP/opus-mt-en-de"
+                t0 = _log_timing()
+                self.translator = pipeline("translation", model=fallback_model)
+                load_time = _log_timing() - t0
+                self.status.log_warning(f"Fallback model '{fallback_model}' loaded in {load_time:.1f}s")
+                logger.info(f"Fallback translation model '{fallback_model}' loaded in {load_time:.1f}s")
             except Exception as e2:
-                logger.error(f"Could not load fallback translation model: {e2}")
-                self.status.log_error(f"Could not load fallback translation model: {e2}")
+                self.status.log_exception(f"Could not load fallback translation model: {e2}")
                 raise
     
     def start(self):
@@ -111,13 +114,19 @@ class TranslationService:
                     return {"status": "error", "message": "No text provided"}
                 
                 self.status.set_status("Translating text...")
-                self.status.log_info(f"Original text: {text}")
+                self.status.log_info(f"Translating ({len(text)} chars): {text[:120]}{'...' if len(text) > 120 else ''}")
                 
+                t0 = _log_timing()
                 # Perform translation
                 result = self.translator(text)
+                elapsed = _log_timing() - t0
                 translated_text = result[0]['translation_text'] if isinstance(result, list) else result.get('translation_text', '')
                 
-                self.status.log_info(f"Translated text: {translated_text}")
+                self.status.log_info(
+                    f"Translated in {elapsed*1000:.0f}ms "
+                    f"({len(text)}→{len(translated_text)} chars, "
+                    f"{self.source_lang}→{self.target_lang}): {translated_text[:120]}"
+                )
                 
                 return {
                     "status": "success",
@@ -125,13 +134,13 @@ class TranslationService:
                         "original_text": text,
                         "translated_text": translated_text,
                         "source_language": self.source_lang,
-                        "target_language": self.target_lang
+                        "target_language": self.target_lang,
+                        "timing_ms": round(elapsed * 1000, 1),
                     }
                 }
                 
             except Exception as e:
-                logger.error(f"Error translating text: {e}")
-                self.status.log_error(f"Error translating text: {e}")
+                self.status.log_exception(f"Translation failed: {e}")
                 return {"status": "error", "message": str(e)}
     
     def _handle_get_status(self, message: Dict) -> Dict[str, Any]:

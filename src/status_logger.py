@@ -49,9 +49,13 @@ class StatusLogger:
 class StatusManager:
     """Manager for handling status updates and logging."""
     
-    def __init__(self, status_logger: StatusLogger = None):
+    def __init__(self, status_logger: StatusLogger = None, component_name: str = None):
         self.status_logger = status_logger or StatusLogger()
+        self._component = component_name or "unknown"
         self._last_status = ""
+    
+    def _prefix(self, message: str) -> str:
+        return f"[{self._component}] {message}"
     
     def set_status(self, message: str):
         """Set the current status."""
@@ -59,24 +63,35 @@ class StatusManager:
     
     def log_info(self, message: str):
         """Log an info message."""
+        msg = self._prefix(message)
         if self.status_logger:
-            self.status_logger.add_info(message)
-        logger.info(message)
+            self.status_logger.add_info(msg)
+        logger.info(msg)
     
     def log_warning(self, message: str):
         """Log a warning message."""
+        msg = self._prefix(message)
         if self.status_logger:
-            self.status_logger.add_warning(message)
-        logger.warning(message)
+            self.status_logger.add_warning(msg)
+        logger.warning(msg)
     
-    def log_error(self, message: str):
+    def log_error(self, message: str, exc_info: bool = False):
         """Log an error message."""
+        msg = self._prefix(message)
         if self.status_logger:
-            self.status_logger.add_error(message)
-        logger.error(message)
+            self.status_logger.add_error(msg)
+        logger.error(msg, exc_info=exc_info)
     
     def log_debug(self, message: str):
         """Log a debug message."""
+        msg = self._prefix(message)
         if self.status_logger:
-            self.status_logger.add_debug(message)
-        logger.debug(message)
+            self.status_logger.add_debug(msg)
+        logger.debug(msg)
+    
+    def log_exception(self, message: str):
+        """Log an exception with full traceback."""
+        msg = self._prefix(message)
+        if self.status_logger:
+            self.status_logger.add_error(f"{msg}: see traceback above")
+        logger.exception(msg)

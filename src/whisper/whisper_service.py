@@ -14,6 +14,8 @@ from loguru import logger
 from ..status_logger import StatusManager
 from ..core.runtime import get_runtime_config
 
+_log_timing = time.monotonic  # micro-optimization: local ref
+
 PCM_DTYPE = np.int16
 SAMPLE_RATE = 16000
 
@@ -40,14 +42,24 @@ class WhisperSession:
 
 def run_server(socket_path: str, model_name: str, device: str, compute_type: str):
     if os.path.exists(socket_path):
+        logger.debug(f"Removing stale socket: {socket_path}")
         os.unlink(socket_path)
 
-    logger.info("Loading Whisper model: {}", model_name)
-    model = WhisperModel(
-        model_name,
-        device=device,
-        compute_type=compute_type,
-    )
+    # Log model loading with timing
+    t0 = _log_timing()
+    logger.info("Loading Whisper model: {} (device={}, compute={})", model_name, device, compute_type)
+    try:
+        model = WhisperModel(
+            model_name,
+            device=device,
+            compute_type=compute_type,
+        )
+        load_time = _log_timing() - t0
+        logger.info("Whisper model '{}' loaded in {:.1f}s (device={}, compute={})",
+                     model_name, load_time, device, compute_type)
+    except Exception as e:
+        logger.exception("Failed to load Whisper model '{}': {}", model_name, e)
+        raise
 
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     server.bind(socket_path)
@@ -56,8 +68,12 @@ def run_server(socket_path: str, model_name: str, device: str, compute_type: str
     logger.info("rt-whisper listening on {}", socket_path)
 
     # Initialize status manager for logging
-    status = StatusManager()
-    status.log_info(f"Whisper service initialized with model: {model_name}")
+    status = StatusManager(component_name="whisper")
+    status.log_info(
+        f"Whisper service initialized: model={model_name} "
+        f"device={device} compute={compute_type} "
+        f"load_time={load_time:.1f}s"
+    )
 
     while True:
         conn, _ = server.accept()
@@ -91,12 +107,27 @@ def run_server(socket_path: str, model_name: str, device: str, compute_type: str
                     elif cmd == "stop" and session:
                         audio = session.consume()
                         if audio is not None:
-                            segments, _ = model.transcribe(
+                            audio_len_sec = len(audio) / SAMPLE_RATE
+                            t0 = _log_timing()
+                            segments, info = model.transcribe(
                                 audio,
                                 language=session.language,
                                 vad_filter=True,
                             )
-                            for s in segments:
+                            transcribe_time = _log_timing() - t0
+                            segments_list = list(segments)
+                            status.log_info(
+                                f"Transcribed {audio_len_sec:.1f}s audio "
+                                f"→ {len(segments_list)} segments "
+                                f"in {transcribe_time:.2f}s "
+                                f"(RTFX={audio_len_sec/transcribe_time:.1f}x)"
+                            )
+                            if info is not None and info.language:
+                                status.log_debug(
+                                    f"Detected language={info.language} "
+                                    f"probability={info.language_probability:.2f}"
+                                )
+                            for s in segments_list:
                                 status.log_info(f"Recognized text: {s.text}")
                                 conn.sendall(
                                     (json.dumps({
@@ -107,6 +138,8 @@ def run_server(socket_path: str, model_name: str, device: str, compute_type: str
                                         "final": True,
                                     }) + "\n").encode()
                                 )
+                        else:
+                            status.log_debug("Session stopped with no audio buffered")
                         session = None
                         status.log_info("Session stopped")
 
@@ -114,15 +147,18 @@ def run_server(socket_path: str, model_name: str, device: str, compute_type: str
                 else:
                     if session:
                         session.feed_audio(payload)
-                        status.log_debug(f"Received audio chunk size={len(payload)}")
+                        buf_len = len(session.buffer)
+                        status.log_debug(
+                            f"Audio chunk: size={len(payload)} "
+                            f"buf_total={buf_len} ({buf_len/2/SAMPLE_RATE:.1f}s)"
+                        )
 
         except Exception as e:
             logger.exception("Client error: {}", e)
-            status.log_error(f"Client error: {e}")
+            status.log_exception(f"Client error: {e}")
         finally:
             conn.close()
-            logger.info("Client disconnected")
-            status.log_info("Client disconnected")
+            status.log_debug("Client disconnected")
 
 
 def main():

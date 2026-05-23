@@ -13,6 +13,8 @@ from ..common.ipc import IPCServer
 from ..status_logger import StatusManager
 from ..core.runtime import get_runtime_config
 
+_log_timing = time.monotonic
+
 
 class PlaybackService:
     """Audio playback service for the real-time translation system."""
@@ -51,11 +53,17 @@ class PlaybackService:
         self.ipc_server.register_handler('set_device', self._handle_set_device)
         
         # Audio queue for playback
-        self.audio_queue = []
+        self.audio_queue: list = []
         self.playback_lock = threading.Lock()
         
+        # Diagnostics
+        self._chunks_played = 0
+        self._chunks_dropped = 0
+        self._playback_errors = 0
+        self._total_bytes_played = 0
+        
         # Status manager
-        self.status = StatusManager()
+        self.status = StatusManager(component_name="playback")
         
         logger.info(f"Playback service initialized: {sample_rate}Hz, {channels} channels")
         self.status.log_info(f"Playback service initialized: {sample_rate}Hz, {channels} channels")
@@ -64,6 +72,20 @@ class PlaybackService:
     def start(self):
         """Start the playback service."""
         self.ipc_server.start()
+        
+        # Log device info for diagnostics
+        try:
+            device_count = self.audio.get_device_count()
+            dev_info = None
+            if self.output_device_index is not None:
+                dev_info = self.audio.get_device_info_by_index(self.output_device_index)
+            self.status.log_info(
+                f"Playback starting: {self.sample_rate}Hz {self.channels}ch "
+                f"device={self.output_device_index or 'default'} "
+                f"({dev_info.get('name', '?') if dev_info else '?'})"
+            )
+        except Exception as e:
+            self.status.log_debug(f"Could not query device info: {e}")
         
         # Open audio stream for output to rt_virtual_output
         try:
@@ -75,12 +97,16 @@ class PlaybackService:
                 output_device_index=self.output_device_index,
                 frames_per_buffer=self.chunk_size
             )
-            logger.info("Playback stream opened")
+            self.status.log_info("Playback stream opened successfully")
         except Exception as e:
-            logger.error(f"Could not open playback stream: {e}")
+            self.status.log_exception(f"Could not open playback stream: {e}")
             # Continue anyway as this might be handled differently in the actual setup
         
         self.is_running = True
+        self._chunks_played = 0
+        self._chunks_dropped = 0
+        self._playback_errors = 0
+        self._total_bytes_played = 0
         logger.info("Playback service started")
         self.status.set_status("Ready for playback...")
         self.status.log_info("Playback service started")
@@ -94,11 +120,16 @@ class PlaybackService:
                 self.stream.stop_stream()
                 self.stream.close()
             except Exception as e:
-                logger.error(f"Error stopping playback stream: {e}")
+                self.status.log_exception(f"Error stopping playback stream: {e}")
         
         self.audio.terminate()
         self.ipc_server.stop()
-        logger.info("Playback service stopped")
+        self.status.log_info(
+            f"Playback stopped: {self._chunks_played} chunks "
+            f"({self._total_bytes_played}B) played, "
+            f"{self._chunks_dropped} dropped, "
+            f"{self._playback_errors} errors"
+        )
     
     def _handle_play_audio(self, message: Dict) -> Dict[str, Any]:
         """Handle audio playback request from IPC."""
@@ -109,35 +140,52 @@ class PlaybackService:
                     return {"status": "error", "message": "No audio data provided"}
                 
                 self.status.set_status("Playing audio...")
-                self.status.log_debug(f"Playing chunk size={len(audio_data_b64)}")
                 
                 # Decode base64 audio data
                 audio_bytes = base64.b64decode(audio_data_b64)
                 
                 # Convert to numpy array (assuming float32)
                 audio_array = np.frombuffer(audio_bytes, dtype=np.float32)
+                audio_duration = len(audio_array) / self.sample_rate
                 
                 # Play audio through the stream
                 if self.stream:
                     try:
+                        t0 = _log_timing()
                         self.stream.write(audio_array.tobytes())
-                        logger.debug(f"Played audio: {len(audio_array)} samples")
-                        self.status.log_debug(f"Played audio: {len(audio_array)} samples")
+                        write_time = _log_timing() - t0
+                        self._chunks_played += 1
+                        self._total_bytes_played += len(audio_bytes)
+                        if write_time > audio_duration * 0.5:
+                            self.status.log_warning(
+                                f"Playback write took {write_time*1000:.0f}ms "
+                                f"for {audio_duration*1000:.0f}ms audio "
+                                f"— possible underrun (chunk #{self._chunks_played})"
+                            )
                     except Exception as e:
-                        logger.error(f"Error writing audio to stream: {e}")
-                        self.status.log_error(f"Error writing audio to stream: {e}")
+                        self._playback_errors += 1
+                        self.status.log_exception(
+                            f"Error writing audio ({len(audio_array)} samples) "
+                            f"to stream (error #{self._playback_errors}): {e}"
+                        )
                         return {"status": "error", "message": str(e)}
+                else:
+                    self.status.log_warning("No playback stream available — audio discarded")
+                    self._chunks_dropped += 1
                 
-                self.status.log_info("Playback finished")
+                self.status.log_debug(
+                    f"Played chunk #{self._chunks_played}: "
+                    f"{len(audio_array)} samples / {audio_duration:.1f}s"
+                )
                 
                 return {
                     "status": "success",
-                    "message": f"Played {len(audio_array)} samples"
+                    "message": f"Played {len(audio_array)} samples ({audio_duration:.1f}s)"
                 }
                 
             except Exception as e:
-                logger.error(f"Error playing audio: {e}")
-                self.status.log_error(f"Error playing audio: {e}")
+                self._playback_errors += 1
+                self.status.log_exception(f"Error playing audio: {e}")
                 return {"status": "error", "message": str(e)}
     
     def _handle_get_status(self, message: Dict) -> Dict[str, Any]:
@@ -147,7 +195,11 @@ class PlaybackService:
             "data": {
                 "running": self.is_running,
                 "sample_rate": self.sample_rate,
-                "channels": self.channels
+                "channels": self.channels,
+                "chunks_played": self._chunks_played,
+                "chunks_dropped": self._chunks_dropped,
+                "playback_errors": self._playback_errors,
+                "total_bytes_played": self._total_bytes_played,
             }
         }
     

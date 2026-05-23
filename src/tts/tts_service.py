@@ -12,6 +12,8 @@ from ..status_logger import StatusManager
 from ..models.tts_engine import TTSEngine
 from ..core.runtime import get_runtime_config
 
+_log_timing = time.monotonic
+
 
 class TTSService:
     """Text-to-speech service for the real-time translation system."""
@@ -19,7 +21,7 @@ class TTSService:
     def __init__(
         self,
         socket_path: str,
-        sample_rate: int = 16000
+        sample_rate: int = 24000
     ):
         """Initialize TTS service.
         
@@ -47,7 +49,7 @@ class TTSService:
         self.processing_lock = threading.Lock()
         
         # Status manager
-        self.status = StatusManager()
+        self.status = StatusManager(component_name="tts")
         
         logger.info("TTS service initialized")
         self.status.log_info("TTS service initialized")
@@ -77,18 +79,24 @@ class TTSService:
                     return {"status": "error", "message": "No text provided"}
                 
                 self.status.set_status("Synthesizing audio...")
-                self.status.log_debug(f"TTS segment length={len(text)}")
-                self.status.log_info(f"Synthesizing text: {text}")
+                self.status.log_debug(f"TTS request: {len(text)} chars: {text[:80]}{'...' if len(text) > 80 else ''}")
                 
                 # Synthesize speech synchronously so we can return audio bytes
+                t0 = _log_timing()
                 audio_data = self.tts_engine.synthesize_sync(text)
+                tts_time = _log_timing() - t0
                 
                 # Convert audio data to base64 for transmission
                 if audio_data is not None:
                     audio_bytes = audio_data.astype(audio_data.dtype).tobytes()
                     audio_b64 = base64.b64encode(audio_bytes).decode('utf-8')
+                    audio_duration = len(audio_data) / self.sample_rate if len(audio_data) > 0 else 0
                     
-                    self.status.log_info("TTS audio generated")
+                    self.status.log_info(
+                        f"TTS generated in {tts_time*1000:.0f}ms: "
+                        f"{len(text)} chars → {audio_duration:.1f}s audio "
+                        f"({len(audio_bytes)}B @ {self.sample_rate}Hz)"
+                    )
                     
                     return {
                         "status": "success",
@@ -96,16 +104,16 @@ class TTSService:
                             "audio_data": audio_b64,
                             "format": str(audio_data.dtype),
                             "sample_rate": self.sample_rate,
-                            "duration": len(audio_data) / self.sample_rate if len(audio_data) > 0 else 0
+                            "duration": audio_duration,
+                            "timing_ms": round(tts_time * 1000, 1),
                         }
                     }
                 else:
-                    self.status.log_error("Failed to synthesize audio")
+                    self.status.log_error(f"TTS returned None for text ({len(text)} chars): {text[:100]}")
                     return {"status": "error", "message": "Failed to synthesize audio"}
                 
             except Exception as e:
-                logger.error(f"Error synthesizing text: {e}")
-                self.status.log_error(f"Error synthesizing text: {e}")
+                self.status.log_exception(f"TTS synthesis error: {e}")
                 return {"status": "error", "message": str(e)}
     
     def _handle_play_audio(self, message: Dict) -> Dict[str, Any]:
@@ -118,19 +126,18 @@ class TTSService:
                 
                 # Decode base64 audio data
                 audio_bytes = base64.b64decode(audio_data_b64)
+                duration_sec = len(audio_bytes) / (2 * self.sample_rate)  # rough: int16 = 2 bytes
                 
-                # Play audio (this would typically involve sending to playback service)
-                # For now, we'll just return success as the actual implementation
-                # would depend on the specific pipeline setup
-                logger.debug(f"Audio playback requested: {len(audio_bytes)} bytes")
+                self.status.log_debug(f"Playback requested: {len(audio_bytes)}B ≈ {duration_sec:.1f}s")
                 
                 return {
                     "status": "success",
-                    "message": "Audio playback initiated"
+                    "message": "Audio playback initiated",
+                    "data": {"duration_sec": duration_sec}
                 }
                 
             except Exception as e:
-                logger.error(f"Error playing audio: {e}")
+                self.status.log_exception(f"Error playing audio: {e}")
                 return {"status": "error", "message": str(e)}
     
     def _handle_get_status(self, message: Dict) -> Dict[str, Any]:
@@ -153,7 +160,7 @@ def main():
     parser = argparse.ArgumentParser(description="Text-to-Speech Service")
     parser.add_argument("--socket-path", default=get_runtime_config().get_tts_socket_path(),
                        help="Path to UNIX socket for IPC")
-    parser.add_argument("--sample-rate", type=int, default=16000, 
+    parser.add_argument("--sample-rate", type=int, default=24000, 
                        help="Audio sample rate")
     
     args = parser.parse_args()
