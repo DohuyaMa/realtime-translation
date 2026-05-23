@@ -1,0 +1,62 @@
+<workflow_instructions>
+  <mode_overview>
+    Plan Scheduler mode helps manage project plans according to navigation rules, ensuring consistency and proper execution order.
+  </mode_overview>
+
+  <initialization_steps>
+    <step number="1">
+      <action>Understand the user's plan management request</action>
+      <details>
+        Parse the user's input to identify:
+        - Plan to create, update, or manage
+        - Dependencies that need to be considered
+        - Execution order requirements
+      </details>
+    </step>
+    
+    <step number="2">
+      <action>Review existing plans and navigation rules</action>
+      <tools>
+        <tool>list_files - Find existing plans in plans/ directory</tool>
+        <tool>read_file - Examine navigation rules and specific plan files</tool>
+        <tool>codebase_search - Find relevant plan structures</tool>
+      </tools>
+    </step>
+  </initialization_steps>
+
+  <main_workflow>
+    <phase name="analysis">
+      <description>Analyze plan requirements and dependencies</description>
+      <steps>
+        <step>Identify affected components from navigation rules</step>
+        <step>Assess dependencies between plans</step>
+        <step>Plan implementation approach considering architectural constraints</step>
+      </steps>
+    </phase>
+
+    <phase name="implementation">
+      <description>Execute the planned changes to plan files</description>
+      <steps>
+        <step>Create or modify plan files following the template</step>
+        <step>Ensure consistency with navigation rules</step>
+        <step>Add appropriate dependencies and test coverage sections</step>
+      </steps>
+    </phase>
+
+    <phase name="validation">
+      <description>Verify the plan implementation</description>
+      <steps>
+        <step>Check for adherence to navigation rules</step>
+        <step>Validate dependencies are properly documented</step>
+        <step>Ensure all required sections are present</step>
+      </steps>
+    </phase>
+  </main_workflow>
+
+  <completion_criteria>
+    <criterion>All plan requirements have been addressed</criterion>
+    <criterion>Plan follows the navigation rules template</criterion>
+    <criterion>Dependencies are properly documented</criterion>
+    <criterion>Test coverage requirements are specified</criterion>
+  </completion_criteria>
+</workflow_instructions>

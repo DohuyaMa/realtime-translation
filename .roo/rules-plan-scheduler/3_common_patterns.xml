@@ -1,0 +1,91 @@
+<common_patterns>
+  <plan_structure_pattern>
+    <name>Standard Plan Template</name>
+    <description>Template that all plans should follow according to navigation rules</description>
+    <structure>
+      <section name="Purpose">
+        <description>Clear statement of what changes and why</description>
+        <requirements>
+          <requirement>State what is changing</requirement>
+          <requirement>Explain the reason for change</requirement>
+          <requirement>Define success criteria</requirement>
+        </requirements>
+      </section>
+      
+      <section name="Scope">
+        <description>Define the boundaries of the plan</description>
+        <requirements>
+          <requirement>Specify what is included</requirement>
+          <requirement>Specify what is excluded</requirement>
+          <requirement>Identify affected components</requirement>
+        </requirements>
+      </section>
+      
+      <section name="Entry Points">
+        <description>List of specific files/directories to check/modify</description>
+        <requirements>
+          <requirement>Concrete file paths</requirement>
+          <requirement>Directory paths where applicable</requirement>
+          <requirement>Specific components to address</requirement>
+        </requirements>
+      </section>
+    </structure>
+  </plan_structure_pattern>
+
+  <dependency_pattern>
+    <name>Dependency Management</name>
+    <description>How to properly document dependencies between plans</description>
+    <structure>
+      <dependency type="hard">
+        <description>Dependencies that block execution</description>
+        <format>depends on: [plan-file.md]</format>
+        <format>blocks: [plan-file.md]</format>
+      </dependency>
+      
+      <dependency type="soft">
+        <description>Dependencies for coordination</description>
+        <format>should be reviewed after: [plan-file.md]</format>
+        <format>should be coordinated with: [plan-file.md]</format>
+      </dependency>
+    </structure>
+  </dependency_pattern>
+
+  <test_coverage_pattern>
+    <name>Test Coverage Specification</name>
+    <description>How to define test coverage requirements for each plan</description>
+    <structure>
+      <requirement type="unit">
+        <description>Tests for individual components</description>
+        <format>Verify [component] functionality → unit test</format>
+      </requirement>
+      
+      <requirement type="integration">
+        <description>Tests for component interactions</description>
+        <format>Verify [interaction] works → integration test</format>
+      </requirement>
+      
+      <requirement type="system">
+        <description>Tests for system-level functionality</description>
+        <format>Verify [system feature] → system test</format>
+      </requirement>
+    </structure>
+  </test_coverage_pattern>
+
+  <status_tracking_pattern>
+    <name>Status Tracking</name>
+    <description>How to track plan execution status</description>
+    <elements>
+      <element name="checkboxes">
+        <description>Track individual tasks</description>
+        <format>[ ] Task not started</format>
+        <format>[x] Task completed</format>
+        <format>[~] Task partially completed</format>
+      </element>
+      
+      <element name="parallel_execution_notes">
+        <description>Coordinate with other ongoing work</description>
+        <format>Notes for parallel execution</format>
+      </element>
+    </elements>
+  </status_tracking_pattern>
+</common_patterns>

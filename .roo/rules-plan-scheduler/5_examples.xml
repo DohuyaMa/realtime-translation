@@ -1,0 +1,134 @@
+<examples>
+  <example name="create_new_plan">
+    <description>Creating a new plan following navigation rules</description>
+    <context>When starting a new project initiative that requires coordinated changes</context>
+    <code language="markdown">
+# Feature Enhancement Plan
+
+## Purpose
+Implement new feature X to improve user experience and system performance. This change modifies the existing architecture to support additional functionality while maintaining backward compatibility.
+
+## Scope
+This plan covers implementation of feature X across the following components: UI, backend services, configuration, and documentation.
+
+## Entry Points
+- src/ui/widgets/main_window.py
+- src/services/feature_service.py
+- config/default.yml
+- docs/features.md
+
+## Planned Changes
+- [ ] Update UI components to support new feature
+- [ ] Implement backend service logic
+- [ ] Add configuration options
+- [ ] Update documentation
+
+## Test Coverage
+- Verify new feature works end-to-end → integration test
+- Verify backward compatibility → regression test
+- Verify performance requirements → benchmark test
+
+## Dependencies
+### Hard Dependencies
+- depends on: runtime-configuration-plan.md
+- blocks: ui-enhancement-plan.md
+
+### Soft Dependencies
+- should be reviewed after: python-packages-structure.md
+
+## Obsolete / To Be Removed
+- Legacy configuration options
+- Deprecated API endpoints
+- Outdated documentation sections
+
+## Architectural Invariants
+- maintain API compatibility
+- preserve data integrity
+- ensure security standards
+
+## Target Audience
+- developers
+- users
+
+## Per-File Focus
+src/ui/widgets/main_window.py:
+- Add new feature UI elements
+- Update layout for new functionality
+
+config/default.yml:
+- Add new configuration options
+- Maintain backward compatibility
+
+## Completion Criteria
+- all Planned Changes checked
+- tests listed in Test Coverage are green
+- Obsolete items removed or explicitly deprecated
+
+## Post-Implementation Notes
+- What changed from original plan
+- What was removed as obsolete
+- What should be refactored later
+
+## Completed / Coordinating with Parallel Execution
+
+### Completed Items
+- [ ] Update UI components to support new feature
+- [ ] Implement backend service logic
+
+### Notes for Parallel Execution
+- Coordinate with UI team to ensure consistent design language
+- Backend implementation should not break existing API
+    </code>
+    <explanation>
+      This example demonstrates the complete template structure that all plans should follow according to the navigation rules. Each section serves a specific purpose in maintaining project consistency and coordination.
+    </explanation>
+  </example>
+
+  <example name="update_existing_plan">
+    <description>Updating an existing plan with implementation progress</description>
+    <context>When tracking progress on an ongoing plan</context>
+    <code language="markdown">
+## Completed / Coordinating with Parallel Execution
+
+### Completed Items
+- [x] Update UI components to support new feature - completed by dev team
+- [x] Implement backend service logic - completed, includes error handling
+- [~] Add configuration options - partially completed, missing validation
+- [ ] Update documentation - pending
+
+### Notes for Parallel Execution
+- UI components merged, ready for integration testing
+- Backend service logic validated with unit tests
+- Configuration validation needs to be added before finalizing
+- Documentation team should start working once configuration is finalized
+- Integration tests should begin after configuration completion
+    </code>
+    <explanation>
+      This example shows how to update the tracking section of a plan as work progresses, maintaining visibility into what's completed and what coordination is needed.
+    </explanation>
+  </example>
+
+  <example name="dependency_management">
+    <description>Properly documenting dependencies between plans</description>
+    <context>When a plan depends on or blocks other plans</context>
+    <code language="markdown">
+## Dependencies
+### Hard Dependencies
+- depends on: python-package-definitions.md
+  - Need new Python packages built before implementing services
+- blocks: systemd-service-definitions.md
+  - Service definitions can't be created until packages exist
+
+### Soft Dependencies
+- should be reviewed after: remove-pythonpath-plan.md
+  - Implementation approach may change based on PYTHONPATH removal
+- should be coordinated with: home-manager-updates.md
+  - Similar configuration changes should be consistent
+- affects: testing-plan.md
+  - New functionality requires new test coverage
+    </code>
+    <explanation>
+      This example demonstrates how to clearly document both hard dependencies (required for execution) and soft dependencies (for coordination and awareness).
+    </explanation>
+  </example>
+</examples>

@@ -1,0 +1,63 @@
+<best_practices>
+  <general_principles>
+    <principle priority="high">
+      <name>Navigation Rule Compliance</name>
+      <description>All plans must comply with the navigation rules defined in plans/plan-navigation-rules.md</description>
+      <rationale>Ensures consistency and maintainability across all project plans</rationale>
+      <example>
+        <scenario>When creating a new plan</scenario>
+        <good>Follow the template with all required sections</good>
+        <bad>Omitting dependencies or test coverage sections</bad>
+      </example>
+    </principle>
+  </general_principles>
+
+  <plan_structure_conventions>
+    <convention category="required_sections">
+      <rule>Every plan must include Purpose, Scope, Entry Points, Planned Changes, Test Coverage, Dependencies, and Obsolete sections</rule>
+      <examples>
+        <good>Purpose clearly states what changes and why</good>
+        <bad>Vague purpose statements</bad>
+      </examples>
+    </convention>
+    
+    <convention category="dependencies">
+      <rule>Hard and soft dependencies must be explicitly stated</rule>
+      <template>
+        ## Dependencies
+        ### Hard Dependencies
+        - depends on: [other-plan.md]
+        - blocks: [other-plan.md]
+        
+        ### Soft Dependencies
+        - should be reviewed after: [other-plan.md]
+      </template>
+    </convention>
+  </plan_structure_conventions>
+
+  <common_pitfalls>
+    <pitfall>
+      <description>Creating plans without considering existing dependencies</description>
+      <why_problematic>Can lead to conflicts and inconsistent execution order</why_problematic>
+      <correct_approach>Always check existing plans and navigation rules before creating new ones</correct_approach>
+    </pitfall>
+  </common_pitfalls>
+
+  <quality_checklist>
+    <category name="before_starting">
+      <item>Review navigation rules in plans/plan-navigation-rules.md</item>
+      <item>Check existing plans for dependencies</item>
+      <item>Understand the architectural invariants</item>
+    </category>
+    <category name="during_implementation">
+      <item>Follow the standardized template</item>
+      <item>Include all required sections</item>
+      <item>Specify test coverage requirements</item>
+    </category>
+    <category name="before_completion">
+      <item>Validate dependencies are properly documented</item>
+      <item>Ensure all architectural invariants are maintained</item>
+      <item>Check that obsolete items are identified</item>
+    </category>
+  </quality_checklist>
+</best_practices>

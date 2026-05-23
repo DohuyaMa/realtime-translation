@@ -1,12 +1,11 @@
 { lib
-, buildPythonApplication
 , python3
 , src
 , pname
 , dependencies
 }:
 
-buildPythonApplication {
+python3.pkgs.buildPythonApplication {
   inherit pname src;
   version = "0.1.0";
 

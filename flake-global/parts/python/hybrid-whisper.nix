@@ -10,7 +10,7 @@ callPackage ./common.nix {
   dependencies = with python3.pkgs; [
     # Hybrid Whisper service specific dependencies
     faster-whisper
-    kokoro-onnx
+    kokoro
     numpy
     onnxruntime
     soundfile

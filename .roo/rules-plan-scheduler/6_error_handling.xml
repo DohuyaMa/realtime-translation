@@ -1,0 +1,100 @@
+<error_handling_guide>
+  <common_scenarios>
+    <scenario name="plan_conflicts">
+      <description>Multiple plans trying to modify the same components</description>
+      <detection>
+        <sign>Conflicting changes to the same files</sign>
+        <sign>Dependencies that create circular references</sign>
+        <sign>Parallel execution causing unexpected behavior</sign>
+      </detection>
+      <resolution>
+        <step>Identify all affected plans and their scope</step>
+        <step>Determine the correct execution order</step>
+        <step>Update dependencies to reflect the order</step>
+        <step>Coordinate with all stakeholders</step>
+      </resolution>
+      <prevention>
+        <rule>Always check existing plans before creating new ones</rule>
+        <rule>Document dependencies clearly</rule>
+        <rule>Use the coordination section to communicate with other teams</rule>
+      </prevention>
+    </scenario>
+
+    <scenario name="incomplete_plan_structure">
+      <description>Plan missing required sections according to navigation rules</description>
+      <detection>
+        <sign>Missing Purpose or Scope sections</sign>
+        <sign>No Entry Points defined</sign>
+        <sign>Missing Dependencies section</sign>
+        <sign>No Test Coverage specified</sign>
+      </detection>
+      <resolution>
+        <step>Identify which required sections are missing</step>
+        <step>Fill in the missing sections following the template</step>
+        <step>Validate against navigation rules</step>
+        <step>Review with stakeholders if needed</step>
+      </resolution>
+      <prevention>
+        <rule>Always use the standard template</rule>
+        <rule>Review navigation rules before creating plans</rule>
+        <rule>Validate plan structure before execution</rule>
+      </prevention>
+    </scenario>
+
+    <scenario name="architectural_invariant_violation">
+      <description>Plan proposes changes that violate architectural invariants</description>
+      <detection>
+        <sign>Use of deprecated approaches (e.g., PYTHONPATH)</sign>
+        <sign>Changes that break established patterns</sign>
+        <sign>Violations of architectural constraints</sign>
+      </detection>
+      <resolution>
+        <step>Identify which invariants are being violated</step>
+        <step>Research the correct approach</step>
+        <step>Update the plan to follow proper architecture</step>
+        <step>Document the architectural reasoning</step>
+      </resolution>
+      <prevention>
+        <rule>Review architectural invariants before planning</rule>
+        <rule>Follow established patterns and conventions</rule>
+        <rule>Consult with architecture team if uncertain</rule>
+      </prevention>
+    </scenario>
+  </common_scenarios>
+
+  <validation_checklist>
+    <item>Does the plan follow the standard template?</item>
+    <item>Are all required sections present?</item>
+    <item>Are dependencies properly documented?</item>
+    <item>Does the plan respect architectural invariants?</item>
+    <item>Is test coverage properly specified?</item>
+    <item>Are entry points specific and accurate?</item>
+    <item>Is the coordination section updated for parallel work?</item>
+  </validation_checklist>
+
+  <recovery_procedures>
+    <procedure name="rollback_plan">
+      <description>Steps to take when a plan needs to be abandoned or reversed</description>
+      <steps>
+        <step>Document why the plan is being rolled back</step>
+        <step>Identify what work has already been done</step>
+        <step>Update the plan status to reflect current state</step>
+        <step>Update dependencies that may be affected</step>
+        <step>Notify stakeholders of the change</step>
+      </steps>
+    </procedure>
+
+    <procedure name="plan_revision">
+      <description>Steps to update a plan when requirements change</description>
+      <steps>
+        <step>Update the Purpose and Scope sections</step>
+        <step>Revise the Planned Changes with new checkboxes</step>
+        <step>Update Entry Points if scope changed</step>
+        <step>Revise Test Coverage if functionality changed</step>
+        <step>Update Dependencies if relationships changed</step>
+        <step>Update Obsolete section for new considerations</step>
+        <step>Update the coordination section for parallel work</step>
+      </steps>
+    </procedure>
+  </recovery_procedures>
+</error_handling_guide>

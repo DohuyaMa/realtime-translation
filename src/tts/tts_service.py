@@ -80,8 +80,8 @@ class TTSService:
                 self.status.log_debug(f"TTS segment length={len(text)}")
                 self.status.log_info(f"Synthesizing text: {text}")
                 
-                # Synthesize speech
-                audio_data = self.tts_engine.synthesize(text, play_audio=False)
+                # Synthesize speech synchronously so we can return audio bytes
+                audio_data = self.tts_engine.synthesize_sync(text)
                 
                 # Convert audio data to base64 for transmission
                 if audio_data is not None:

@@ -13,10 +13,7 @@ class IPCAdapter:
     """IPC adapter for communication with the translation system via Unix sockets."""
     
     def __init__(self, socket_path: str = None):
-        """Initialize the IPC adapter with a socket path."""
         self.socket_path = socket_path or get_runtime_config().get_main_socket_path()
-        """Initialize the IPC adapter with a socket path."""
-        self.socket_path = socket_path
         self._socket: Optional[socket.socket] = None
         self._connected = False
         self._lock = threading.Lock()

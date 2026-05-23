@@ -12,7 +12,7 @@ callPackage ./common.nix {
     pyttsx3
     gtts
     playsound
-    kokoro-onnx
+    kokoro
     numpy
     soundfile
     librosa
