@@ -57,11 +57,16 @@ class AudioCaptureService:
         self.process_thread: Optional[threading.Thread] = None
         
         # Status manager
-        self.status = StatusManager()
+        self.status = StatusManager(component_name="capture")
         
         # Monitoring
         self.peak_level = 0.0
         self.rms_level = 0.0
+        
+        # Diagnostics counters
+        self._frames_captured = 0
+        self._frames_dropped = 0
+        self._callback_errors = 0
         
         logger.info(f"Audio capture service initialized: {sample_rate}Hz, {channels} channels")
         self.status.log_info(f"Audio capture service initialized: {sample_rate}Hz, {channels} channels")
@@ -70,19 +75,39 @@ class AudioCaptureService:
     def ensure_pipewire_nodes(self):
         """Ensure that the required PipeWire nodes exist."""
         try:
-            # Check for sources
-            result = subprocess.check_output(
+            # List all sinks and sources for diagnostics
+            sinks_result = subprocess.check_output(
+                ["pactl", "list", "sinks", "short"],
+                text=True
+            )
+            sources_result = subprocess.check_output(
                 ["pactl", "list", "sources", "short"],
                 text=True
             )
-            if "rt_virtual_output.monitor" not in result:
+            logger.info(f"PipeWire sinks available:\n{sinks_result.strip()}")
+            logger.info(f"PipeWire sources available:\n{sources_result.strip()}")
+            
+            if "rt_virtual_output.monitor" not in sources_result:
+                self.status.log_error(
+                    f"Virtual PipeWire source 'rt_virtual_output.monitor' not found. "
+                    f"Available sources: {[l.split()[-1] for l in sources_result.strip().split(chr(10)) if l]}"
+                )
                 sys.exit("Virtual PipeWire source (monitor) not found. Please set up PipeWire configuration first.")
                 
-            logger.info("PipeWire nodes verified successfully")
+            if "rt_virtual_input" not in sinks_result:
+                self.status.log_error(
+                    f"Virtual PipeWire sink 'rt_virtual_input' not found. "
+                    f"Available sinks: {[l.split()[-1] for l in sinks_result.strip().split(chr(10)) if l]}"
+                )
+                sys.exit("Virtual PipeWire input sink not found. Please set up PipeWire configuration first.")
+                
+            self.status.log_info("PipeWire nodes verified successfully")
             
         except subprocess.CalledProcessError as e:
+            self.status.log_exception(f"Failed to check PipeWire nodes (exit {e.returncode}): {e.output}")
             sys.exit(f"Failed to check PipeWire nodes: {e}")
         except FileNotFoundError:
+            self.status.log_error("pactl command not found. Please ensure PipeWire is installed.")
             sys.exit("pactl command not found. Please ensure PipeWire is installed.")
     
     def start(self):
@@ -113,25 +138,33 @@ class AudioCaptureService:
     def audio_callback(self, in_data: bytes, frame_count: int, time_info: Dict[str, Any], status: int):
         """PyAudio callback function."""
         if status:
-            logger.warning(f"Audio callback status: {status}")
-            self.status.log_warning(f"Audio callback status: {status}")
+            self._callback_errors += 1
+            self.status.log_warning(
+                f"Audio callback status flag: {status} (callback_errors={self._callback_errors})"
+            )
             
         try:
             audio_data = np.frombuffer(in_data, dtype=np.float32)
             
             # Update audio levels
             self._update_levels(audio_data)
+            self._frames_captured += 1
             
             if not self.audio_queue.full():
                 self.audio_queue.put(audio_data)
-                self.status.log_debug(f"Captured frame size={len(audio_data)}")
             else:
-                logger.warning("Audio queue full, dropping frame")
-                self.status.log_warning("Audio queue full, dropping frame")
+                self._frames_dropped += 1
+                if self._frames_dropped <= 5 or self._frames_dropped % 50 == 0:
+                    self.status.log_warning(
+                        f"Audio queue full, dropping frame "
+                        f"(dropped={self._frames_dropped}, captured={self._frames_captured})"
+                    )
                 
         except Exception as e:
-            logger.error(f"Error processing audio data: {e}")
-            self.status.log_error(f"Error processing audio data: {e}")
+            self._callback_errors += 1
+            self.status.log_exception(
+                f"Error processing audio frame (count={self._frames_captured}): {e}"
+            )
         
         return (None, pyaudio.paContinue)
     
@@ -167,6 +200,25 @@ class AudioCaptureService:
             return {"status": "error", "message": "Capture already running"}
         
         try:
+            # Log device information for debugging
+            device_count = self.audio.get_device_count()
+            try:
+                device_info = self.audio.get_device_info_by_index(self.input_device_index) if self.input_device_index is not None else None
+                if device_info:
+                    self.status.log_info(
+                        f"Opening input device [{self.input_device_index}]: "
+                        f"'{device_info.get('name', '?')}' "
+                        f"sr={int(device_info.get('defaultSampleRate', 0))}Hz "
+                        f"max_ch={device_info.get('maxInputChannels', 0)}"
+                    )
+                else:
+                    self.status.log_info(
+                        f"Opening default input device "
+                        f"(available devices: {device_count})"
+                    )
+            except Exception as e:
+                self.status.log_debug(f"Could not query device info: {e}")
+            
             self.stream = self.audio.open(
                 format=pyaudio.paFloat32,
                 channels=self.channels,
@@ -178,9 +230,15 @@ class AudioCaptureService:
             )
             
             self.is_running = True
-            logger.info("Audio capture started")
+            self._frames_captured = 0
+            self._frames_dropped = 0
+            self._callback_errors = 0
+            self.status.log_info(
+                f"Audio capture started: {self.sample_rate}Hz "
+                f"{self.channels}ch chunk={self.chunk_size} "
+                f"device={self.input_device_index or 'default'}"
+            )
             self.status.set_status("Capturing audio...")
-            self.status.log_info("Audio capture started")
             
             # Start processing thread
             self.process_thread = threading.Thread(target=self._process_audio)
@@ -206,12 +264,14 @@ class AudioCaptureService:
                 self.stream.stop_stream()
                 self.stream.close()
             except Exception as e:
-                logger.error(f"Error stopping audio stream: {e}")
-                self.status.log_error(f"Error stopping audio stream: {e}")
+                self.status.log_exception(f"Error stopping audio stream: {e}")
         
-        logger.info("Audio capture stopped")
+        self.status.log_info(
+            f"Audio capture stopped: "
+            f"frames={self._frames_captured} dropped={self._frames_dropped} "
+            f"cb_errors={self._callback_errors}"
+        )
         self.status.set_status("Capture stopped")
-        self.status.log_info("Audio capture stopped")
         return {"status": "success", "message": "Capture stopped"}
     
     def _handle_get_status(self, message: Dict) -> Dict[str, Any]:
@@ -223,7 +283,10 @@ class AudioCaptureService:
                 "peak_level": self.peak_level,
                 "rms_level": self.rms_level,
                 "sample_rate": self.sample_rate,
-                "channels": self.channels
+                "channels": self.channels,
+                "frames_captured": self._frames_captured,
+                "frames_dropped": self._frames_dropped,
+                "callback_errors": self._callback_errors,
             }
         }
     

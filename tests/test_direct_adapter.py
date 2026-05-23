@@ -84,7 +84,7 @@ def test_direct_adapter_service_control_in_dev_mode():
 
 def test_direct_adapter_pipeline_control():
     """Test DirectAdapter pipeline control methods."""
-    adapter = DirectAdapter()
+    adapter = DirectAdapter(auto_spawn_services=False)
     
     # Test starting pipeline
     result = adapter.start_pipeline()

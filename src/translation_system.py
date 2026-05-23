@@ -6,6 +6,7 @@ import os
 import socket
 import struct
 import threading
+import time
 from typing import Optional, Dict, List
 from loguru import logger
 import numpy as np
@@ -13,6 +14,8 @@ import numpy as np
 from .audio.routing import AudioRouter
 from .common.ipc import IPCClient
 from .core.runtime import get_runtime_config
+
+_log_timing = time.monotonic
 
 
 class WhisperSocketClient:
@@ -40,11 +43,17 @@ class WhisperSocketClient:
 
         try:
             sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            sock.settimeout(5.0)
             sock.connect(self.socket_path)
+            sock.settimeout(15.0)
+        except socket.timeout:
+            logger.error(f"Connection timeout to whisper at {self.socket_path}")
+            return []
         except OSError as e:
             logger.error(f"Cannot connect to whisper at {self.socket_path}: {e}")
             return []
 
+        audio_size_bytes = len(audio_int16) * audio_int16.itemsize
         texts: List[str] = []
         try:
             start_cmd: Dict = {"cmd": "start"}
@@ -58,7 +67,6 @@ class WhisperSocketClient:
 
             self._send_frame(sock, json.dumps({"cmd": "stop"}).encode())
 
-            sock.settimeout(15.0)
             buf = b""
             try:
                 while True:
@@ -76,12 +84,17 @@ class WhisperSocketClient:
                                     text = msg.get("text", "").strip()
                                     if text:
                                         texts.append(text)
+                            except json.JSONDecodeError:
+                                logger.debug(f"Whisper non-JSON response line (ignored): {line[:100]}")
                             except Exception:
                                 pass
             except socket.timeout:
-                pass
+                if not texts:
+                    logger.warning(f"Whisper transcription timed out ({audio_size_bytes}B audio)")
+            except Exception as e:
+                logger.error(f"Whisper response read error: {e}")
         except Exception as e:
-            logger.error(f"Whisper transcription error: {e}")
+            logger.error(f"Whisper transcription error ({audio_size_bytes}B audio): {e}")
         finally:
             try:
                 sock.close()
@@ -141,8 +154,17 @@ class TranslationSystem:
         self._pending_translated: List[str] = []
         self._pipeline_lock = threading.Lock()
 
+        # Pipeline diagnostics
+        self._pipeline_cycles = 0
+        self._pipeline_errors = 0
+        self._total_whisper_time = 0.0
+        self._total_translate_time = 0.0
+        self._total_tts_time = 0.0
+        self._total_chunks_processed = 0
+
         self._initialize_components()
-        logger.info(f"Translation system initialized: {source_lang}->{target_lang}")
+        logger.info(f"Translation system initialized: {source_lang}->{target_lang} "
+                     f"mode={'wyoming' if use_wyoming else 'local'}")
 
     # ------------------------------------------------------------------
     # Initialisation / reconnection
@@ -175,11 +197,13 @@ class TranslationSystem:
                 client = IPCClient(path)
                 if _try_connect(client):
                     setattr(self, attr, client)
-                    logger.info(f"Connected to {name} service")
+                    logger.info(f"Connected to {name} service at {path}")
                 else:
-                    logger.debug(f"{name} socket exists but connection refused")
+                    logger.warning(f"{name} socket exists at {path} but connection refused "
+                                   f"— is the service running?")
             elif not os.path.exists(path):
-                logger.debug(f"{name} socket not found: {path}")
+                logger.debug(f"{name} socket not found: {path} "
+                             f"(service will be unavailable until started)")
 
     def _whisper_socket_path(self) -> str:
         cfg = get_runtime_config()
@@ -197,6 +221,25 @@ class TranslationSystem:
 
         # Reconnect to any services that came up since last attempt
         self._connect_ipc_clients()
+        whisper_path = self._whisper_socket_path()
+        connected = {
+            "capture": self.capture_client is not None,
+            "whisper_socket": os.path.exists(whisper_path),
+            "translate": self.translate_client is not None,
+            "tts": self.tts_client is not None,
+            "playback": self.playback_client is not None,
+        }
+        logger.info(f"Service connectivity: {connected}")
+        whisper_path_exists = os.path.exists(whisper_path)
+        if not whisper_path_exists and not self.translate_client and not self.tts_client:
+            logger.warning(
+                "Pipeline started but NO speech services connected "
+                "(whisper, translate, TTS all offline) — "
+                "start services manually: "
+                "python -m src.whisper.whisper_service & "
+                "python -m src.translate.translate_service & "
+                "python -m src.tts.tts_service"
+            )
 
         self.is_running = True
         self._capture_thread = threading.Thread(
@@ -212,7 +255,18 @@ class TranslationSystem:
         if self._capture_thread:
             self._capture_thread.join(timeout=6.0)
             self._capture_thread = None
-        logger.info("Translation system stopped")
+        total_pipeline_time = (
+            self._total_whisper_time + self._total_translate_time + self._total_tts_time
+        )
+        logger.info(
+            f"Translation system stopped: "
+            f"{self._pipeline_cycles} pipeline cycles, "
+            f"{self._total_chunks_processed} text chunks, "
+            f"{self._pipeline_errors} errors, "
+            f"whisper={self._total_whisper_time:.1f}s "
+            f"translate={self._total_translate_time:.1f}s "
+            f"tts={self._total_tts_time:.1f}s"
+        )
 
     # ------------------------------------------------------------------
     # Device selection helpers
@@ -291,13 +345,15 @@ class TranslationSystem:
                 device=input_device,
             )
             stream.start()
+            logger.info(f"Capture input stream opened: device={input_device} {CAPTURE_RATE}Hz blocksize=1024")
         except Exception as e:
-            logger.error(f"Cannot open microphone: {e}")
+            logger.exception(f"Cannot open microphone (device={input_device}): {e}")
             self.is_running = False
             return
 
         logger.info(f"Microphone capture started at {CAPTURE_RATE} Hz")
         buf = np.empty(0, dtype=np.float32)
+        chunk_counter = 0
         try:
             while self.is_running:
                 try:
@@ -307,10 +363,12 @@ class TranslationSystem:
                     continue
 
                 if len(buf) >= chunk_frames:
+                    chunk_counter += 1
                     segment = buf[:chunk_frames]
                     buf = buf[chunk_frames:]
 
                     # Downsample float32 48k→16k via linear interpolation
+                    t0 = _log_timing()
                     new_len = int(len(segment) * WHISPER_RATE / CAPTURE_RATE)
                     resampled = np.interp(
                         np.linspace(0, len(segment) - 1, new_len),
@@ -318,39 +376,91 @@ class TranslationSystem:
                         segment,
                     )
                     audio_int16 = np.clip(resampled * 32767, -32768, 32767).astype(np.int16)
+                    resample_time = _log_timing() - t0
 
                     if self.translation_enabled:
+                        self._pipeline_cycles += 1
+                        audio_level = self._audio_level_input
+                        logger.debug(
+                            f"Pipeline chunk #{chunk_counter}: "
+                            f"{len(segment)}→{len(audio_int16)} samples "
+                            f"resampled in {resample_time*1000:.1f}ms "
+                            f"level={audio_level:.3f}"
+                        )
                         threading.Thread(
                             target=self._process_chunk,
                             args=(audio_int16,),
                             daemon=True,
                         ).start()
+                    elif chunk_counter % 30 == 0:
+                        logger.debug(
+                            f"Capture running but translation disabled; "
+                            f"level={self._audio_level_input:.3f}"
+                        )
         finally:
             stream.stop()
             stream.close()
-            logger.info("Microphone capture stopped")
+            logger.info(f"Microphone capture stopped after {chunk_counter} chunks "
+                         f"({self._pipeline_cycles} pipeline cycles)")
 
     def _process_chunk(self, audio_int16: np.ndarray):
         """whisper → translate → TTS → sounddevice playback."""
-        whisper = WhisperSocketClient(self._whisper_socket_path())
+        cycle_start = _log_timing()
+        audio_len_sec = len(audio_int16) / self.sample_rate
+
+        whisper_path = self._whisper_socket_path()
+        whisper = WhisperSocketClient(whisper_path)
         lang = None if self.source_lang == "auto" else self.source_lang
+        t0 = _log_timing()
         texts = whisper.transcribe(audio_int16, language=lang)
+        whisper_time = _log_timing() - t0
+        self._total_whisper_time += whisper_time
+
+        if not texts:
+            if not os.path.exists(whisper_path):
+                self._pipeline_errors += 1
+                logger.warning(
+                    f"Pipeline cycle #{self._pipeline_cycles}: "
+                    f"whisper socket not found at {whisper_path} — "
+                    f"no speech processing possible"
+                )
+            else:
+                logger.debug(f"Pipeline cycle: no speech detected in {audio_len_sec:.1f}s "
+                             f"(whisper took {whisper_time*1000:.0f}ms)")
 
         for text in texts:
             if not text:
                 continue
             logger.info(f"Recognized: {text}")
+            self._total_chunks_processed += 1
             with self._pipeline_lock:
                 self._pending_recognized.append(text)
 
+            t0 = _log_timing()
             translated = self._translate(text)
+            translate_time = _log_timing() - t0
+            self._total_translate_time += translate_time
             if not translated:
+                self._pipeline_errors += 1
+                logger.warning(f"Translation returned None for: {text[:80]}")
                 continue
             logger.info(f"Translated: {translated}")
             with self._pipeline_lock:
                 self._pending_translated.append(translated)
 
+            t0 = _log_timing()
             self._speak(translated)
+            tts_time = _log_timing() - t0
+            self._total_tts_time += tts_time
+
+            cycle_time = _log_timing() - cycle_start
+            logger.debug(
+                f"Pipeline cycle complete: "
+                f"whisper={whisper_time*1000:.0f}ms "
+                f"translate={translate_time*1000:.0f}ms "
+                f"tts={tts_time*1000:.0f}ms "
+                f"total={cycle_time*1000:.0f}ms"
+            )
 
             if self.status_callback:
                 self.status_callback({
@@ -361,36 +471,46 @@ class TranslationSystem:
 
     def _translate(self, text: str) -> Optional[str]:
         if not self.translate_client:
+            logger.debug("Translate skipped: no translate_client (IPC not connected)")
             return None
         try:
             result = self.translate_client.send_message("translate_text", {"text": text})
             if result and result.get("status") == "success":
                 return result["data"]["translated_text"]
-            logger.warning(f"Translate service returned: {result}")
+            logger.warning(f"Translate service returned error: {result} (text: {text[:80]})")
+        except (BrokenPipeError, ConnectionRefusedError) as e:
+            logger.error(f"Translate IPC connection lost: {e}")
+            self.translate_client = None   # force reconnect next cycle
         except Exception as e:
-            logger.error(f"Translate error: {e}")
+            logger.exception(f"Translate error for text '{text[:80]}': {e}")
             self.translate_client = None   # force reconnect next cycle
         return None
 
     def _speak(self, text: str):
         if not self.tts_client:
+            logger.debug("TTS skipped: no tts_client (IPC not connected)")
             return
         try:
             result = self.tts_client.send_message("synthesize_text", {"text": text})
             if not (result and result.get("status") == "success"):
-                logger.warning(f"TTS service returned: {result}")
+                logger.warning(f"TTS service returned error: {result} (text: {text[:80]})")
                 return
             audio_b64 = result["data"]["audio_data"]
             audio_arr = np.frombuffer(base64.b64decode(audio_b64), dtype=np.float32)
             samplerate = result["data"].get("sample_rate", 24000)
+            duration = result["data"].get("duration", 0)
             try:
                 import sounddevice as sd
                 out_dev = TranslationSystem._find_output_device()
+                logger.debug(f"Playing {duration:.1f}s audio on device={out_dev}")
                 sd.play(audio_arr, samplerate=samplerate, device=out_dev, blocking=True)
             except Exception as e:
-                logger.error(f"Playback error: {e}")
+                logger.exception(f"Sounddevice playback error (device={out_dev}): {e}")
+        except (BrokenPipeError, ConnectionRefusedError) as e:
+            logger.error(f"TTS IPC connection lost: {e}")
+            self.tts_client = None   # force reconnect next cycle
         except Exception as e:
-            logger.error(f"TTS error: {e}")
+            logger.exception(f"TTS error for text '{text[:80]}': {e}")
             self.tts_client = None   # force reconnect next cycle
 
     # ------------------------------------------------------------------
@@ -460,6 +580,9 @@ class TranslationSystem:
     def get_stats(self) -> Dict:
         cfg = get_runtime_config()
         whisper_path = self._whisper_socket_path()
+        total_pipeline_time = (
+            self._total_whisper_time + self._total_translate_time + self._total_tts_time
+        )
         stats: Dict = {
             "running": self.is_running,
             "translation_enabled": self.translation_enabled,
@@ -467,6 +590,10 @@ class TranslationSystem:
             "target_language": self.target_lang,
             "whisper_connected": os.path.exists(whisper_path),
             "audio_level_input": self._audio_level_input,
+            "pipeline_cycles": self._pipeline_cycles,
+            "pipeline_errors": self._pipeline_errors,
+            "chunks_processed": self._total_chunks_processed,
+            "total_pipeline_time_s": round(total_pipeline_time, 2),
         }
         for name, attr, path in self._ipc_service_map():
             stats[f"{name}_connected"] = getattr(self, attr) is not None
@@ -493,14 +620,17 @@ class TranslationSystem:
     def cleanup(self):
         self.stop()
         if self.audio_router:
-            self.audio_router.cleanup()
-        for client in [self.capture_client, self.whisper_client,
-                       self.translate_client, self.tts_client, self.playback_client]:
+            try:
+                self.audio_router.cleanup()
+            except Exception as e:
+                logger.exception(f"AudioRouter cleanup error: {e}")
+        for name in ["capture", "whisper", "translate", "tts", "playback"]:
+            client = getattr(self, f"{name}_client", None)
             if client:
                 try:
                     client.disconnect()
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug(f"Error disconnecting {name} client: {e}")
         logger.info("Translation system cleaned up")
 
     def __del__(self):

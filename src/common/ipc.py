@@ -6,6 +6,7 @@ import json
 import threading
 import os
 import tempfile
+import time
 from typing import Any, Optional, Callable, Dict
 from loguru import logger
 
@@ -23,6 +24,7 @@ class IPCServer:
         self.server_socket: Optional[socket.socket] = None
         self.running = False
         self.handlers: Dict[str, Callable] = {}
+        self._client_count = 0
         
     def register_handler(self, message_type: str, handler: Callable):
         """Register a handler for a specific message type.
@@ -36,6 +38,7 @@ class IPCServer:
     def start(self):
         """Start the IPC server."""
         if os.path.exists(self.socket_path):
+            logger.debug(f"Removing stale socket: {self.socket_path}")
             os.remove(self.socket_path)
             
         self.server_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -54,17 +57,20 @@ class IPCServer:
         while self.running:
             try:
                 conn, addr = self.server_socket.accept()
+                self._client_count += 1
+                client_id = self._client_count
+                logger.debug(f"IPC client #{client_id} connected")
                 client_thread = threading.Thread(
                     target=self._handle_client, 
-                    args=(conn,), 
+                    args=(conn, client_id), 
                     daemon=True
                 )
                 client_thread.start()
             except Exception as e:
                 if self.running:
-                    logger.error(f"Error accepting connection: {e}")
+                    logger.exception(f"Error accepting connection: {e}")
                     
-    def _handle_client(self, conn: socket.socket):
+    def _handle_client(self, conn: socket.socket, client_id: int):
         """Handle messages from a client connection."""
         try:
             while self.running:
@@ -85,20 +91,30 @@ class IPCServer:
                     
                 # Parse the message
                 message = json.loads(message_data.decode('utf-8'))
+                message_type = message.get('type')
+                logger.debug(f"IPC client #{client_id} request: type={message_type} size={message_length}")
                 
                 # Handle the message
-                message_type = message.get('type')
                 if message_type in self.handlers:
+                    t0 = time.monotonic()
                     response = self.handlers[message_type](message)
+                    elapsed = time.monotonic() - t0
+                    if elapsed > 1.0:
+                        logger.debug(f"IPC handler {message_type} took {elapsed:.3f}s (client #{client_id})")
                     if response is not None:
                         self._send_response(conn, response)
                 else:
-                    logger.warning(f"Unknown message type: {message_type}")
+                    logger.warning(f"Unknown message type: {message_type} (client #{client_id})")
                     
+        except json.JSONDecodeError as e:
+            logger.error(f"IPC client #{client_id} sent invalid JSON: {e}")
+        except struct.error as e:
+            logger.error(f"IPC client #{client_id} protocol error: {e}")
         except Exception as e:
-            logger.error(f"Error handling client: {e}")
+            logger.exception(f"Error handling client #{client_id}: {e}")
         finally:
             conn.close()
+            logger.debug(f"IPC client #{client_id} disconnected")
             
     def _send_response(self, conn: socket.socket, response: Any):
         """Send a response back to the client."""
@@ -108,7 +124,7 @@ class IPCServer:
             conn.sendall(struct.pack('!I', response_length))
             conn.sendall(response_data)
         except Exception as e:
-            logger.error(f"Error sending response: {e}")
+            logger.exception(f"Error sending response (size={response_length}): {e}")
             
     def stop(self):
         """Stop the IPC server."""
@@ -134,9 +150,19 @@ class IPCClient:
         
     def connect(self):
         """Connect to the IPC server."""
+        if not os.path.exists(self.socket_path):
+            logger.error(f"Cannot connect: socket not found: {self.socket_path}")
+            raise FileNotFoundError(f"IPC socket not found: {self.socket_path}")
         self.socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self.socket.connect(self.socket_path)
-        logger.info(f"IPC Client connected to {self.socket_path}")
+        try:
+            self.socket.connect(self.socket_path)
+            logger.info(f"IPC Client connected to {self.socket_path}")
+        except (ConnectionRefusedError, FileNotFoundError) as e:
+            logger.error(f"Connection to {self.socket_path} refused/missing: {e}")
+            raise
+        except Exception as e:
+            logger.exception(f"Failed to connect to {self.socket_path}: {e}")
+            raise
         
     def send_message(self, message_type: str, data: Any) -> Optional[Any]:
         """Send a message to the server and wait for response.
@@ -149,7 +175,7 @@ class IPCClient:
             Response from server, or None if no response expected
         """
         if not self.socket:
-            raise RuntimeError("Not connected to server")
+            raise RuntimeError(f"Not connected to server (cannot send {message_type})")
             
         # Prepare the message
         message = {
@@ -161,8 +187,15 @@ class IPCClient:
         message_length = len(message_data)
         
         # Send message length followed by message data
-        self.socket.sendall(struct.pack('!I', message_length))
-        self.socket.sendall(message_data)
+        try:
+            self.socket.sendall(struct.pack('!I', message_length))
+            self.socket.sendall(message_data)
+        except BrokenPipeError:
+            logger.error(f"Broken pipe sending {message_type} to {self.socket_path}")
+            raise
+        except Exception as e:
+            logger.exception(f"Failed to send {message_type} to {self.socket_path}: {e}")
+            raise
         
         # Receive response if any
         try:
@@ -176,8 +209,10 @@ class IPCClient:
                         break
                     response_data += chunk
                     
-                return json.loads(response_data.decode('utf-8'))
+                result = json.loads(response_data.decode('utf-8'))
+                return result
         except socket.timeout:
+            logger.debug(f"IPC {message_type} timed out waiting for response")
             return None  # No response expected or timeout
             
     def send_audio_data(self, audio_data: bytes) -> Optional[Any]:
@@ -215,5 +250,9 @@ class IPCClient:
     def disconnect(self):
         """Disconnect from the server."""
         if self.socket:
-            self.socket.close()
-        logger.info("IPC Client disconnected")
+            try:
+                self.socket.close()
+            except Exception as e:
+                logger.debug(f"Error closing IPC socket: {e}")
+            self.socket = None
+        logger.info(f"IPC Client disconnected from {self.socket_path}")
