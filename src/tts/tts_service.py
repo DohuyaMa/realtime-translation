@@ -21,20 +21,17 @@ class TTSService:
     def __init__(
         self,
         socket_path: str,
-        sample_rate: int = 24000
+        sample_rate: int = 24000,
+        voice: Optional[str] = None,
     ):
-        """Initialize TTS service.
-        
-        Args:
-            socket_path: Path to the UNIX socket for IPC
-            sample_rate: Audio sample rate
-        """
+        """Initialize TTS service."""
         self.socket_path = socket_path
         self.sample_rate = sample_rate
         
         # Initialize TTS engine
         self.tts_engine = TTSEngine(
-            sample_rate=sample_rate
+            sample_rate=sample_rate,
+            voice=voice,
         )
         
         # IPC setup
@@ -162,6 +159,8 @@ def main():
                        help="Path to UNIX socket for IPC")
     parser.add_argument("--sample-rate", type=int, default=24000, 
                        help="Audio sample rate")
+    parser.add_argument("--voice", default=None,
+                       help="Kokoro voice name (e.g. af_heart, af_bella, am_adam)")
     
     args = parser.parse_args()
     
@@ -171,7 +170,8 @@ def main():
     
     service = TTSService(
         socket_path=args.socket_path,
-        sample_rate=args.sample_rate
+        sample_rate=args.sample_rate,
+        voice=args.voice,
     )
     
     def signal_handler(signum, frame):

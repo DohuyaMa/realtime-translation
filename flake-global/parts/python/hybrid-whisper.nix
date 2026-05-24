@@ -19,5 +19,9 @@ callPackage ./common.nix {
     pyyaml
     python-dotenv
     loguru
+    # HuggingFace Hub for model downloading
+    huggingface-hub
+    # Wyoming protocol for connecting to wyoming-faster-whisper
+    wyoming
   ];
 }

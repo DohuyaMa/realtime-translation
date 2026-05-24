@@ -46,8 +46,8 @@ class ConfigManager:
             },
             'models': {
                 'whisper': {
-                    'backend': 'wyoming',
-                    'model': 'small',
+                    'backend': 'local',
+                    'model': 'medium',
                 },
                 'translate': {
                     'model': 'Helsinki-NLP/opus-mt-uk-en',
@@ -55,7 +55,7 @@ class ConfigManager:
                 'tts': {
                     'engine': 'kokoro',
                     'model': 'hexgrad/Kokoro-82M',
-                    'voice': 'en_US',
+                    'voice': 'af_heart',
                 },
             }
         }

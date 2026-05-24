@@ -154,6 +154,7 @@ class IPCClient:
             logger.error(f"Cannot connect: socket not found: {self.socket_path}")
             raise FileNotFoundError(f"IPC socket not found: {self.socket_path}")
         self.socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.socket.settimeout(5.0)
         try:
             self.socket.connect(self.socket_path)
             logger.info(f"IPC Client connected to {self.socket_path}")

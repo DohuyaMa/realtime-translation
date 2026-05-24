@@ -146,6 +146,10 @@ class TranslationSystem:
 
         self._capture_thread: Optional[threading.Thread] = None
 
+        # User's preferred input/output device names (set via UI), None = system default
+        self._preferred_input_device_name: Optional[str] = None
+        self._preferred_output_device_name: Optional[str] = None
+
         # Audio level (updated every ~20 ms from capture callback)
         self._audio_level_input: float = 0.0
 
@@ -272,35 +276,29 @@ class TranslationSystem:
     # Device selection helpers
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _find_input_device() -> Optional[int]:
-        """Pick the best mic: prefer PulseAudio/PipeWire names over raw ALSA."""
+    def _resolve_preferred_device(self) -> Optional[int]:
+        """Resolve user-preferred device name to a sounddevice index, or None."""
+        if not self._preferred_input_device_name:
+            return None
         import sounddevice as sd
-        preferred = ["Stereo Microphone", "Digital Microphone", "Built-in Microphone",
-                     "Microphone", "Mono Microphone"]
-        devices = sd.query_devices()
-        for pattern in preferred:
-            for d in devices:
-                if d["max_input_channels"] > 0 and pattern.lower() in d["name"].lower():
-                    logger.info(f"Selected input device [{d['index']}]: {d['name']}")
-                    return d["index"]
-        default = sd.query_devices(kind="input")
-        logger.info(f"Using default input device: {default['name']}")
+        for d in sd.query_devices():
+            if d["max_input_channels"] > 0 and d["name"] == self._preferred_input_device_name:
+                logger.info(f"Using preferred input device [{d['index']}]: {d['name']}")
+                return d["index"]
+        logger.warning("Preferred input device '{}' not found via sounddevice",
+                       self._preferred_input_device_name)
         return None
 
-    @staticmethod
-    def _find_output_device() -> Optional[int]:
-        """Pick the best speaker: prefer PulseAudio/PipeWire names over raw ALSA."""
+    def _resolve_preferred_output_device(self) -> Optional[int]:
+        if not self._preferred_output_device_name:
+            return None
         import sounddevice as sd
-        preferred = ["Analog Stereo", "Speaker", "Headphone", "Internal Audio"]
-        devices = sd.query_devices()
-        for pattern in preferred:
-            for d in devices:
-                if d["max_output_channels"] > 0 and pattern.lower() in d["name"].lower():
-                    logger.info(f"Selected output device [{d['index']}]: {d['name']}")
-                    return d["index"]
-        default = sd.query_devices(kind="output")
-        logger.info(f"Using default output device: {default['name']}")
+        for d in sd.query_devices():
+            if d["max_output_channels"] > 0 and d["name"] == self._preferred_output_device_name:
+                logger.info(f"Using preferred output device [{d['index']}]: {d['name']}")
+                return d["index"]
+        logger.warning("Preferred output device '{}' not found via sounddevice",
+                       self._preferred_output_device_name)
         return None
 
     # ------------------------------------------------------------------
@@ -334,7 +332,7 @@ class TranslationSystem:
             self._audio_level_input = min(rms * 5.0, 1.0)
             audio_q.put(mono.copy())
 
-        input_device = TranslationSystem._find_input_device()
+        input_device = self._resolve_preferred_device()
         try:
             stream = sd.InputStream(
                 samplerate=CAPTURE_RATE,
@@ -501,7 +499,7 @@ class TranslationSystem:
             duration = result["data"].get("duration", 0)
             try:
                 import sounddevice as sd
-                out_dev = TranslationSystem._find_output_device()
+                out_dev = self._resolve_preferred_output_device()
                 logger.debug(f"Playing {duration:.1f}s audio on device={out_dev}")
                 sd.play(audio_arr, samplerate=samplerate, device=out_dev, blocking=True)
             except Exception as e:
