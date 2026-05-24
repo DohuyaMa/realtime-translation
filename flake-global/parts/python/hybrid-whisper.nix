@@ -5,7 +5,7 @@
 
 callPackage ./common.nix {
   pname = "translator-hybrid-whisper";
-  src = ../../../src;
+  src = ../../..;
 
   dependencies = with python3.pkgs; [
     # Hybrid Whisper service specific dependencies

@@ -43,6 +43,20 @@ class ConfigManager:
             'ui': {
                 'minimize_to_tray': True,
                 'start_minimized': False
+            },
+            'models': {
+                'whisper': {
+                    'backend': 'wyoming',
+                    'model': 'small',
+                },
+                'translate': {
+                    'model': 'Helsinki-NLP/opus-mt-uk-en',
+                },
+                'tts': {
+                    'engine': 'kokoro',
+                    'model': 'hexgrad/Kokoro-82M',
+                    'voice': 'en_US',
+                },
             }
         }
         

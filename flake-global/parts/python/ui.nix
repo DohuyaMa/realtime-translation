@@ -5,15 +5,25 @@
 
 callPackage ./common.nix {
   pname = "translator-ui";
-  src = ../../../src;
+  src = ../../..;
 
   dependencies = with python3.pkgs; [
-    # UI service specific dependencies
-    pyqt5
     pyside6
     pulsectl
     pyyaml
     python-dotenv
     loguru
+    # Runtime imports from translation_system and adapters
+    numpy
+    torch
+    transformers
+    sounddevice
+    soundfile
+    pyaudio
+    faster-whisper
+    ctranslate2
+    kokoro
+    sentencepiece
+    sacremoses
   ];
 }

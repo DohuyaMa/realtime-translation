@@ -9,7 +9,8 @@ import sys
 from ..common.ipc import IPCServer
 from ..status_logger import StatusManager
 from ..core.runtime import get_runtime_config
-from transformers import pipeline, AutoTokenizer, AutoModelForSeq2SeqLM
+from transformers import MarianTokenizer, MarianMTModel
+import torch
 
 _log_timing = time.monotonic
 
@@ -54,39 +55,35 @@ class TranslationService:
         self.status.set_status("Initializing translation model...")
     
     def _initialize_model(self):
-        """Initialize the translation model."""
+        """Initialize the translation model using MarianMT directly (transformers v5 removed the 'translation' pipeline task)."""
+        import os
+        os.environ.setdefault("HF_HOME", os.path.expanduser("~/real-time-translator-cache/huggingface"))
+        os.environ.setdefault("TRANSFORMERS_CACHE", os.path.expanduser("~/real-time-translator-cache/transformers"))
+        os.environ.setdefault("HF_HUB_CACHE", os.path.expanduser("~/real-time-translator-cache/huggingface/hub"))
+
+        model_name = f"Helsinki-NLP/opus-mt-{self.source_lang}-{self.target_lang}"
+        self.status.log_info(f"Loading translation model: {model_name}")
+        t0 = _log_timing()
         try:
-            # Set up HuggingFace environment variables to avoid PEP 68 issues in Nix
-            import os
-            os.environ.setdefault("HF_HOME", os.path.expanduser("~/real-time-translator-cache/huggingface"))
-            os.environ.setdefault("TRANSFORMERS_CACHE", os.path.expanduser("~/real-time-translator-cache/transformers"))
-            os.environ.setdefault("HF_HUB_CACHE", os.path.expanduser("~/real-time-translator-cache/huggingface/hub"))
-            
-            # Initialize translation pipeline
-            model_name = f"Helsinki-NLP/opus-mt-{self.source_lang}-{self.target_lang}"
-            self.status.log_info(f"Loading translation model: {model_name}")
-            t0 = _log_timing()
-            self.translator = pipeline(
-                "translation",
-                model=model_name,
-                tokenizer=model_name
-            )
+            self._device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            self._tokenizer = MarianTokenizer.from_pretrained(model_name)
+            self._model = MarianMTModel.from_pretrained(model_name).to(self._device)
+            self._model.eval()
             load_time = _log_timing() - t0
-            logger.info(f"Translation model '{model_name}' loaded in {load_time:.1f}s")
+            logger.info(f"Translation model '{model_name}' loaded on {self._device} in {load_time:.1f}s")
             self.status.log_info(f"Translation model loaded in {load_time:.1f}s: {model_name}")
             self.status.set_status("Translation model loaded")
-            
         except Exception as e:
             self.status.log_warning(f"Could not load model '{model_name}': {e}")
-            self.status.log_info("Falling back to default translation model (en↔de)")
-            # Fallback to a general model
+            fallback = "Helsinki-NLP/opus-mt-en-de"
+            self.status.log_info(f"Falling back to {fallback}")
             try:
-                fallback_model = "Helsinki-NLP/opus-mt-en-de"
-                t0 = _log_timing()
-                self.translator = pipeline("translation", model=fallback_model)
+                self._device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+                self._tokenizer = MarianTokenizer.from_pretrained(fallback)
+                self._model = MarianMTModel.from_pretrained(fallback).to(self._device)
+                self._model.eval()
                 load_time = _log_timing() - t0
-                self.status.log_warning(f"Fallback model '{fallback_model}' loaded in {load_time:.1f}s")
-                logger.info(f"Fallback translation model '{fallback_model}' loaded in {load_time:.1f}s")
+                self.status.log_warning(f"Fallback model '{fallback}' loaded in {load_time:.1f}s")
             except Exception as e2:
                 self.status.log_exception(f"Could not load fallback translation model: {e2}")
                 raise
@@ -117,10 +114,11 @@ class TranslationService:
                 self.status.log_info(f"Translating ({len(text)} chars): {text[:120]}{'...' if len(text) > 120 else ''}")
                 
                 t0 = _log_timing()
-                # Perform translation
-                result = self.translator(text)
+                inputs = self._tokenizer(text, return_tensors="pt", padding=True, truncation=True, max_length=512).to(self._device)
+                with torch.no_grad():
+                    tokens = self._model.generate(**inputs)
+                translated_text = self._tokenizer.batch_decode(tokens, skip_special_tokens=True)[0]
                 elapsed = _log_timing() - t0
-                translated_text = result[0]['translation_text'] if isinstance(result, list) else result.get('translation_text', '')
                 
                 self.status.log_info(
                     f"Translated in {elapsed*1000:.0f}ms "

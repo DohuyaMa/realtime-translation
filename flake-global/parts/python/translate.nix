@@ -5,7 +5,7 @@
 
 callPackage ./common.nix {
   pname = "translator-translate";
-  src = ../../../src;
+  src = ../../..;
 
   dependencies = with python3.pkgs; [
     # Translation service specific dependencies

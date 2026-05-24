@@ -5,7 +5,7 @@
 
 callPackage ./common.nix {
   pname = "translator-playback";
-  src = ../../../src;
+  src = ../../..;
 
   dependencies = with python3.pkgs; [
     # Playback service specific dependencies

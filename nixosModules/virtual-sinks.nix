@@ -24,7 +24,7 @@ in
     services.pipewire = {
       enable = true;
       pulse.enable = true;
-      alsa.support32bit = true;
+      alsa.support32Bit = true;
 
       configPackages = [
         (pkgs.writeTextDir

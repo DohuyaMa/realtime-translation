@@ -19,7 +19,7 @@ in
 
 callPackage ./common.nix {
   pname = "translator-tts";
-  src = ../../../src;
+  src = ../../..;
 
   dependencies = with python3.pkgs; [
     # TTS service specific dependencies

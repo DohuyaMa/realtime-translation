@@ -1,5 +1,7 @@
 """Direct adapter that wraps the existing TranslationSystem."""
 import os
+import pathlib
+import shutil
 import subprocess
 import sys
 import time
@@ -112,11 +114,69 @@ class DirectAdapter:
     # Service subprocess lifecycle
     # ------------------------------------------------------------------
 
+    _MODULE_ENTRYPOINTS = {
+        'src.capture.capture_service':          'translator-capture',
+        'src.playback.playback_service':        'translator-playback',
+        'src.whisper.whisper_service':          'translator-whisper',
+        'src.whisper.hybrid_whisper_service':   'translator-hybrid-whisper',
+        'src.translate.translate_service':      'translator-translate',
+        'src.tts.tts_service':                  'translator-tts',
+    }
+
+    def _resolve_cmd(self, module: str) -> list:
+        """Prefer installed entry-point scripts over python -m <module>."""
+        entrypoint = self._MODULE_ENTRYPOINTS.get(module)
+        if entrypoint:
+            # Sibling script in same bin dir as the running translator-ui
+            bin_dir = pathlib.Path(sys.argv[0]).resolve().parent
+            ep_path = bin_dir / entrypoint
+            if ep_path.exists():
+                return [str(ep_path)]
+            found = shutil.which(entrypoint)
+            if found:
+                return [found]
+        return [sys.executable, '-m', module]
+
     def _spawn_service(self, name: str, module: str, args: List[str]) -> None:
-        cmd = [sys.executable, '-m', module] + args
-        logger.info(f"Spawning {name} service: python -m {module} {' '.join(args)}")
-        process = subprocess.Popen(cmd)
+        cmd = self._resolve_cmd(module) + args
+        env = os.environ.copy()
+        # Nix wraps scripts via shell; the raw sys.executable doesn't inherit
+        # the package's PYTHONPATH. Propagate sys.path explicitly so subprocesses
+        # can find the installed `src` package and its dependencies.
+        python_path_entries = [p for p in sys.path if p]
+        if python_path_entries:
+            existing = env.get('PYTHONPATH', '')
+            combined = ':'.join(python_path_entries)
+            env['PYTHONPATH'] = f"{combined}:{existing}" if existing else combined
+        logger.info(f"Spawning {name} service: {' '.join(cmd)}")
+        process = subprocess.Popen(cmd, env=env)
         self._service_processes[name] = process
+
+    @staticmethod
+    def _socket_is_live(path: str) -> bool:
+        """Return True only if a UNIX socket file exists AND has an active listener."""
+        import socket as _socket
+        if not os.path.exists(path):
+            return False
+        try:
+            s = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+            s.settimeout(0.3)
+            s.connect(path)
+            s.close()
+            return True
+        except OSError:
+            return False
+
+    def _need_spawn(self, socket_path: str) -> bool:
+        if self._socket_is_live(socket_path):
+            return False
+        if os.path.exists(socket_path):
+            logger.warning(f"Removing stale socket: {socket_path}")
+            try:
+                os.unlink(socket_path)
+            except OSError:
+                pass
+        return True
 
     def _ensure_essential_services(self) -> None:
         if not self._auto_spawn_services:
@@ -135,14 +195,14 @@ class DirectAdapter:
             whisper_socket = cfg.get_whisper_socket_path()
             whisper_module = 'src.whisper.whisper_service'
             whisper_args = ['--socket-path', whisper_socket]
-        if not os.path.exists(whisper_socket):
+        if self._need_spawn(whisper_socket):
             self._spawn_service('whisper', whisper_module, whisper_args)
         translate_socket = cfg.get_translate_socket_path()
-        if not os.path.exists(translate_socket):
+        if self._need_spawn(translate_socket):
             self._spawn_service('translate', 'src.translate.translate_service',
                                 ['--socket-path', translate_socket])
         tts_socket = cfg.get_tts_socket_path()
-        if not os.path.exists(tts_socket):
+        if self._need_spawn(tts_socket):
             self._spawn_service('tts', 'src.tts.tts_service',
                                 ['--socket-path', tts_socket])
 

@@ -5,7 +5,7 @@
 
 callPackage ./common.nix {
   pname = "translator-whisper";
-  src = ../../../src;
+  src = ../../..;
 
   dependencies = with python3.pkgs; [
     # Whisper service specific dependencies
