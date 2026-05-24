@@ -181,7 +181,15 @@ class DirectAdapter:
     def _ensure_essential_services(self) -> None:
         if not self._auto_spawn_services:
             return
+        from ..core.config import get_config_manager
+        app_cfg = get_config_manager()
         cfg = get_runtime_config()
+
+        whisper_device = app_cfg.get('models.whisper.device', 'cuda')
+        beam_size = app_cfg.get('models.whisper.beam_size', 5)
+        temperature = app_cfg.get('models.whisper.temperature', 0.0)
+        initial_prompt = app_cfg.get('models.whisper.initial_prompt', '')
+
         if self.use_wyoming:
             whisper_socket = cfg.get_hybrid_whisper_socket_path()
             whisper_module = 'src.whisper.hybrid_whisper_service'
@@ -194,17 +202,40 @@ class DirectAdapter:
         else:
             whisper_socket = cfg.get_whisper_socket_path()
             whisper_module = 'src.whisper.whisper_service'
-            whisper_args = ['--socket-path', whisper_socket]
+            whisper_args = [
+                '--socket-path', whisper_socket,
+                '--device', whisper_device,
+                '--beam-size', str(beam_size),
+                '--temperature', str(temperature),
+            ]
+            if initial_prompt:
+                whisper_args.extend(['--initial-prompt', initial_prompt])
+
         if self._need_spawn(whisper_socket):
             self._spawn_service('whisper', whisper_module, whisper_args)
+
         translate_socket = cfg.get_translate_socket_path()
+        num_beams = app_cfg.get('models.translate.num_beams', 4)
+        repetition_penalty = app_cfg.get('models.translate.repetition_penalty', 1.2)
+        max_length = app_cfg.get('models.translate.max_length', 200)
+        translate_args = [
+            '--socket-path', translate_socket,
+            '--num-beams', str(num_beams),
+            '--repetition-penalty', str(repetition_penalty),
+            '--max-length', str(max_length),
+        ]
         if self._need_spawn(translate_socket):
-            self._spawn_service('translate', 'src.translate.translate_service',
-                                ['--socket-path', translate_socket])
+            self._spawn_service('translate', 'src.translate.translate_service', translate_args)
         tts_socket = cfg.get_tts_socket_path()
+        tts_voice = app_cfg.get('models.tts.voice', 'af_heart')
+        tts_speed = app_cfg.get('models.tts.speed', 1.0)
+        tts_args = [
+            '--socket-path', tts_socket,
+            '--voice', tts_voice,
+            '--speed', str(tts_speed),
+        ]
         if self._need_spawn(tts_socket):
-            self._spawn_service('tts', 'src.tts.tts_service',
-                                ['--socket-path', tts_socket])
+            self._spawn_service('tts', 'src.tts.tts_service', tts_args)
 
     def _wait_for_services(self, timeout: float = 120.0) -> None:
         if not self._auto_spawn_services:

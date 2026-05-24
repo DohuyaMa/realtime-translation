@@ -10,7 +10,7 @@ callPackage ./common.nix {
   dependencies = with python3.pkgs; [
     # Translation service specific dependencies
     transformers
-    torch
+    torch-bin
     sentencepiece
     sacremoses
     numpy

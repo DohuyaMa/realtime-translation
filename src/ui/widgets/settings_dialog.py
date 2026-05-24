@@ -2,7 +2,7 @@
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QDialogButtonBox,
-    QFormLayout, QGroupBox, QLineEdit,
+    QDoubleSpinBox, QFormLayout, QGroupBox, QLineEdit,
     QPushButton, QSpinBox, QTabWidget, QVBoxLayout, QWidget,
 )
 
@@ -47,6 +47,13 @@ def _load_config():
         "wyoming_model": cfg.get("models.whisper.wyoming_model", "small-int8"),
         "translate_model": cfg.get("models.translate.model", _TRANSLATION_MODELS[0]),
         "tts_voice": cfg.get("models.tts.voice", _TTS_VOICES[0]),
+        "tts_speed": cfg.get("models.tts.speed", 1.0),
+        "beam_size": cfg.get("models.whisper.beam_size", 5),
+        "temperature": cfg.get("models.whisper.temperature", 0.0),
+        "initial_prompt": cfg.get("models.whisper.initial_prompt", ""),
+        "num_beams": cfg.get("models.translate.num_beams", 4),
+        "repetition_penalty": cfg.get("models.translate.repetition_penalty", 1.2),
+        "max_length": cfg.get("models.translate.max_length", 200),
     }
 
 
@@ -67,6 +74,13 @@ def _save_config(settings: dict):
     cfg.set("models.whisper.wyoming_model", settings.get("wyoming_model", "small-int8"))
     cfg.set("models.translate.model", settings.get("translate_model", _TRANSLATION_MODELS[0]))
     cfg.set("models.tts.voice", settings.get("tts_voice", _TTS_VOICES[0]))
+    cfg.set("models.tts.speed", settings.get("tts_speed", 1.0))
+    cfg.set("models.whisper.beam_size", settings.get("beam_size", 5))
+    cfg.set("models.whisper.temperature", settings.get("temperature", 0.0))
+    cfg.set("models.whisper.initial_prompt", settings.get("initial_prompt", ""))
+    cfg.set("models.translate.num_beams", settings.get("num_beams", 4))
+    cfg.set("models.translate.repetition_penalty", settings.get("repetition_penalty", 1.2))
+    cfg.set("models.translate.max_length", settings.get("max_length", 200))
     cfg.save()
 
 
@@ -153,8 +167,69 @@ class _GeneralTab(QWidget):
         self.tts_voice.setCurrentIndex(v_idx)
         tts_layout.addRow("TTS Voice:", self.tts_voice)
 
+        self.tts_speed = QDoubleSpinBox()
+        self.tts_speed.setRange(0.5, 2.0)
+        self.tts_speed.setSingleStep(0.1)
+        self.tts_speed.setDecimals(1)
+        self.tts_speed.setValue(self._cfg.get("tts_speed", 1.0))
+        self.tts_speed.setSuffix("x")
+        tts_layout.addRow("Speed:", self.tts_speed)
+
         tts_group.setLayout(tts_layout)
         layout.addWidget(tts_group)
+
+        recog_group = QGroupBox("Recognition Tuning")
+        recog_layout = QFormLayout()
+
+        self.beam_size = QSpinBox()
+        self.beam_size.setRange(1, 10)
+        self.beam_size.setValue(self._cfg.get("beam_size", 5))
+        self.beam_size.setSuffix(" beams")
+        recog_layout.addRow("Beam Size:", self.beam_size)
+
+        self.temperature = QDoubleSpinBox()
+        self.temperature.setRange(0.0, 1.0)
+        self.temperature.setSingleStep(0.1)
+        self.temperature.setDecimals(1)
+        self.temperature.setValue(self._cfg.get("temperature", 0.0))
+        self.temperature.setSuffix(" temp")
+        recog_layout.addRow("Temperature:", self.temperature)
+
+        self.initial_prompt = QLineEdit()
+        self.initial_prompt.setText(self._cfg.get("initial_prompt", ""))
+        self.initial_prompt.setPlaceholderText("e.g., conversation about technology")
+        recog_layout.addRow("Initial Prompt:", self.initial_prompt)
+
+        recog_group.setLayout(recog_layout)
+        layout.addWidget(recog_group)
+
+        trans_tune_group = QGroupBox("Translation Tuning")
+        trans_tune_layout = QFormLayout()
+
+        self.num_beams = QSpinBox()
+        self.num_beams.setRange(1, 10)
+        self.num_beams.setValue(self._cfg.get("num_beams", 4))
+        self.num_beams.setSuffix(" beams")
+        trans_tune_layout.addRow("Num Beams:", self.num_beams)
+
+        self.repetition_penalty = QDoubleSpinBox()
+        self.repetition_penalty.setRange(1.0, 2.0)
+        self.repetition_penalty.setSingleStep(0.1)
+        self.repetition_penalty.setDecimals(1)
+        self.repetition_penalty.setValue(self._cfg.get("repetition_penalty", 1.2))
+        self.repetition_penalty.setSuffix(" rep")
+        trans_tune_layout.addRow("Repetition Penalty:", self.repetition_penalty)
+
+        self.max_length = QSpinBox()
+        self.max_length.setRange(50, 500)
+        self.max_length.setSingleStep(10)
+        self.max_length.setValue(self._cfg.get("max_length", 200))
+        self.max_length.setSuffix(" tokens")
+        trans_tune_layout.addRow("Max Length:", self.max_length)
+
+        trans_tune_group.setLayout(trans_tune_layout)
+        layout.addWidget(trans_tune_group)
+
         layout.addStretch()
 
         self.wyoming_enabled.stateChanged.connect(self._on_wyoming_toggle)
@@ -182,6 +257,13 @@ class _GeneralTab(QWidget):
             "target_lang": tgt_codes[self.target_lang.currentIndex()],
             "translate_model": _TRANSLATION_MODELS[self.translate_model.currentIndex()],
             "tts_voice": _TTS_VOICES[self.tts_voice.currentIndex()],
+            "tts_speed": self.tts_speed.value(),
+            "beam_size": self.beam_size.value(),
+            "temperature": self.temperature.value(),
+            "initial_prompt": self.initial_prompt.text(),
+            "num_beams": self.num_beams.value(),
+            "repetition_penalty": self.repetition_penalty.value(),
+            "max_length": self.max_length.value(),
         }
 
 
@@ -193,7 +275,7 @@ class SettingsDialog(QDialog):
         self.setWindowTitle("Settings")
         self.setModal(True)
         self.setMinimumWidth(560)
-        self.setMinimumHeight(520)
+        self.setMinimumHeight(720)
         self._build()
 
     def _build(self):
