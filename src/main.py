@@ -7,7 +7,6 @@ from loguru import logger
 import yaml
 from PySide6.QtWidgets import QApplication
 
-# Import the new architecture components
 from .controller.translator_controller import ConcreteTranslatorController
 from .adapters import DirectAdapter
 from .ui.widgets.main_window import MainWindow
@@ -30,7 +29,7 @@ def create_adapter(mode: str = "direct", use_wyoming: bool = False, wyoming_host
     # Load Wyoming settings from config if not explicitly provided
     from .core.config import get_config_manager
     config_manager = get_config_manager()
-    
+
     # Only override with config values if not explicitly provided in function call
     if 'use_wyoming' not in kwargs:
         use_wyoming = config_manager.get('wyoming.use_wyoming', use_wyoming)

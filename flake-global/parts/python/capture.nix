@@ -5,7 +5,7 @@
 
 callPackage ./common.nix {
   pname = "translator-capture";
-  src = ../../../src;
+  src = ../../..;
 
   dependencies = with python3.pkgs; [
     # Capture service specific dependencies

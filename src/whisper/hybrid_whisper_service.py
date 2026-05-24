@@ -234,7 +234,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--socket-path", default=get_runtime_config().get_hybrid_whisper_socket_path(), required=False)
     parser.add_argument("--model", default="medium")
-    parser.add_argument("--device", default="auto")
+    parser.add_argument("--device", default="cuda")
     parser.add_argument("--compute-type", default="float16")
     parser.add_argument("--use-wyoming", action="store_true", help="Use Wyoming service instead of local model")
     parser.add_argument("--wyoming-host", default="localhost", help="Wyoming service host")

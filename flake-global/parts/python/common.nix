@@ -3,6 +3,7 @@
 , src
 , pname
 , dependencies
+, projectFile ? "pyproject.toml"
 }:
 
 python3.pkgs.buildPythonApplication {
@@ -10,6 +11,8 @@ python3.pkgs.buildPythonApplication {
   version = "0.1.0";
 
   pyproject = true;
+
+  nativeBuildInputs = with python3.pkgs; [ setuptools ];
 
   propagatedBuildInputs = dependencies;
 
