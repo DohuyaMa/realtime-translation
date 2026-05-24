@@ -20,22 +20,28 @@ translation:
   # Language settings
   source_lang: "auto"  # auto, uk (Ukrainian), pl (Polish)
   target_lang: "en"    # English
-  
+
   # Whisper model settings
   whisper_model: "medium"  # tiny, base, small, medium, large
-  whisper_device: "cpu"    # cpu, cuda
-  
-  # Translation settings
-  beam_size: 5
-  temperature: 0.3
-  
+  whisper_device: "cuda"   # cpu, cuda
+
   # Batch processing
   max_queue_size: 10
-  
+
+models:
+  whisper:
+    beam_size: 5
+    temperature: 0.0
+    initial_prompt: ""
+  translate:
+    num_beams: 4
+    repetition_penalty: 1.2
+    max_length: 200
+
 speech:
   # TTS settings
   tts_engine: "kokoro"     # kokoro, coqui
-  tts_device: "cpu"        # cpu, cuda
+  tts_device: "cuda"       # cpu, cuda
   tts_voice: "af_heart"    # Kokoro voice: af_heart, af_bella, af_nicole, am_adam, am_liam
   tts_speed: 1.0
   tts_pitch: 0.0
@@ -70,5 +76,5 @@ system:
   # Performance settings
   num_threads: 4
   batch_size: 16
-  use_gpu: false
-  gpu_memory_limit: "2GB"
+  use_gpu: true
+  gpu_memory_limit: "4GB"

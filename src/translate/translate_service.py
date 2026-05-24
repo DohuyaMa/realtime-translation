@@ -41,11 +41,17 @@ class TranslationService:
         source_lang: str = "uk",
         target_lang: str = "en",
         model_name: Optional[str] = None,
+        num_beams: int = 4,
+        repetition_penalty: float = 1.2,
+        max_length: int = 200,
     ):
         self.socket_path = socket_path
         self.source_lang = source_lang
         self.target_lang = target_lang
         self._model_name = model_name
+        self._num_beams = num_beams
+        self._repetition_penalty = repetition_penalty
+        self._max_length = max_length
 
         # Status manager — must be created before _initialize_model
         self.status = StatusManager(component_name="translate")
@@ -122,6 +128,15 @@ class TranslationService:
         self._model.eval()
         self._forced_bos_token_id = self._tokenizer.lang_code_to_id[tgt_flores]
     
+    def _post_process(self, text: str) -> str:
+        text = text.strip()
+        if not text:
+            return text
+        text = text[0].upper() + text[1:]
+        if text[-1] not in '.!?':
+            text += '.'
+        return text
+
     def start(self):
         """Start the translation service."""
         self.ipc_server.start()
@@ -153,8 +168,14 @@ class TranslationService:
                     gen_kwargs = {}
                     if getattr(self, '_forced_bos_token_id', None) is not None:
                         gen_kwargs['forced_bos_token_id'] = self._forced_bos_token_id
+                    if self._num_beams > 1:
+                        gen_kwargs['num_beams'] = self._num_beams
+                    gen_kwargs['repetition_penalty'] = self._repetition_penalty
+                    gen_kwargs['max_length'] = self._max_length
+                    gen_kwargs['early_stopping'] = True
                     tokens = self._model.generate(**inputs, **gen_kwargs)
                 translated_text = self._tokenizer.batch_decode(tokens, skip_special_tokens=True)[0]
+                translated_text = self._post_process(translated_text)
                 elapsed = _log_timing() - t0
                 
                 self.status.log_info(
@@ -226,18 +247,24 @@ def main():
                        help="Target language code (ISO 639-1 or FLORES-200 for NLLB)")
     parser.add_argument("--model-name", default=None,
                        help="HuggingFace model name (e.g. facebook/nllb-200-distilled-600M)")
-    
+    parser.add_argument("--num-beams", type=int, default=4, help="Beam search width for translation")
+    parser.add_argument("--repetition-penalty", type=float, default=1.2, help="Repetition penalty (1.0=none)")
+    parser.add_argument("--max-length", type=int, default=200, help="Maximum output tokens per segment")
+
     args = parser.parse_args()
-    
+
     # Create temporary directory if needed
     socket_dir = os.path.dirname(args.socket_path)
     os.makedirs(socket_dir, exist_ok=True)
-    
+
     service = TranslationService(
         socket_path=args.socket_path,
         source_lang=args.source_lang,
         target_lang=args.target_lang,
         model_name=args.model_name,
+        num_beams=args.num_beams,
+        repetition_penalty=args.repetition_penalty,
+        max_length=args.max_length,
     )
     
     def signal_handler(signum, frame):

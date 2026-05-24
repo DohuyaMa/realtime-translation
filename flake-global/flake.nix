@@ -21,9 +21,14 @@
       perSystem = { config, self', inputs', pkgs, system, ... }:
         let
           lib = nixpkgs.lib;
+          # Allow unfree packages (torch-bin with CUDA, etc.)
+          pkgsBuild = import nixpkgs {
+            inherit system;
+            config = { allowUnfree = true; };
+          };
           # Import production packages
-          packages = (import ./prod/packages.nix { inherit pkgs lib; }).packages;
-          
+          packages = (import ./prod/packages.nix { pkgs = pkgsBuild; inherit lib; }).packages;
+
           # Import apps (using the packages we just defined)
           apps = (import ./prod/apps.nix { self = self'; packages = packages; }).apps;
         in

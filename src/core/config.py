@@ -48,14 +48,24 @@ class ConfigManager:
                 'whisper': {
                     'backend': 'local',
                     'model': 'medium',
+                    'device': 'cuda',
+                    'beam_size': 5,
+                    'temperature': 0.0,
+                    'initial_prompt': '',
                 },
                 'translate': {
                     'model': 'Helsinki-NLP/opus-mt-uk-en',
+                    'device': 'cuda',
+                    'num_beams': 4,
+                    'repetition_penalty': 1.2,
+                    'max_length': 200,
                 },
                 'tts': {
                     'engine': 'kokoro',
                     'model': 'hexgrad/Kokoro-82M',
                     'voice': 'af_heart',
+                    'device': 'cuda',
+                    'speed': 1.0,
                 },
             }
         }

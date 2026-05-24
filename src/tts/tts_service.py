@@ -23,22 +23,26 @@ class TTSService:
         socket_path: str,
         sample_rate: int = 24000,
         voice: Optional[str] = None,
+        speed: float = 1.0,
     ):
         """Initialize TTS service."""
         self.socket_path = socket_path
         self.sample_rate = sample_rate
-        
+        self._voice = voice
+        self._speed = speed
+
         # Initialize TTS engine
         self.tts_engine = TTSEngine(
             sample_rate=sample_rate,
             voice=voice,
         )
-        
+
         # IPC setup
         self.ipc_server = IPCServer(socket_path)
         self.ipc_server.register_handler('synthesize_text', self._handle_synthesize_text)
         self.ipc_server.register_handler('get_status', self._handle_get_status)
         self.ipc_server.register_handler('play_audio', self._handle_play_audio)
+        self.ipc_server.register_handler('set_voice', self._handle_set_voice)
         
         # State
         # State
@@ -80,7 +84,7 @@ class TTSService:
                 
                 # Synthesize speech synchronously so we can return audio bytes
                 t0 = _log_timing()
-                audio_data = self.tts_engine.synthesize_sync(text)
+                audio_data = self.tts_engine.synthesize_sync(text, speed=self._speed)
                 tts_time = _log_timing() - t0
                 
                 # Convert audio data to base64 for transmission
@@ -137,13 +141,28 @@ class TTSService:
                 self.status.log_exception(f"Error playing audio: {e}")
                 return {"status": "error", "message": str(e)}
     
+    def _handle_set_voice(self, message: Dict) -> Dict[str, Any]:
+        """Handle live voice/speed change request from IPC."""
+        try:
+            voice = message.get('data', {}).get('voice', self._voice)
+            speed = message.get('data', {}).get('speed', self._speed)
+            self._voice = voice
+            self._speed = speed
+            self.tts_engine.set_voice(voice)
+            self.status.log_info(f"Voice changed to {voice}, speed={speed}")
+            return {"status": "success", "data": {"voice": voice, "speed": speed}}
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
     def _handle_get_status(self, message: Dict) -> Dict[str, Any]:
         """Handle get status request from IPC."""
         return {
             "status": "success",
             "data": {
                 "running": self.is_running,
-                "sample_rate": self.sample_rate
+                "sample_rate": self.sample_rate,
+                "voice": self._voice,
+                "speed": self._speed,
             }
         }
 
@@ -157,21 +176,24 @@ def main():
     parser = argparse.ArgumentParser(description="Text-to-Speech Service")
     parser.add_argument("--socket-path", default=get_runtime_config().get_tts_socket_path(),
                        help="Path to UNIX socket for IPC")
-    parser.add_argument("--sample-rate", type=int, default=24000, 
+    parser.add_argument("--sample-rate", type=int, default=24000,
                        help="Audio sample rate")
-    parser.add_argument("--voice", default=None,
+    parser.add_argument("--voice", default="af_heart",
                        help="Kokoro voice name (e.g. af_heart, af_bella, am_adam)")
-    
+    parser.add_argument("--speed", type=float, default=1.0,
+                       help="Speech speed multiplier (0.5–2.0)")
+
     args = parser.parse_args()
-    
+
     # Create temporary directory if needed
     socket_dir = os.path.dirname(args.socket_path)
     os.makedirs(socket_dir, exist_ok=True)
-    
+
     service = TTSService(
         socket_path=args.socket_path,
         sample_rate=args.sample_rate,
         voice=args.voice,
+        speed=args.speed,
     )
     
     def signal_handler(signum, frame):

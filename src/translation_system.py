@@ -318,7 +318,7 @@ class TranslationSystem:
 
         CAPTURE_RATE = 48000          # PipeWire native rate
         WHISPER_RATE = self.sample_rate  # 16000
-        CHUNK_SEC = 3.0
+        CHUNK_SEC = 6.0               # longer window = fewer cut sentences
         chunk_frames = int(CHUNK_SEC * CAPTURE_RATE)
 
         audio_q: _queue.Queue = _queue.Queue()

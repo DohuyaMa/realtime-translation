@@ -50,7 +50,9 @@ class WhisperSession:
             return pcm.astype(np.float32) / 32768.0
 
 
-def run_server(socket_path: str, model_name: str, device: str, compute_type: str, use_wyoming: bool = False, wyoming_host: str = "localhost", wyoming_port: int = 10300):
+def run_server(socket_path: str, model_name: str, device: str, compute_type: str,
+               use_wyoming: bool = False, wyoming_host: str = "localhost", wyoming_port: int = 10300,
+               beam_size: int = 5, temperature: float = 0.0, initial_prompt: str = ""):
     if os.path.exists(socket_path):
         os.unlink(socket_path)
 
@@ -151,11 +153,22 @@ def run_server(socket_path: str, model_name: str, device: str, compute_type: str
                             if audio is not None:
                                 audio_len_sec = len(audio) / SAMPLE_RATE
                                 t0 = _log_timing()
-                                segments, info = model.transcribe(
-                                    audio,
+                                transcribe_kwargs = dict(
                                     language=session.language,
                                     vad_filter=True,
+                                    vad_parameters=dict(
+                                        threshold=0.35,
+                                        min_speech_duration_ms=100,
+                                        min_silence_duration_ms=500,
+                                        speech_pad_ms=800,
+                                    ),
+                                    no_speech_threshold=0.4,
+                                    beam_size=beam_size,
+                                    temperature=temperature,
                                 )
+                                if initial_prompt:
+                                    transcribe_kwargs["initial_prompt"] = initial_prompt
+                                segments, info = model.transcribe(audio, **transcribe_kwargs)
                                 transcribe_time = _log_timing() - t0
                                 segments_list = list(segments)
                                 status.log_info(
@@ -239,6 +252,9 @@ def main():
     parser.add_argument("--use-wyoming", action="store_true", help="Use Wyoming service instead of local model")
     parser.add_argument("--wyoming-host", default="localhost", help="Wyoming service host")
     parser.add_argument("--wyoming-port", type=int, default=10300, help="Wyoming service port")
+    parser.add_argument("--beam-size", type=int, default=5, help="Beam search width")
+    parser.add_argument("--temperature", type=float, default=0.0, help="Sampling temperature (0=deterministic)")
+    parser.add_argument("--initial-prompt", type=str, default="", help="Prompt text to bias recognition")
     args = parser.parse_args()
 
     run_server(
@@ -248,7 +264,10 @@ def main():
         compute_type=args.compute_type,
         use_wyoming=args.use_wyoming,
         wyoming_host=args.wyoming_host,
-        wyoming_port=args.wyoming_port
+        wyoming_port=args.wyoming_port,
+        beam_size=args.beam_size,
+        temperature=args.temperature,
+        initial_prompt=args.initial_prompt,
     )
 
 

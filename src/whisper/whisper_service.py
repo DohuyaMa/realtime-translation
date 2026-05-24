@@ -40,7 +40,8 @@ class WhisperSession:
             return pcm.astype(np.float32) / 32768.0
 
 
-def run_server(socket_path: str, model_name: str, device: str, compute_type: str):
+def run_server(socket_path: str, model_name: str, device: str, compute_type: str,
+               beam_size: int = 5, temperature: float = 0.0, initial_prompt: str = ""):
     if os.path.exists(socket_path):
         logger.debug(f"Removing stale socket: {socket_path}")
         os.unlink(socket_path)
@@ -109,11 +110,22 @@ def run_server(socket_path: str, model_name: str, device: str, compute_type: str
                         if audio is not None:
                             audio_len_sec = len(audio) / SAMPLE_RATE
                             t0 = _log_timing()
-                            segments, info = model.transcribe(
-                                audio,
+                            transcribe_kwargs = dict(
                                 language=session.language,
                                 vad_filter=True,
+                                vad_parameters=dict(
+                                    threshold=0.35,
+                                    min_speech_duration_ms=100,
+                                    min_silence_duration_ms=500,
+                                    speech_pad_ms=800,
+                                ),
+                                no_speech_threshold=0.4,
+                                beam_size=beam_size,
+                                temperature=temperature,
                             )
+                            if initial_prompt:
+                                transcribe_kwargs["initial_prompt"] = initial_prompt
+                            segments, info = model.transcribe(audio, **transcribe_kwargs)
                             transcribe_time = _log_timing() - t0
                             segments_list = list(segments)
                             status.log_info(
@@ -167,6 +179,9 @@ def main():
     parser.add_argument("--model", default="medium")
     parser.add_argument("--device", default="auto")
     parser.add_argument("--compute-type", default="float16")
+    parser.add_argument("--beam-size", type=int, default=5, help="Beam search width")
+    parser.add_argument("--temperature", type=float, default=0.0, help="Sampling temperature (0=deterministic)")
+    parser.add_argument("--initial-prompt", type=str, default="", help="Prompt text to bias recognition")
     args = parser.parse_args()
 
     run_server(
@@ -174,6 +189,9 @@ def main():
         model_name=args.model,
         device=args.device,
         compute_type=args.compute_type,
+        beam_size=args.beam_size,
+        temperature=args.temperature,
+        initial_prompt=args.initial_prompt,
     )
 
 
