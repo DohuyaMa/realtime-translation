@@ -79,6 +79,7 @@ in
           pyyaml
           python-dotenv
           loguru
+          huggingface-hub
           kokoroPackage
           sentencepiece
           en_core_web_sm

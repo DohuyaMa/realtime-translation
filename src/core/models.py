@@ -2,13 +2,14 @@
 import os
 import shutil
 import subprocess
-import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum, auto
 from pathlib import Path
 from typing import Callable, List, Optional
 
 from loguru import logger
+
+from .huggingface import download_model
 
 
 class ModelStatus(Enum):
@@ -39,6 +40,9 @@ class ModelInfo:
 
 
 _WHISPER_MODELS = ["tiny", "base", "small", "medium", "large"]
+
+_WHISPER_HF_REPO = {size: f"Systran/faster-whisper-{size}" for size in _WHISPER_MODELS}
+_WHISPER_HF_REPO["large"] = "Systran/faster-whisper-large-v3"
 
 _REGISTRY: dict[str, ModelSpec] = {
     "translate": ModelSpec(
@@ -141,74 +145,46 @@ class ModelManager:
         whisper_model: str = "small",
         progress_cb: Optional[Callable[[int, str], None]] = None,
     ) -> bool:
-        """Download model in a subprocess; calls progress_cb(percent, message)."""
+        """Download model in-process using huggingface_hub.
+
+        Uses the huggingface_hub library directly (available in the Nix
+        closure) instead of a subprocess — the old subprocess approach
+        failed because sys.executable is the bare store Python without
+        PYTHONPATH.
+        """
         if model_id == "translate":
-            return self._download_hf(
+            cache_dir = os.environ.get(
+                "HF_HUB_CACHE",
+                str(Path.home() / "real-time-translator-cache" / "huggingface" / "hub"),
+            )
+            return download_model(
                 "Helsinki-NLP/opus-mt-uk-en",
-                os.environ.get(
-                    "HF_HUB_CACHE",
-                    str(Path.home() / "real-time-translator-cache" / "huggingface" / "hub"),
-                ),
-                progress_cb,
+                local_dir=cache_dir,
+                progress_cb=progress_cb,
             )
         elif model_id == "tts":
-            return self._download_hf("hexgrad/Kokoro-82M", None, progress_cb)
+            return download_model(
+                "hexgrad/Kokoro-82M",
+                progress_cb=progress_cb,
+            )
         elif model_id == "whisper":
             return self._download_whisper(whisper_model, progress_cb)
         return False
 
-    def _download_hf(
-        self,
-        repo_id: str,
-        cache_dir: Optional[str],
-        progress_cb: Optional[Callable[[int, str], None]],
-    ) -> bool:
-        script = f"""
-import sys
-from huggingface_hub import snapshot_download
-from huggingface_hub import hf_hub_download
-kwargs = dict(repo_id={repo_id!r})
-if {cache_dir!r}:
-    kwargs['cache_dir'] = {cache_dir!r}
-print("Downloading...", flush=True)
-snapshot_download(**kwargs)
-print("Done", flush=True)
-"""
-        return self._run_script(script, progress_cb)
-
     def _download_whisper(
         self, model_name: str, progress_cb: Optional[Callable[[int, str], None]]
     ) -> bool:
-        cache = str(Path.home() / ".cache" / "whisper")
-        script = f"""
-from faster_whisper import WhisperModel
-print("Downloading {model_name}...", flush=True)
-WhisperModel({model_name!r}, device='cpu', download_root={cache!r})
-print("Done", flush=True)
-"""
-        return self._run_script(script, progress_cb)
-
-    def _run_script(
-        self, script: str, progress_cb: Optional[Callable[[int, str], None]]
-    ) -> bool:
-        try:
-            proc = subprocess.Popen(
-                [sys.executable, "-c", script],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-            )
-            for line in proc.stdout:
-                line = line.strip()
-                if line and progress_cb:
-                    progress_cb(-1, line)
-            proc.wait()
-            return proc.returncode == 0
-        except Exception as e:
-            logger.error(f"Download failed: {e}")
+        repo_id = _WHISPER_HF_REPO.get(model_name)
+        if not repo_id:
+            logger.error(f"Unknown whisper model: {model_name}")
             if progress_cb:
-                progress_cb(-1, f"Error: {e}")
+                progress_cb(-1, f"Unknown whisper model: {model_name}")
             return False
+
+        cache = str(Path.home() / ".cache" / "whisper" / model_name)
+        if progress_cb:
+            progress_cb(0, f"Downloading {repo_id} to {cache}...")
+        return download_model(repo_id, local_dir=cache, progress_cb=progress_cb)
 
     def clear_cache(self, model_id: str, whisper_model: str = "small") -> bool:
         info = self.get_info(model_id, whisper_model)
@@ -228,3 +204,25 @@ print("Done", flush=True)
 
     def format_size(self, size_bytes: Optional[int]) -> str:
         return _fmt_size(size_bytes)
+
+    def get_downloadable_whisper_models(self) -> list[dict]:
+        """Return list of all available whisper models with metadata.
+
+        Returns dicts with keys: id, display_name, size_hint, repo_id.
+        """
+        size_map = {
+            "tiny": "~150 MB",
+            "base": "~300 MB",
+            "small": "~500 MB",
+            "medium": "~1.5 GB",
+            "large": "~3 GB",
+        }
+        return [
+            {
+                "id": name,
+                "display_name": f"Whisper {name}",
+                "size_hint": size_map.get(name, ""),
+                "repo_id": _WHISPER_HF_REPO.get(name, f"Systran/faster-whisper-{name}"),
+            }
+            for name in _WHISPER_MODELS
+        ]

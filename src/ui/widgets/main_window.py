@@ -40,10 +40,17 @@ class MainWindow(QMainWindow):
         self.is_translating = False
         self.update_timer: Optional[QTimer] = None
         
-        # Wyoming settings
-        self._current_use_wyoming = False
-        self._current_wyoming_host = "localhost"
-        self._current_wyoming_port = 10300
+        # Wyoming settings — read from config so Settings dialog shows actual state
+        try:
+            from ...core.config import get_config_manager
+            wy_cfg = get_config_manager().get_wyoming_config()
+            self._current_use_wyoming = wy_cfg.get("use_wyoming", False)
+            self._current_wyoming_host = wy_cfg.get("host", "localhost")
+            self._current_wyoming_port = wy_cfg.get("port", 10300)
+        except Exception:
+            self._current_use_wyoming = False
+            self._current_wyoming_host = "localhost"
+            self._current_wyoming_port = 10300
         
         # Connect UI controller callbacks
         self._update_signal.connect(self._apply_ui_update)

@@ -378,15 +378,15 @@ class DirectAdapter:
         if not device_id or device_id.lower() == "default":
             return True   # placeholder — nothing to set
         try:
+            # Store user's choice so _pipeline_loop uses it via sounddevice
+            self.translation_system._preferred_input_device_name = device_id
+            # Also try IPC so the standalone capture service knows (if it ever supports it)
             if self.translation_system.capture_client is not None:
-                result = self.translation_system.set_input_device(device_id)
-                return result is not None
+                self.translation_system.set_input_device(device_id)
             if self.audio_router:
                 self.audio_router.set_default_source(device_id)
-                logger.info(f"Set input device directly: {device_id}")
-                return True
-            logger.error("Audio router not available")
-            return False
+            logger.info(f"Input device set to: {device_id}")
+            return True
         except Exception as e:
             logger.error(f"Failed to set input device: {e}")
             return False
@@ -396,9 +396,12 @@ class DirectAdapter:
         if not device_id or device_id.lower() == "default":
             return True   # placeholder — nothing to set
         try:
+            # Store user's choice so TTS playback uses it via sounddevice
+            self.translation_system._preferred_output_device_name = device_id
+            # Also set PulseAudio default sink via audio router
             if self.audio_router:
                 self.audio_router.set_default_sink(device_id)
-                logger.info(f"Set output device directly: {device_id}")
+                logger.info(f"Output device set to: {device_id}")
                 return True
             logger.error("Audio router not available")
             return False

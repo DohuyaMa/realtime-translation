@@ -35,8 +35,8 @@ class WhisperSession:
         with self.lock:
             if not self.buffer:
                 return None
-            pcm = np.frombuffer(self.buffer, dtype=PCM_DTYPE)
-            self.buffer.clear()
+            pcm = np.frombuffer(self.buffer, dtype=PCM_DTYPE).copy()
+            self.buffer = bytearray()
             return pcm.astype(np.float32) / 32768.0
 
 

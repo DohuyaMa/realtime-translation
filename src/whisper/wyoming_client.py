@@ -1,260 +1,258 @@
 """
 Wyoming Protocol Client for connecting to wyoming-faster-whisper service.
+Uses the proper Wyoming protocol (JSON-line + binary payload) via the `wyoming` library.
 """
-import socket
-import struct
-import json
+import asyncio
 import threading
 import time
-import numpy as np
-from typing import Optional, Dict, Any, Callable
+from concurrent.futures import Future
+from typing import Optional, Callable, Any
+
 from loguru import logger
+
+from wyoming.asr import Transcribe, Transcript
+from wyoming.audio import AudioChunk, AudioStart, AudioStop
+from wyoming.client import AsyncClient
+
+# Wyoming ASR protocol flow:
+#   Client → Transcribe (model name, language)
+#   Client → AudioStart (rate, width, channels)
+#   Client → AudioChunk+ (raw PCM audio bytes in payload)
+#   Client → AudioStop
+#   Server → Transcript+ (recognition results)
 
 
 class WyomingWhisperClient:
-    """
-    Client for connecting to wyoming-faster-whisper service via TCP.
-    """
+    """Proper Wyoming protocol client bridging async ⟷ sync via background event loop thread."""
+
     def __init__(self, host: str = "localhost", port: int = 10300):
         self.host = host
         self.port = port
-        self.socket: Optional[socket.socket] = None
-        self.connected = False
-        self.receive_thread: Optional[threading.Thread] = None
-        self.is_receiving = False
-        self.on_result: Optional[Callable[[Dict[str, Any]], None]] = None
-        self._bytes_sent = 0
-        self._messages_received = 0
-        self._connect_attempts = 0
+
+        # Async infrastructure
+        self._loop = asyncio.new_event_loop()
+        self._loop_ready = threading.Event()
+        self._loop_thread = threading.Thread(target=self._run_async_loop, daemon=True)
+        self._loop_thread.start()
+        self._loop_ready.wait()  # ensure loop is running before any call
+
+        self._client: Optional[AsyncClient] = None
+        self._connected = False
+
+        # Callback fired on each Transcript event (called from async thread)
+        self.on_result: Optional[Callable[[dict], None]] = None
+
+        # Read loop task handle (cancelled on disconnect)
+        self._read_task: Optional[asyncio.Task] = None
+
+    # ------------------------------------------------------------------
+    # Async loop management
+    # ------------------------------------------------------------------
+
+    def _run_async_loop(self) -> None:
+        """Background thread entry — run the event loop forever."""
+        asyncio.set_event_loop(self._loop)
+        self._loop_ready.set()
+        self._loop.run_forever()
+
+    def _run_coro(self, coro) -> Any:
+        """Schedule a coroutine on the async loop and wait for the result (blocking)."""
+        future: Future = asyncio.run_coroutine_threadsafe(coro, self._loop)
+        return future.result()
+
+    def _call_soon(self, fn, *args) -> None:
+        """Schedule a sync callable on the async loop thread (fire-and-forget)."""
+        self._loop.call_soon_threadsafe(fn, *args)
+
+    # ------------------------------------------------------------------
+    # Public API — synchronous
+    # ------------------------------------------------------------------
 
     def connect(self, retries: int = 3, retry_delay: float = 1.0) -> bool:
-        """Connect to the Wyoming service with retries."""
+        """Connect to the Wyoming TCP service."""
         last_error = None
         for attempt in range(1, retries + 1):
-            self._connect_attempts += 1
             try:
-                self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                self.socket.settimeout(5.0)
-                self.socket.connect((self.host, self.port))
-                self.socket.settimeout(None)
-                self.connected = True
-                
-                # Start receiving thread
-                self.is_receiving = True
-                self.receive_thread = threading.Thread(target=self._receive_loop, daemon=True)
-                self.receive_thread.start()
-                
-                logger.info(f"Connected to Wyoming at {self.host}:{self.port} (attempt {attempt})")
+                self._client = AsyncClient.from_uri(
+                    f"tcp://{self.host}:{self.port}"
+                )
+                self._run_coro(self._client.connect())
+                self._connected = True
+
+                # Start the background read loop
+                self._read_task = asyncio.run_coroutine_threadsafe(
+                    self._read_loop(), self._loop
+                )
+
+                logger.info(
+                    "Connected to Wyoming at {}:{} (attempt {})",
+                    self.host, self.port, attempt,
+                )
                 return True
-            except socket.timeout:
-                last_error = f"Connection timeout (attempt {attempt}/{retries})"
-                logger.warning(f"Wyoming connection timeout {self.host}:{self.port} (attempt {attempt}/{retries})")
-            except ConnectionRefusedError:
-                last_error = f"Connection refused (attempt {attempt}/{retries})"
-                logger.warning(f"Wyoming connection refused {self.host}:{self.port} (attempt {attempt}/{retries})")
-            except Exception as e:
+
+            except (ConnectionRefusedError, OSError, TimeoutError) as e:
                 last_error = f"{type(e).__name__}: {e} (attempt {attempt}/{retries})"
-                logger.warning(f"Wyoming connection failed {self.host}:{self.port}: {last_error}")
-            
-            if attempt < retries:
-                time.sleep(retry_delay)
-            if self.socket:
-                try:
-                    self.socket.close()
-                except Exception:
-                    pass
-                self.socket = None
-        
-        logger.error(f"Failed to connect to Wyoming at {self.host}:{self.port} after {retries} attempts: {last_error}")
-        self.connected = False
+                logger.warning(
+                    "Wyoming connection failed {}:{} — {}",
+                    self.host, self.port, last_error,
+                )
+                if self._client is not None:
+                    self._run_coro(self._client.disconnect())
+                    self._client = None
+                if attempt < retries:
+                    time.sleep(retry_delay)
+
+        logger.error(
+            "Failed to connect to Wyoming at {}:{} after {} attempts: {}",
+            self.host, self.port, retries, last_error,
+        )
+        self._connected = False
         return False
 
-    def disconnect(self):
+    def disconnect(self) -> None:
         """Disconnect from the Wyoming service."""
-        self.is_receiving = False
-        if self.socket:
+        if self._read_task is not None:
+            self._read_task.cancel()
+            self._read_task = None
+        if self._client is not None:
             try:
-                self.socket.close()
-            except Exception as e:
-                logger.debug(f"Error closing Wyoming socket: {e}")
-            self.socket = None
-        self.connected = False
-        if self.receive_thread:
-            self.receive_thread.join(timeout=1.0)
-        logger.info(f"Disconnected from Wyoming at {self.host}:{self.port} "
-                     f"(sent={self._bytes_sent}B recv={self._messages_received}msgs)")
+                self._run_coro(self._client.disconnect())
+            except Exception:
+                pass
+            self._client = None
+        self._connected = False
 
-    def _receive_loop(self):
-        """Receive messages from the Wyoming service."""
-        while self.is_receiving and self.connected:
-            try:
-                # Read message length (4 bytes, little-endian)
-                length_bytes = self._read_exact(4)
-                if not length_bytes:
-                    logger.debug("Wyoming receive loop: connection closed (empty read)")
-                    break
-                
-                length = struct.unpack('<I', length_bytes)[0]
-                if length > 10 * 1024 * 1024:  # sanity check: max 10MB
-                    logger.error(f"Wyoming message length {length} exceeds sanity limit (10MB)")
-                    break
-                
-                # Read message data
-                data = self._read_exact(length)
-                if not data:
-                    logger.debug("Wyoming receive loop: connection closed (partial read)")
-                    break
-                
-                # Parse as JSON
-                try:
-                    message = json.loads(data.decode('utf-8'))
-                    self._messages_received += 1
-                    self._handle_message(message)
-                except json.JSONDecodeError as e:
-                    logger.error(f"Wyoming invalid JSON ({len(data)} bytes): {data[:200]}... — {e}")
-                    
-            except socket.timeout:
-                logger.debug("Wyoming receive loop: timeout (continuing)")
-                continue
-            except ConnectionResetError:
-                logger.warning(f"Wyoming connection reset at {self.host}:{self.port}")
-                break
-            except Exception as e:
-                if self.is_receiving:
-                    logger.exception(f"Wyoming receive loop error: {e}")
-                break
-
-    def _read_exact(self, num_bytes: int) -> Optional[bytes]:
-        """Read exactly num_bytes from the socket."""
-        data = b''
-        while len(data) < num_bytes:
-            chunk = self.socket.recv(num_bytes - len(data))
-            if not chunk:
-                return None
-            data += chunk
-        return data
-
-    def _handle_message(self, message: Dict[str, Any]):
-        """Handle incoming message from Wyoming service."""
-        if self.on_result:
-            self.on_result(message)
-
-    def send_audio(self, audio_data: bytes) -> bool:
-        """Send audio data to the Wyoming service."""
-        if not self.connected or not self.socket:
-            logger.error("Not connected to Wyoming service (cannot send audio)")
-            return False
-
-        try:
-            # Send audio data as Wyoming audio event using the proper protocol
-            event_data = {
-                "event": "audio",
-                "audio": audio_data.hex()
-            }
-            
-            json_data = json.dumps(event_data).encode('utf-8')
-            length = len(json_data)
-            
-            # Send length + data following Wyoming protocol
-            self.socket.sendall(struct.pack('<I', length))
-            self.socket.sendall(json_data)
-            self._bytes_sent += 4 + length
-            
-            return True
-        except BrokenPipeError:
-            logger.error(f"Broken pipe sending audio to Wyoming ({self.host}:{self.port}) — connection lost")
-            self.connected = False
-            return False
-        except Exception as e:
-            logger.exception(f"Failed to send audio ({len(audio_data)}B) to Wyoming: {e}")
-            self.connected = False
-            return False
-
-    def send_event(self, event_name: str, data: Optional[Dict[str, Any]] = None) -> bool:
-        """Send an event to the Wyoming service using the Wyoming protocol."""
-        if not self.connected or not self.socket:
-            logger.error(f"Not connected to Wyoming (cannot send event '{event_name}')")
-            return False
-
-        try:
-            # Create Wyoming event
-            event = {
-                "event": event_name
-            }
-            if data:
-                event.update(data)
-            
-            json_data = json.dumps(event).encode('utf-8')
-            length = len(json_data)
-            
-            # Send length + data following Wyoming protocol
-            self.socket.sendall(struct.pack('<I', length))
-            self.socket.sendall(json_data)
-            self._bytes_sent += 4 + length
-            
-            logger.debug(f"Wyoming event '{event_name}' sent ({length}B)")
-            return True
-        except BrokenPipeError:
-            logger.error(f"Broken pipe sending event '{event_name}' to Wyoming — connection lost")
-            self.connected = False
-            return False
-        except Exception as e:
-            logger.exception(f"Failed to send event '{event_name}' to Wyoming: {e}")
-            self.connected = False
-            return False
+    def set_callback(self, callback: Callable[[dict], None]) -> None:
+        """Set callback for Transcript events (called from background thread)."""
+        self.on_result = callback
 
     def start_recognition(self, language: Optional[str] = None) -> bool:
-        """Start a recognition session."""
-        data = {"raw": True}  # Process raw audio
-        if language:
-            data["language"] = language
-        return self.send_event("start-recognition", data)
+        """Send Transcribe + AudioStart to begin a recognition session."""
+        if not self._connected or self._client is None:
+            logger.error("Not connected to Wyoming — cannot start recognition")
+            return False
+
+        try:
+            # 1. Transcribe event (tells server to start ASR with optional language)
+            transcribe = Transcribe(language=language)
+            self._run_coro(self._client.write_event(transcribe.event()))
+
+            # 2. AudioStart event (tells server the audio format)
+            audio_start = AudioStart(rate=16000, width=2, channels=1)
+            self._run_coro(self._client.write_event(audio_start.event()))
+
+            logger.debug("Wyoming recognition started (language={})", language)
+            return True
+        except Exception as e:
+            logger.exception("Failed to start Wyoming recognition: {}", e)
+            self._connected = False
+            return False
+
+    def send_audio(self, audio_data: bytes) -> bool:
+        """Send a chunk of raw PCM audio (s16le 16 kHz mono)."""
+        if not self._connected or self._client is None:
+            logger.error("Not connected to Wyoming — cannot send audio")
+            return False
+
+        try:
+            chunk = AudioChunk(
+                rate=16000, width=2, channels=1, audio=audio_data,
+            )
+            self._run_coro(self._client.write_event(chunk.event()))
+            return True
+        except ConnectionError:
+            logger.error("Connection lost sending audio to Wyoming")
+            self._connected = False
+            return False
+        except Exception as e:
+            logger.exception("Failed to send audio ({}) to Wyoming: {}", len(audio_data), e)
+            self._connected = False
+            return False
 
     def stop_recognition(self) -> bool:
-        """Stop the current recognition session."""
-        return self.send_event("stop-recognition")
+        """Send AudioStop — server will process and respond with Transcript event(s)."""
+        if not self._connected or self._client is None:
+            logger.error("Not connected to Wyoming — cannot stop recognition")
+            return False
 
-    def set_callback(self, callback: Callable[[Dict[str, Any]], None]):
-        """Set callback for recognition results."""
-        self.on_result = callback
+        try:
+            audio_stop = AudioStop()
+            self._run_coro(self._client.write_event(audio_stop.event()))
+            logger.debug("Wyoming recognition stopped")
+            return True
+        except Exception as e:
+            logger.exception("Failed to stop Wyoming recognition: {}", e)
+            self._connected = False
+            return False
+
+    # ------------------------------------------------------------------
+    # Async internals
+    # ------------------------------------------------------------------
+
+    async def _read_loop(self) -> None:
+        """Background coroutine — reads Wyoming events until disconnect."""
+        try:
+            while self._connected and self._client is not None:
+                event = await self._client.read_event()
+                if event is None:
+                    logger.debug("Wyoming read loop: connection closed")
+                    break
+                self._handle_event(event)
+        except asyncio.CancelledError:
+            pass  # normal on disconnect
+        except Exception as e:
+            logger.exception("Wyoming read loop error: {}", e)
+        finally:
+            self._connected = False
+
+    def _handle_event(self, event) -> None:
+        """Process a received Wyoming event."""
+        if Transcript.is_type(event.type):
+            transcript = Transcript.from_event(event)
+            if transcript.text:
+                logger.debug(
+                    "Wyoming transcript: '{}' (language={})",
+                    transcript.text[:80], transcript.language,
+                )
+                if self.on_result:
+                    self.on_result({
+                        "type": "segment",
+                        "text": transcript.text,
+                        "language": transcript.language or "uk",
+                        "final": True,
+                    })
+        else:
+            logger.debug("Wyoming received event: type={} data={}", event.type, event.data)
 
 
 class WyomingWhisperService:
     """
-    Wrapper class that implements the same interface as the existing whisper service
-    but connects to wyoming-faster-whisper via TCP instead of Unix socket.
+    Wrapper that exposes the same interface as the existing whisper service,
+    but connects to wyoming-faster-whisper via TCP.
     """
     def __init__(self, host: str = "localhost", port: int = 10300):
         self.client = WyomingWhisperClient(host, port)
-        self.on_result: Optional[Callable[[Dict[str, Any]], None]] = None
-        self.is_running = False
+        self.on_result: Optional[Callable[[dict], None]] = None
 
     def connect(self) -> bool:
-        """Connect to the Wyoming service."""
         return self.client.connect()
 
-    def disconnect(self):
-        """Disconnect from the Wyoming service."""
+    def disconnect(self) -> None:
         self.client.disconnect()
 
-    def start_recognition(self, language: Optional[str] = None):
-        """Start a recognition session."""
+    def start_recognition(self, language: Optional[str] = None) -> bool:
         return self.client.start_recognition(language)
 
-    def stop_recognition(self):
-        """Stop the current recognition session."""
+    def stop_recognition(self) -> bool:
         return self.client.stop_recognition()
 
-    def send_audio(self, audio_data: bytes):
-        """Send audio data for recognition."""
+    def send_audio(self, audio_data: bytes) -> bool:
         return self.client.send_audio(audio_data)
 
-    def set_callback(self, callback: Callable[[Dict[str, Any]], None]):
-        """Set callback for recognition results."""
+    def set_callback(self, callback: Callable[[dict], None]) -> None:
         self.on_result = callback
         self.client.set_callback(callback)
 
-    def run_server(self, *args, **kwargs):
-        """Compatibility method to match the existing whisper service interface."""
-        # This is just for compatibility - the Wyoming client connects to an external service
+    def run_server(self, *args, **kwargs) -> None:
+        """Compatibility method — Wyoming client connects to external service."""
         pass

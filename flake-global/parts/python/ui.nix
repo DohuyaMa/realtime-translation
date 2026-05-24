@@ -25,5 +25,9 @@ callPackage ./common.nix {
     kokoro
     sentencepiece
     sacremoses
+    # HuggingFace Hub for model downloading
+    huggingface-hub
+    # Wyoming protocol for connecting to wyoming-faster-whisper
+    wyoming
   ];
 }

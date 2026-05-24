@@ -101,7 +101,7 @@ in
         };
         Service = {
           Type = "simple";
-          ExecStart = "${rtPackages.app}/bin/translator-tts --socket-path %t/rt/rt-tts.sock";
+          ExecStart = "${rtPackages.app}/bin/translator-tts --socket-path %t/rt/rt-tts.sock --voice af_heart";
           Restart = "always";
           RestartSec = 5;
           Nice = -5;
@@ -123,7 +123,7 @@ in
         };
         Service = {
           Type = "simple";
-          ExecStart = "${rtPackages.app}/bin/translator-whisper --socket-path %t/rt/rt-whisper.sock";
+          ExecStart = "${rtPackages.app}/bin/translator-whisper --socket-path %t/rt/rt-whisper.sock --model medium --compute-type float32";
           Restart = "always";
           RestartSec = 5;
           Nice = -5;
@@ -172,7 +172,7 @@ in
           ExecStart = "${rtPackages."real-time-translator"}/bin/translator-ui";
           Restart = "on-failure";
           RestartSec = 5;
-          Environment = "PATH=%h/.nix-profile/bin:/run/wrappers/bin:/etc/profiles/per-user/%h/bin:/nix/var/nix/profiles/default/bin:/run/current-system/sw/bin";
+          Environment = "PATH=%h/.nix-profile/bin:/run/wrappers/bin:/etc/profiles/per-user/%u/bin:/nix/var/nix/profiles/default/bin:/run/current-system/sw/bin";
           PassEnvironment = "WAYLAND_DISPLAY DISPLAY XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS QT_QPA_PLATFORM";
         };
         Install = {
