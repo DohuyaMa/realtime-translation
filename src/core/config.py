@@ -49,6 +49,7 @@ class ConfigManager:
                     'backend': 'local',
                     'model': 'medium',
                     'device': 'cuda',
+                    'compute_type': 'float16',
                     'beam_size': 5,
                     'temperature': 0.0,
                     'initial_prompt': '',

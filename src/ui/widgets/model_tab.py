@@ -1,5 +1,5 @@
 """Model management tab for SettingsDialog."""
-from PySide6.QtCore import QThread, Signal
+from PySide6.QtCore import QThread, Signal, Slot
 from PySide6.QtWidgets import (
     QFrame, QGroupBox, QHBoxLayout, QLabel, QProgressBar,
     QPushButton, QSizePolicy, QVBoxLayout, QWidget, QComboBox,
@@ -74,7 +74,9 @@ class ModelCard(QFrame):
         icon = STATUS_ICON.get(info.status, "?")
         status_text = STATUS_TEXT.get(info.status, "")
         self._status_label = QLabel(f"{icon}  {info.spec.display_name}  \u2014  {status_text}")
-        self._status_label.setStyleSheet("font-weight: bold;")
+        from PySide6.QtGui import QFont as _QFont
+        _f = _QFont(); _f.setBold(True)
+        self._status_label.setFont(_f)
         header.addWidget(self._status_label)
         header.addStretch()
 
@@ -105,7 +107,7 @@ class ModelCard(QFrame):
             layout.addWidget(self._progress)
 
             self._log_label = QLabel()
-            self._log_label.setStyleSheet("color: gray; font-size: 10px;")
+            self._log_label.setStyleSheet("color: gray; font-size: 9pt;")
             self._log_label.setVisible(False)
             layout.addWidget(self._log_label)
         else:
@@ -115,7 +117,7 @@ class ModelCard(QFrame):
 
         if info.spec.size_hint and info.status == ModelStatus.MISSING:
             size_hint_label = QLabel(f"Expected size: {info.spec.size_hint}")
-            size_hint_label.setStyleSheet("color: gray; font-size: 10px;")
+            size_hint_label.setStyleSheet("color: gray; font-size: 9pt;")
             layout.addWidget(size_hint_label)
 
     def set_downloading(self, active: bool):
@@ -140,8 +142,12 @@ class ModelTab(QWidget):
     """Models tab content for SettingsDialog."""
 
     whisper_backend_changed = Signal(str)
-    whisper_model_changed = Signal(str)
-    wyoming_model_changed = Signal(str)
+    whisper_model_changed   = Signal(str)
+    wyoming_model_changed   = Signal(str)
+
+    # Internal cross-thread signals for the Apply operation
+    _sig_apply_progress = Signal(int, str)   # pct, message
+    _sig_apply_done     = Signal(bool, str)  # success, model_name
 
     def __init__(self, current_settings: dict, parent=None):
         super().__init__(parent)
@@ -150,6 +156,11 @@ class ModelTab(QWidget):
         self._manager = ModelManager()
         self._threads: dict[str, _DownloadThread] = {}
         self._cards: dict[str, ModelCard] = {}
+
+        # Connect cross-thread signals on main thread so Qt routes to main thread
+        self._sig_apply_progress.connect(self._on_apply_progress)
+        self._sig_apply_done.connect(self._on_apply_done)
+
         self._build()
 
     def _build(self):
@@ -170,16 +181,45 @@ class ModelTab(QWidget):
         self._backend_combo.currentIndexChanged.connect(self._on_backend_changed)
         row1.addWidget(self._backend_combo)
 
-        row1.addWidget(QLabel("Model:"))
+        row1.addWidget(QLabel("Cache check:"))
         self._model_combo = QComboBox()
         self._model_combo.addItems(self._manager.whisper_models)
-        current_model = self._settings.get("whisper_model", "small")
+        # Default to actually-running model from systemd, not from stale config
+        running_model = self._get_running_model()
+        current_model = running_model or self._settings.get("whisper_model", "small")
         idx = self._manager.whisper_models.index(current_model) if current_model in self._manager.whisper_models else 0
         self._model_combo.setCurrentIndex(idx)
+        self._model_combo.setToolTip("Select which local whisper model to use.")
         self._model_combo.currentIndexChanged.connect(self._on_model_changed)
         row1.addWidget(self._model_combo)
+
+        # Show which model is actually running
+        self._running_label = QLabel()
+        self._running_label.setStyleSheet("color: #888; font-size: 9pt;")
+        self._update_running_label(running_model)
+        row1.addWidget(self._running_label)
+
+        # Apply button — downloads if needed + restarts service
+        self._apply_btn = QPushButton("Apply")
+        self._apply_btn.setToolTip(
+            "Download model if not cached, save to config, restart whisper service"
+        )
+        self._apply_btn.clicked.connect(self._on_apply_model)
+        row1.addWidget(self._apply_btn)
+
         row1.addStretch()
         backend_layout.addLayout(row1)
+
+        # Progress feedback for apply operation
+        self._apply_progress = QProgressBar()
+        self._apply_progress.setVisible(False)
+        self._apply_progress.setRange(0, 100)
+        backend_layout.addWidget(self._apply_progress)
+
+        self._apply_status = QLabel("")
+        self._apply_status.setWordWrap(True)
+        self._apply_status.setStyleSheet("color: gray; font-size: 9pt;")
+        backend_layout.addWidget(self._apply_status)
 
         # Row 2: Wyoming model selection (visible only in Wyoming mode)
         row2_widget = QWidget()
@@ -209,7 +249,7 @@ class ModelTab(QWidget):
 
         # Whisper model browser (available models for download)
         self._whisper_browser_label = QLabel()
-        self._whisper_browser_label.setStyleSheet("font-weight: bold; margin-top: 8px;")
+        self._whisper_browser_label.setStyleSheet("margin-top: 8px;")
         self._whisper_browser_label.setVisible(False)
         status_layout.addWidget(self._whisper_browser_label)
         self._whisper_browser_widgets: list[QWidget] = []
@@ -226,6 +266,94 @@ class ModelTab(QWidget):
 
         self._refresh_ui()
         layout.addStretch()
+
+    def _on_apply_model(self):
+        if self._backend_combo.currentIndex() != 1:
+            self._apply_status.setText("Apply only works for Local backend.")
+            return
+        model = self._manager.whisper_models[self._model_combo.currentIndex()]
+        self._apply_btn.setEnabled(False)
+        self._apply_progress.setVisible(True)
+        self._apply_progress.setValue(0)
+        self._apply_status.setText("Starting...")
+
+        ui_ctrl = self._find_ui_controller()
+        if ui_ctrl is None:
+            self._apply_status.setText("Cannot reach UI controller.")
+            self._apply_btn.setEnabled(True)
+            return
+
+        def _progress(pct, msg):
+            self._sig_apply_progress.emit(int(pct), str(msg))
+
+        def _done(ok):
+            self._sig_apply_done.emit(bool(ok), str(model))
+
+        ui_ctrl.change_whisper_model(model, progress_cb=_progress, done_cb=_done)
+
+    def _find_ui_controller(self):
+        w = self.parent()
+        while w is not None:
+            ctrl = getattr(w, 'ui_controller', None)
+            if ctrl is not None:
+                return ctrl
+            w = w.parent() if hasattr(w, 'parent') else None
+        return None
+
+    @Slot(int, str)
+    def _on_apply_progress(self, pct: int, msg: str):
+        if pct >= 0:
+            self._apply_progress.setValue(min(pct, 100))
+            self._apply_status.setStyleSheet("color: gray; font-size: 9pt;")
+        else:
+            self._apply_status.setStyleSheet("color: red; font-size: 9pt;")
+        self._apply_status.setText(msg)
+
+    @Slot(bool, str)
+    def _on_apply_done(self, ok: bool, model: str):
+        self._apply_btn.setEnabled(True)
+        if ok:
+            self._apply_progress.setValue(100)
+            self._update_running_label(model)
+            self._apply_status.setStyleSheet("color: green; font-size: 9pt;")
+            self._apply_status.setText(f"Whisper restarted with model '{model}'")
+            self._refresh_whisper_card()
+        else:
+            self._apply_progress.setValue(0)
+            self._apply_status.setStyleSheet("color: red; font-size: 9pt;")
+            self._apply_status.setText("Failed — check logs")
+
+    @staticmethod
+    def _get_running_model() -> str:
+        """Return the active whisper model — reads config file, no subprocess/fork."""
+        import re
+        from pathlib import Path
+        import yaml
+        # Prefer config file (UI override)
+        try:
+            cfg = yaml.safe_load(
+                (Path.home() / ".config" / "real-time-translator" / "config.yml").read_text()
+            ) or {}
+            m = cfg.get('models', {}).get('whisper', {}).get('model')
+            if m:
+                return m
+        except Exception:
+            pass
+        # Fall back to deployed systemd unit file (no subprocess)
+        try:
+            unit = (Path.home() / ".config" / "systemd" / "user" / "rt-whisper.service").read_text()
+            for line in unit.splitlines():
+                if 'ExecStart' in line and (mo := re.search(r'--model\s+(\S+)', line)):
+                    return mo.group(1)
+        except Exception:
+            pass
+        return ''
+
+    def _update_running_label(self, model: str):
+        if model:
+            self._running_label.setText(f"(running: {model})")
+        else:
+            self._running_label.setText("(running: ?)")
 
     def _make_whisper_card(self) -> ModelCard:
         use_wyoming = self._settings.get("use_wyoming", False)
@@ -298,10 +426,10 @@ class ModelTab(QWidget):
             info = self._manager.get_info("whisper", m["id"])
             if info.status == ModelStatus.CACHED:
                 size_label = QLabel(self._manager.format_size(info.size_bytes))
-                size_label.setStyleSheet("color: gray; font-size: 10px;")
+                size_label.setStyleSheet("color: gray; font-size: 9pt;")
                 row.addWidget(size_label)
                 cached = QLabel("cached")
-                cached.setStyleSheet("color: green; font-size: 10px;")
+                cached.setStyleSheet("color: green; font-size: 9pt;")
                 row.addWidget(cached)
             else:
                 btn = QPushButton("Download")

@@ -123,6 +123,65 @@ class DirectAdapter:
         'src.tts.tts_service':                  'translator-tts',
     }
 
+    # systemd user units (systemctl --user)
+    _USER_UNITS: Dict[str, str] = {
+        'capture':        'rt-capture',
+        'whisper':        'rt-whisper',
+        'hybrid-whisper': 'rt-hybrid-whisper',
+        'translate':      'rt-translate',
+        'tts':            'rt-tts',
+        'playback':       'rt-playback',
+    }
+    # systemd system units (sudo systemctl)
+    _SYSTEM_UNITS: Dict[str, str] = {
+        'wyoming': 'wyoming-faster-whisper-main',
+    }
+
+    def _whisper_unit(self) -> str:
+        return 'rt-hybrid-whisper' if self.use_wyoming else 'rt-whisper'
+
+    def _systemctl_user(self, action: str, unit: str) -> bool:
+        try:
+            subprocess.run(
+                ['systemctl', '--user', action, unit],
+                check=True, capture_output=True,
+            )
+            return True
+        except subprocess.CalledProcessError as e:
+            logger.error("systemctl --user {} {} failed: {}", action, unit, e.stderr.decode())
+            return False
+
+    def _systemctl_system(self, action: str, unit: str) -> bool:
+        try:
+            subprocess.run(
+                ['sudo', 'systemctl', action, unit],
+                check=True, capture_output=True,
+            )
+            return True
+        except subprocess.CalledProcessError as e:
+            logger.error("sudo systemctl {} {} failed: {}", action, unit, e.stderr.decode())
+            return False
+
+    def get_service_active(self, name: str) -> bool:
+        """Check if a service is active via systemctl."""
+        if name in self._SYSTEM_UNITS:
+            unit = self._SYSTEM_UNITS[name]
+            result = subprocess.run(
+                ['systemctl', 'is-active', '--quiet', unit],
+                capture_output=True,
+            )
+            return result.returncode == 0
+        unit = self._USER_UNITS.get(name)
+        if name == 'whisper':
+            unit = self._whisper_unit()
+        if not unit:
+            return False
+        result = subprocess.run(
+            ['systemctl', '--user', 'is-active', '--quiet', unit],
+            capture_output=True,
+        )
+        return result.returncode == 0
+
     def _resolve_cmd(self, module: str) -> list:
         """Prefer installed entry-point scripts over python -m <module>."""
         entrypoint = self._MODULE_ENTRYPOINTS.get(module)
@@ -179,63 +238,20 @@ class DirectAdapter:
         return True
 
     def _ensure_essential_services(self) -> None:
-        if not self._auto_spawn_services:
-            return
-        from ..core.config import get_config_manager
-        app_cfg = get_config_manager()
+        """Start any services that are not yet running via systemctl --user."""
         cfg = get_runtime_config()
+        whisper_unit = self._whisper_unit()
+        whisper_socket = (cfg.get_hybrid_whisper_socket_path()
+                          if self.use_wyoming else cfg.get_whisper_socket_path())
 
-        whisper_device = app_cfg.get('models.whisper.device', 'cuda')
-        beam_size = app_cfg.get('models.whisper.beam_size', 5)
-        temperature = app_cfg.get('models.whisper.temperature', 0.0)
-        initial_prompt = app_cfg.get('models.whisper.initial_prompt', '')
-
-        if self.use_wyoming:
-            whisper_socket = cfg.get_hybrid_whisper_socket_path()
-            whisper_module = 'src.whisper.hybrid_whisper_service'
-            whisper_args = [
-                '--socket-path', whisper_socket,
-                '--use-wyoming',
-                '--wyoming-host', self.wyoming_host,
-                '--wyoming-port', str(self.wyoming_port),
-            ]
-        else:
-            whisper_socket = cfg.get_whisper_socket_path()
-            whisper_module = 'src.whisper.whisper_service'
-            whisper_args = [
-                '--socket-path', whisper_socket,
-                '--device', whisper_device,
-                '--beam-size', str(beam_size),
-                '--temperature', str(temperature),
-            ]
-            if initial_prompt:
-                whisper_args.extend(['--initial-prompt', initial_prompt])
-
-        if self._need_spawn(whisper_socket):
-            self._spawn_service('whisper', whisper_module, whisper_args)
-
-        translate_socket = cfg.get_translate_socket_path()
-        num_beams = app_cfg.get('models.translate.num_beams', 4)
-        repetition_penalty = app_cfg.get('models.translate.repetition_penalty', 1.2)
-        max_length = app_cfg.get('models.translate.max_length', 200)
-        translate_args = [
-            '--socket-path', translate_socket,
-            '--num-beams', str(num_beams),
-            '--repetition-penalty', str(repetition_penalty),
-            '--max-length', str(max_length),
-        ]
-        if self._need_spawn(translate_socket):
-            self._spawn_service('translate', 'src.translate.translate_service', translate_args)
-        tts_socket = cfg.get_tts_socket_path()
-        tts_voice = app_cfg.get('models.tts.voice', 'af_heart')
-        tts_speed = app_cfg.get('models.tts.speed', 1.0)
-        tts_args = [
-            '--socket-path', tts_socket,
-            '--voice', tts_voice,
-            '--speed', str(tts_speed),
-        ]
-        if self._need_spawn(tts_socket):
-            self._spawn_service('tts', 'src.tts.tts_service', tts_args)
+        for name, unit, socket_path in [
+            ('whisper',   whisper_unit,   whisper_socket),
+            ('translate', 'rt-translate', cfg.get_translate_socket_path()),
+            ('tts',       'rt-tts',       cfg.get_tts_socket_path()),
+        ]:
+            if not self._socket_is_live(socket_path):
+                logger.info("Starting {} via systemctl --user ...", name)
+                self._systemctl_user('start', unit)
 
     def _wait_for_services(self, timeout: float = 120.0) -> None:
         if not self._auto_spawn_services:
@@ -302,64 +318,143 @@ class DirectAdapter:
             return False
     
     def start_service(self, name: str) -> bool:
-        """Start a specific service."""
+        """Start a systemd service (user or system level)."""
         try:
-            # Check if the translation system has IPC clients available
-            if (name == 'capture' and self.translation_system.capture_client is None) or \
-               (name == 'whisper' and self.translation_system.whisper_client is None) or \
-               (name == 'translate' and self.translation_system.translate_client is None) or \
-               (name == 'tts' and self.translation_system.tts_client is None) or \
-               (name == 'playback' and self.translation_system.playback_client is None):
-                # In devShell mode, we may want to allow certain operations to continue
-                # For services that can be started directly without IPC
-                if name in ['capture', 'whisper', 'translate', 'tts', 'playback']:
-                    logger.info(f"Service {name} not started (no IPC client in devShell mode)")
-                    self._devshell_started.add(name)
-                    return True
-                else:
-                    logger.warning(f"Cannot start {name} service: not recognized")
-                    return False
-            
-            return self.translation_system.start_service(name)
+            if name in self._SYSTEM_UNITS:
+                return self._systemctl_system('start', self._SYSTEM_UNITS[name])
+            unit = self._whisper_unit() if name == 'whisper' else self._USER_UNITS.get(name)
+            if not unit:
+                logger.warning("Unknown service: {}", name)
+                return False
+            return self._systemctl_user('start', unit)
         except Exception as e:
-            logger.error(f"Failed to start {name} service: {e}")
+            logger.error("Failed to start {} service: {}", name, e)
             return False
-    
+
     def stop_service(self, name: str) -> bool:
-        """Stop a specific service."""
+        """Stop a systemd service and its socket (to prevent socket-activation restart)."""
         try:
-            # Check if the translation system has IPC clients available
-            if (name == 'capture' and self.translation_system.capture_client is None) or \
-               (name == 'whisper' and self.translation_system.whisper_client is None) or \
-               (name == 'translate' and self.translation_system.translate_client is None) or \
-               (name == 'tts' and self.translation_system.tts_client is None) or \
-               (name == 'playback' and self.translation_system.playback_client is None):
-                # In devShell mode, we may want to allow certain operations to continue
-                # For services that can be stopped directly without IPC
-                if name in ['capture', 'whisper', 'translate', 'tts', 'playback']:
-                    logger.info(f"Service {name} not stopped (no IPC client in devShell mode)")
-                    self._devshell_started.discard(name)
-                    return True
-                else:
-                    logger.warning(f"Cannot stop {name} service: not recognized")
-                    return False
-            
-            return self.translation_system.stop_service(name)
+            if name in self._SYSTEM_UNITS:
+                return self._systemctl_system('stop', self._SYSTEM_UNITS[name])
+            unit = self._whisper_unit() if name == 'whisper' else self._USER_UNITS.get(name)
+            if not unit:
+                logger.warning("Unknown service: {}", name)
+                return False
+            # Stop socket first to prevent immediate socket-activation restart
+            self._systemctl_user('stop', f'{unit}.socket')
+            return self._systemctl_user('stop', unit)
         except Exception as e:
-            logger.error(f"Failed to stop {name} service: {e}")
+            logger.error("Failed to stop {} service: {}", name, e)
             return False
+
+    def restart_service(self, name: str) -> bool:
+        """Restart a systemd service (user or system level)."""
+        try:
+            if name in self._SYSTEM_UNITS:
+                return self._systemctl_system('restart', self._SYSTEM_UNITS[name])
+            unit = self._whisper_unit() if name == 'whisper' else self._USER_UNITS.get(name)
+            if not unit:
+                logger.warning("Unknown service for restart: {}", name)
+                return False
+            ok = self._systemctl_user('restart', unit)
+            logger.info("Restarted {} (unit={}): {}", name, unit, "ok" if ok else "failed")
+            return ok
+        except Exception as e:
+            logger.error("Failed to restart {} service: {}", name, e)
+            return False
+
+    def restart_all_services(self) -> Dict[str, bool]:
+        """Restart all pipeline services and reconnect IPC clients."""
+        results: Dict[str, bool] = {}
+        for name in ['translate', 'tts', 'whisper', 'capture', 'playback']:
+            results[name] = self.restart_service(name)
+        time.sleep(2.0)
+        self.reconnect_ipc()
+        logger.info("restart_all_services results: {}", results)
+        return results
+
+    def change_whisper_model(
+        self,
+        model_name: str,
+        progress_cb=None,
+    ) -> bool:
+        """Download model if needed, persist to config, restart whisper service.
+
+        Args:
+            model_name: One of tiny/base/small/medium/large
+            progress_cb: Optional callable(pct: int, msg: str) for progress reporting
+
+        Returns:
+            True on success, False on failure
+        """
+        from ..core.models import ModelManager, ModelStatus
+        from ..core.config import get_config_manager
+
+        def _report(pct: int, msg: str):
+            logger.info(f"[change_whisper_model] {pct}%  {msg}")
+            if progress_cb:
+                progress_cb(pct, msg)
+
+        _report(0, f"Checking model '{model_name}'...")
+        manager = ModelManager()
+        info = manager.get_info("whisper", model_name)
+
+        if info.status == ModelStatus.MISSING:
+            _report(5, f"Model '{model_name}' not cached — downloading...")
+            ok = manager.download(
+                "whisper",
+                model_name,
+                progress_cb=lambda pct, msg: _report(5 + int(pct * 0.85), msg),
+            )
+            if not ok:
+                _report(-1, f"Download failed for '{model_name}'")
+                return False
+            _report(90, f"Model '{model_name}' downloaded.")
+        else:
+            _report(90, f"Model '{model_name}' already cached.")
+
+        # Persist to config
+        try:
+            cfg = get_config_manager()
+            cfg.set("models.whisper.model", model_name)
+            cfg.save()
+            _report(93, f"Config saved: models.whisper.model = {model_name}")
+        except Exception as e:
+            logger.error(f"Failed to save config: {e}")
+            _report(-1, f"Config save failed: {e}")
+            return False
+
+        # Restart whisper service so it picks up the new model
+        _report(95, "Restarting rt-whisper service...")
+        ok = self.restart_service("whisper")
+        if ok:
+            _report(100, f"Whisper service restarted with model '{model_name}'")
+        else:
+            _report(-1, "Service restart failed — check systemd logs")
+        return ok
+
+    def reconnect_ipc(self) -> int:
+        """Force-reconnect all IPC clients. Returns number newly connected."""
+        # Clear stale clients first
+        for name, attr, path in self.translation_system._ipc_service_map():
+            client = getattr(self.translation_system, attr)
+            if client is not None:
+                try:
+                    client.disconnect()
+                except Exception:
+                    pass
+            setattr(self.translation_system, attr, None)
+        n = self.translation_system.reconnect_ipc_clients()
+        logger.info("reconnect_ipc: {} client(s) connected", n)
+        return n
     
     def get_status(self) -> Dict:
-        """Get system status."""
+        """Get system status including real systemd service states."""
         status = self.translation_system.get_stats()
-        # In devShell mode all IPC clients are None; reflect manually-started services.
-        devshell_mode = all(
-            getattr(self.translation_system, f'{s}_client', None) is None
-            for s in ('capture', 'whisper', 'translate', 'tts', 'playback')
-        )
-        if devshell_mode:
-            for name in ('capture', 'whisper', 'translate', 'tts', 'playback'):
-                status[f'{name}_connected'] = name in self._devshell_started
+        for name in list(self._USER_UNITS) + list(self._SYSTEM_UNITS):
+            status[f'{name}_connected'] = self.get_service_active(name)
+        # 'whisper' key reflects whichever whisper unit is in use
+        status['whisper_connected'] = self.get_service_active('whisper')
         return status
     
     def set_languages(self, source_lang: str, target_lang: str = "en") -> bool:

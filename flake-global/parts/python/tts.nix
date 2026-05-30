@@ -22,15 +22,10 @@ callPackage ./common.nix {
   src = ../../..;
 
   dependencies = with python3.pkgs; [
-    # TTS service specific dependencies
-    pyttsx3
-    gtts
-    playsound
     kokoro
     en_core_web_sm
     numpy
-    soundfile
-    librosa
+    sounddevice
     pulsectl
     pyyaml
     python-dotenv

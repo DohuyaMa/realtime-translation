@@ -167,12 +167,26 @@ class TTSService:
         }
 
 
+def _cfg_get(key: str, default):
+    """Read a dot-notation key from the user config file (priority over CLI defaults)."""
+    from pathlib import Path
+    import yaml
+    try:
+        p = Path.home() / ".config" / "real-time-translator" / "config.yml"
+        cfg = yaml.safe_load(p.read_text()) or {}
+        for part in key.split("."):
+            cfg = cfg.get(part, {})
+        return cfg if cfg != {} else default
+    except Exception:
+        return default
+
+
 def main():
     """Main entry point for the TTS service."""
     import argparse
     import os
     import signal
-    
+
     parser = argparse.ArgumentParser(description="Text-to-Speech Service")
     parser.add_argument("--socket-path", default=get_runtime_config().get_tts_socket_path(),
                        help="Path to UNIX socket for IPC")
@@ -185,6 +199,13 @@ def main():
 
     args = parser.parse_args()
 
+    # Priority: config file (UI override) > CLI arg (Nix default) > built-in fallback
+    voice       = _cfg_get("models.tts.voice",  None) or args.voice
+    speed_cfg   = _cfg_get("models.tts.speed",  None)
+    speed       = speed_cfg if speed_cfg is not None else args.speed
+
+    logger.info("tts_service starting: voice={} speed={}", voice, speed)
+
     # Create temporary directory if needed
     socket_dir = os.path.dirname(args.socket_path)
     os.makedirs(socket_dir, exist_ok=True)
@@ -192,8 +213,8 @@ def main():
     service = TTSService(
         socket_path=args.socket_path,
         sample_rate=args.sample_rate,
-        voice=args.voice,
-        speed=args.speed,
+        voice=voice,
+        speed=speed,
     )
     
     def signal_handler(signum, frame):

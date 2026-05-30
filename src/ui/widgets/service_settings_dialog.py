@@ -1,19 +1,81 @@
 """Service-specific settings dialog for the real-time translation system."""
 from PySide6.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QFormLayout, 
+    QDialog, QVBoxLayout, QHBoxLayout, QFormLayout,
     QGroupBox, QCheckBox, QPushButton, QLineEdit,
     QLabel, QComboBox, QSpinBox, QDialogButtonBox,
-    QMessageBox
+    QMessageBox, QProgressBar
 )
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, Signal, Slot
+from PySide6.QtGui import QFont
 from loguru import logger
+import re
 import sys
+
+
+def _get_running_whisper_info() -> dict:
+    """Read whisper model/device info — NO subprocess (no fork in Qt main thread).
+
+    Reads from:
+    1. ~/.config/systemd/user/rt-whisper.service  (deployed unit file, no subprocess)
+    2. ~/.config/real-time-translator/config.yml  (UI-set model override)
+    3. /proc/<pid>/status + /proc/<pid>/cmdline  (running process, no fork)
+    """
+    from pathlib import Path
+    import yaml
+
+    result = {'model': '?', 'device': '?', 'compute_type': '?', 'active': 'unknown'}
+
+    # --- 1. Read model from config file (UI override has priority) ---
+    try:
+        cfg_path = Path.home() / ".config" / "real-time-translator" / "config.yml"
+        cfg = yaml.safe_load(cfg_path.read_text()) or {}
+        result['model'] = cfg.get('models', {}).get('whisper', {}).get('model', '?')
+    except Exception:
+        pass
+
+    # --- 2. Read device/compute from deployed systemd unit file ---
+    try:
+        unit_path = Path.home() / ".config" / "systemd" / "user" / "rt-whisper.service"
+        unit_text = unit_path.read_text()
+        for line in unit_text.splitlines():
+            if 'ExecStart' in line:
+                if m := re.search(r'--device\s+(\S+)', line):
+                    result['device'] = m.group(1)
+                if m := re.search(r'--compute-type\s+(\S+)', line):
+                    result['compute_type'] = m.group(1)
+                # model from Nix (only if not overridden by config)
+                if result['model'] == '?' and (m := re.search(r'--model\s+(\S+)', line)):
+                    result['model'] = m.group(1)
+                break
+    except Exception:
+        pass
+
+    # --- 3. Check if service is running via /proc (no fork needed) ---
+    try:
+        for pid_dir in Path('/proc').iterdir():
+            if not pid_dir.name.isdigit():
+                continue
+            try:
+                cmdline = (pid_dir / 'cmdline').read_bytes().replace(b'\x00', b' ').decode()
+                if 'translator-whisper' in cmdline and '--socket-path' in cmdline:
+                    result['active'] = 'active'
+                    break
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+    return result
 
 
 class ServiceSettingsDialog(QDialog):
     """Service-specific settings dialog."""
-    
-    settings_changed = Signal(str, dict)  # service_name, settings
+
+    settings_changed = Signal(str, dict)   # service_name, settings
+
+    # Internal cross-thread signals (background thread → main thread UI update)
+    _sig_progress = Signal(int, str)       # pct, message
+    _sig_done     = Signal(bool, str)      # success, model_name
     
     def __init__(self, service_name: str, current_settings=None, parent=None):
         super().__init__(parent)
@@ -31,7 +93,12 @@ class ServiceSettingsDialog(QDialog):
         self.setWindowTitle(f"Set {service_display_name}")
         self.setModal(True)
         self.setMinimumWidth(400)
-        
+
+        # Wire cross-thread signals to slots — connections are made on main thread,
+        # so Qt will always dispatch the slot call back to the main thread.
+        self._sig_progress.connect(self._on_model_progress)
+        self._sig_done.connect(self._on_model_done)
+
         self.init_ui()
         
     def init_ui(self):
@@ -64,47 +131,153 @@ class ServiceSettingsDialog(QDialog):
     
     def _create_whisper_settings(self, layout):
         """Create settings UI for Whisper service."""
-        # Wyoming service settings group
-        wyoming_group = QGroupBox("Wyoming ASR Configuration")
+
+        # ── Running service info (read-only header) ───────────────────────
+        info = _get_running_whisper_info()
+        status_color = "green" if info['active'] == 'active' else "red"
+        info_group = QGroupBox("Currently Running (rt-whisper)")
+        info_layout = QFormLayout()
+
+        status_lbl = QLabel(info['active'])
+        status_lbl.setStyleSheet(f"color: {status_color};")
+        bold = QFont()
+        bold.setBold(True)
+        status_lbl.setFont(bold)
+        info_layout.addRow("Status:", status_lbl)
+
+        self._running_model_lbl = QLabel(info['model'])
+        self._running_model_lbl.setFont(bold)
+        info_layout.addRow("Active model:", self._running_model_lbl)
+
+        device_lbl = QLabel(f"{info['device']}  ({info['compute_type']})")
+        info_layout.addRow("Device / Compute:", device_lbl)
+
+        info_group.setLayout(info_layout)
+        layout.addWidget(info_group)
+
+        # ── Model selection ───────────────────────────────────────────────
+        model_group = QGroupBox("Change Local Whisper Model")
+        model_layout = QVBoxLayout()
+
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Model:"))
+
+        self.model_type = QComboBox()
+        models = ["tiny", "base", "small", "medium", "large"]
+        sizes  = {"tiny": "~150 MB", "base": "~300 MB", "small": "~500 MB",
+                  "medium": "~1.5 GB", "large": "~3 GB"}
+        for m in models:
+            self.model_type.addItem(f"{m}  ({sizes[m]})", userData=m)
+
+        # Default selection: running model from config (not systemd CLI)
+        try:
+            from ...core.config import get_config_manager
+            cfg_model = get_config_manager().get("models.whisper.model", info['model'])
+        except Exception:
+            cfg_model = info['model']
+        idx = next((i for i, m in enumerate(models) if m == cfg_model), 0)
+        self.model_type.setCurrentIndex(idx)
+        row.addWidget(self.model_type)
+
+        self._apply_model_btn = QPushButton("Apply")
+        self._apply_model_btn.setToolTip(
+            "Downloads model if not cached, saves to config, restarts whisper service"
+        )
+        self._apply_model_btn.clicked.connect(self._on_apply_model)
+        row.addWidget(self._apply_model_btn)
+        model_layout.addLayout(row)
+
+        self._model_progress = QProgressBar()
+        self._model_progress.setVisible(False)
+        self._model_progress.setRange(0, 100)
+        model_layout.addWidget(self._model_progress)
+
+        self._model_status_lbl = QLabel("")
+        self._model_status_lbl.setWordWrap(True)
+        self._model_status_lbl.setStyleSheet("color: gray; font-size: 9pt;")
+        model_layout.addWidget(self._model_status_lbl)
+
+        model_group.setLayout(model_layout)
+        layout.addWidget(model_group)
+
+        # ── Wyoming settings ──────────────────────────────────────────────
+        wyoming_group = QGroupBox("Wyoming ASR Routing")
         wyoming_layout = QFormLayout()
-        
-        # Wyoming service enabled
-        self.wyoming_enabled = QCheckBox("Use Wyoming ASR Service")
+
+        self.wyoming_enabled = QCheckBox("Route via Wyoming instead of local whisper")
         self.wyoming_enabled.setChecked(self.current_settings.get('use_wyoming', False))
         wyoming_layout.addRow("Enable Wyoming:", self.wyoming_enabled)
-        
-        # Wyoming host
+
         self.wyoming_host = QLineEdit()
         self.wyoming_host.setText(self.current_settings.get('wyoming_host', 'localhost'))
         wyoming_layout.addRow("Wyoming Host:", self.wyoming_host)
-        
-        # Wyoming port
+
         self.wyoming_port = QSpinBox()
         self.wyoming_port.setRange(1, 65535)
         self.wyoming_port.setValue(self.current_settings.get('wyoming_port', 10300))
         wyoming_layout.addRow("Wyoming Port:", self.wyoming_port)
-        
+
         wyoming_group.setLayout(wyoming_layout)
         layout.addWidget(wyoming_group)
-        
-        # Model settings
-        model_group = QGroupBox("Model Configuration")
-        model_layout = QFormLayout()
-        
-        self.model_type = QComboBox()
-        self.model_type.addItems(["tiny", "base", "small", "medium", "large"])
-        current_model = self.current_settings.get('whisper_model', 'medium')
-        model_index = self.model_type.findText(current_model)
-        if model_index >= 0:
-            self.model_type.setCurrentIndex(model_index)
-        model_layout.addRow("Model:", self.model_type)
-        
-        model_group.setLayout(model_layout)
-        layout.addWidget(model_group)
-        
-        # Connect Wyoming enabled to host/port controls
+
         self.wyoming_enabled.stateChanged.connect(self._on_wyoming_enabled_changed)
         self._on_wyoming_enabled_changed(self.wyoming_enabled.isChecked())
+
+    def _on_apply_model(self):
+        model = self.model_type.currentData()
+        self._apply_model_btn.setEnabled(False)
+        self._model_progress.setVisible(True)
+        self._model_progress.setValue(0)
+        self._model_status_lbl.setText("Starting...")
+
+        # Find the ui_controller through the parent chain
+        ui_ctrl = self._find_ui_controller()
+        if ui_ctrl is None:
+            self._model_status_lbl.setText("Error: cannot reach UI controller")
+            self._apply_model_btn.setEnabled(True)
+            return
+
+        def _progress(pct, msg):
+            # Safe from any thread: Signal.emit() is thread-safe in Qt/PySide6
+            self._sig_progress.emit(int(pct), str(msg))
+
+        def _done(ok):
+            self._sig_done.emit(bool(ok), str(model))
+
+        ui_ctrl.change_whisper_model(model, progress_cb=_progress, done_cb=_done)
+
+    def _find_ui_controller(self):
+        """Walk up the widget tree to find a ui_controller attribute."""
+        w = self.parent()
+        while w is not None:
+            ctrl = getattr(w, 'ui_controller', None)
+            if ctrl is not None:
+                return ctrl
+            w = w.parent() if hasattr(w, 'parent') else None
+        return None
+
+    @Slot(int, str)
+    def _on_model_progress(self, pct: int, msg: str):
+        if pct < 0:
+            self._model_progress.setValue(0)
+            self._model_status_lbl.setStyleSheet("color: red; font-size: 9pt;")
+        else:
+            self._model_progress.setValue(min(pct, 100))
+            self._model_status_lbl.setStyleSheet("color: gray; font-size: 9pt;")
+        self._model_status_lbl.setText(msg)
+
+    @Slot(bool, str)
+    def _on_model_done(self, ok: bool, model: str):
+        self._apply_model_btn.setEnabled(True)
+        if ok:
+            self._model_progress.setValue(100)
+            self._running_model_lbl.setText(model)
+            self._model_status_lbl.setStyleSheet("color: green; font-size: 9pt;")
+            self._model_status_lbl.setText(f"Done — whisper restarted with model '{model}'")
+        else:
+            self._model_progress.setValue(0)
+            self._model_status_lbl.setStyleSheet("color: red; font-size: 9pt;")
+            self._model_status_lbl.setText("Failed — see logs for details")
     
     def _create_translate_settings(self, layout):
         """Create settings UI for Translation service."""
@@ -245,7 +418,6 @@ class ServiceSettingsDialog(QDialog):
                 'use_wyoming': self.wyoming_enabled.isChecked(),
                 'wyoming_host': self.wyoming_host.text(),
                 'wyoming_port': self.wyoming_port.value(),
-                'whisper_model': self.model_type.currentText()
             }
         elif self.service_name == 'translate':
             settings = {
@@ -290,17 +462,10 @@ class ServiceSettingsDialog(QDialog):
             config_manager = get_config_manager()
             
             if self.service_name == "whisper":
-                # Load Wyoming settings
                 wyoming_config = config_manager.get_wyoming_config()
                 self.wyoming_enabled.setChecked(wyoming_config["use_wyoming"])
                 self.wyoming_host.setText(wyoming_config["host"])
                 self.wyoming_port.setValue(wyoming_config["port"])
-                
-                # Load model settings
-                whisper_model = config_manager.get("translation.whisper_model", "medium")
-                model_index = self.model_type.findText(whisper_model)
-                if model_index >= 0:
-                    self.model_type.setCurrentIndex(model_index)
                     
             elif self.service_name == "translate":
                 # Load translation settings

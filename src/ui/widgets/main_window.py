@@ -63,6 +63,9 @@ class MainWindow(QMainWindow):
         
         self.service_status_panel.service_control_requested.connect(self.on_service_control_requested)
         self.service_status_panel.service_settings_requested.connect(self.on_service_settings_requested)
+        self.service_status_panel.service_restart_requested.connect(self.on_service_restart_requested)
+        self.service_status_panel.restart_all_requested.connect(self.on_restart_all_requested)
+        self.service_status_panel.reconnect_ipc_requested.connect(self.on_reconnect_ipc_requested)
         self.ui_controller.start_event_polling(interval=0.5)
         
     def init_ui(self):
@@ -383,7 +386,47 @@ class MainWindow(QMainWindow):
         except Exception as e:
             logger.error(f"Failed to control {service_name} service: {e}")
             self.status_manager.log_error(f"Error controlling {service_name} service: {e}")
-    
+
+    def on_service_restart_requested(self, service_name: str):
+        """Restart a single service via systemctl."""
+        if not self.ui_controller:
+            return
+        try:
+            ok = self.ui_controller.restart_service(service_name)
+            if ok:
+                self.status_manager.log_info(f'{service_name.capitalize()} service restarted')
+            else:
+                self.status_manager.log_error(f'Failed to restart {service_name} service')
+        except Exception as e:
+            logger.error(f"Error restarting {service_name}: {e}")
+            self.status_manager.log_error(f"Error restarting {service_name}: {e}")
+
+    def on_restart_all_requested(self):
+        """Restart all pipeline services."""
+        if not self.ui_controller:
+            return
+        self.status_manager.log_info('Restarting all services...')
+        try:
+            ok = self.ui_controller.restart_all_services()
+            if ok:
+                self.status_manager.log_info('All services restarted successfully')
+            else:
+                self.status_manager.log_error('Some services failed to restart — check logs')
+        except Exception as e:
+            logger.error(f"Error restarting all services: {e}")
+            self.status_manager.log_error(f"Error restarting all services: {e}")
+
+    def on_reconnect_ipc_requested(self):
+        """Force-reconnect IPC clients."""
+        if not self.ui_controller:
+            return
+        try:
+            n = self.ui_controller.reconnect_ipc()
+            self.status_manager.log_info(f'IPC reconnected: {n} client(s) connected')
+        except Exception as e:
+            logger.error(f"Error reconnecting IPC: {e}")
+            self.status_manager.log_error(f"Error reconnecting IPC: {e}")
+
     def on_service_settings_requested(self, service_name: str):
         """Handle service settings requests from the service status panel."""
         logger.info(f"Service settings requested for: {service_name}")

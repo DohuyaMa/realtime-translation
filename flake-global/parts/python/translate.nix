@@ -8,16 +8,11 @@ callPackage ./common.nix {
   src = ../../..;
 
   dependencies = with python3.pkgs; [
-    # Translation service specific dependencies
     transformers
     torch-bin
     sentencepiece
     sacremoses
     numpy
-    onnxruntime
-    soundfile
-    librosa
-    pulsectl
     pyyaml
     python-dotenv
     loguru
