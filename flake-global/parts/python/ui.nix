@@ -22,27 +22,17 @@ callPackage ./common.nix {
   src = ../../..;
 
   dependencies = with python3.pkgs; [
+    # UI itself
     pyside6
+    pyaudio
     pulsectl
     pyyaml
     python-dotenv
     loguru
-    # Runtime imports from translation_system and adapters
     numpy
-    torch-bin
-    transformers
-    sounddevice
-    soundfile
-    pyaudio
-    faster-whisper
-    ctranslate2
-    kokoro
-    en_core_web_sm
-    sentencepiece
-    sacremoses
-    # HuggingFace Hub for model downloading
     huggingface-hub
-    # Wyoming protocol for connecting to wyoming-faster-whisper
-    wyoming
+    sounddevice
+    # translate + tts run as systemd units (systemctl --user start/stop)
+    # and are no longer spawned directly by the UI process
   ];
 }

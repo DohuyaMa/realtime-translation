@@ -109,14 +109,74 @@ class UIController:
     
     def toggle_service(self, service_name: str) -> bool:
         """Toggle a specific service on/off."""
-        # Get current status to determine if we should start or stop
         status = self._controller.get_status()
         is_connected = status.get(f'{service_name}_connected', False)
-        
         if is_connected:
             return self.stop_service(service_name)
         else:
             return self.start_service(service_name)
+
+    def restart_service(self, service_name: str) -> bool:
+        """Restart a specific service."""
+        adapter = getattr(self._controller, '_adapter', None)
+        if adapter and hasattr(adapter, 'restart_service'):
+            ok = adapter.restart_service(service_name)
+            if self._status_callback:
+                self._status_callback(
+                    f'{service_name.capitalize()} service restarted' if ok
+                    else f'Failed to restart {service_name} service'
+                )
+            return ok
+        return False
+
+    def restart_all_services(self) -> bool:
+        """Restart all pipeline services."""
+        adapter = getattr(self._controller, '_adapter', None)
+        if adapter and hasattr(adapter, 'restart_all_services'):
+            results = adapter.restart_all_services()
+            failed = [k for k, v in results.items() if not v]
+            if self._status_callback:
+                msg = 'All services restarted' if not failed else f'Restart failed: {", ".join(failed)}'
+                self._status_callback(msg)
+            return not failed
+        return False
+
+    def change_whisper_model(self, model_name: str, progress_cb=None, done_cb=None):
+        """Download (if needed) + restart whisper service with new model.
+
+        Runs in a background thread so the UI stays responsive.
+        progress_cb(pct: int, msg: str) — called from background thread.
+        done_cb(success: bool) — called from background thread when finished.
+        """
+        import threading
+
+        def _run():
+            adapter = getattr(self._controller, '_adapter', None)
+            if adapter and hasattr(adapter, 'change_whisper_model'):
+                ok = adapter.change_whisper_model(model_name, progress_cb=progress_cb)
+            else:
+                logger.error("change_whisper_model: adapter does not support this operation")
+                ok = False
+            if self._status_callback:
+                self._status_callback(
+                    f"Whisper model changed to '{model_name}'" if ok
+                    else f"Failed to change whisper model to '{model_name}'"
+                )
+            if done_cb:
+                done_cb(ok)
+
+        t = threading.Thread(target=_run, daemon=True, name="whisper-model-change")
+        t.start()
+
+    def reconnect_ipc(self) -> int:
+        """Force-reconnect all IPC clients."""
+        adapter = getattr(self._controller, '_adapter', None)
+        if adapter and hasattr(adapter, 'reconnect_ipc'):
+            n = adapter.reconnect_ipc()
+            if self._status_callback:
+                self._status_callback(f'IPC reconnected: {n} client(s)')
+            return n
+        return 0
     
     def set_languages(self, source_lang: str, target_lang: str = "en") -> bool:
         """Set source and target languages."""

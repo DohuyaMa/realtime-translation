@@ -1,328 +1,247 @@
-# Real-time Speech Translation System
+# Real-time Speech Translator
 
-A modular real-time speech translation system that captures audio from a microphone, performs speech recognition, translates the text, and synthesizes the translated text to speech - all in real-time.
+A NixOS-native real-time speech translation system: microphone audio → speech recognition (Whisper) → translation → TTS synthesis → virtual microphone output. Designed for live meetings (Teams, Zoom) where you speak in Ukrainian/Polish and participants hear English.
 
-## Table of Contents
-- [Architecture](#architecture)
-- [Installation](#installation)
-- [Configuration](#configuration)
-- [Usage](#usage)
-- [Services](#services)
-- [Systemd Integration](#systemd-integration)
-- [Nix Flake Structure](#nix-flake-structure)
-- [Troubleshooting](#troubleshooting)
-
-## Architecture
-
-The system follows a modular architecture with separate services communicating via UNIX sockets:
+## Pipeline
 
 ```
-[Physical Mic] → [Capture Service] → [Whisper Service] → [Translation Service] → [TTS Service] → [Playback Service] → [rt_virtual_output]
-                                                                                                                        ↓
-                                                                                                        [rt_virtual_output.monitor] → [Teams/Zoom]
+Physical Mic
+    │
+    ▼
+[rt-capture]  — sounddevice 48 kHz capture
+    │
+    ▼
+[rt-whisper / rt-hybrid-whisper]  — faster-whisper (local GPU) or Wyoming (remote)
+    │  recognised text (Ukrainian / Polish / auto)
+    ▼
+[rt-translate]  — Helsinki-NLP MarianMT or facebook/nllb-200
+    │  translated text (English)
+    ▼
+[rt-tts]  — Kokoro-82M TTS (af_heart voice, 24 kHz)
+    │  synthesised audio
+    ▼
+rt_virtual_output  (PipeWire null-sink)
+    │
+    ▼
+rt_virtual_output.monitor  →  Teams / Zoom microphone input
 ```
 
-### Components
-- **Capture Service**: Handles audio input from the microphone
-- **Whisper Service**: Performs speech recognition using OpenAI Whisper
-- **Translation Service**: Translates text between languages
-- **TTS Service**: Synthesizes text to speech
-- **Playback Service**: Handles audio output to the virtual microphone
-### Fixed Device Names
+All services communicate via UNIX sockets in `/run/user/$UID/rt/`.  
+The UI (`translator-ui`) connects to each service and provides live recognised/translated text panels plus pipeline controls.
 
-The system uses these fixed device names instead of creating virtual devices dynamically:
-```python
-VIRTUAL_INPUT_SINK = "rt_virtual_input"
-VIRTUAL_OUTPUT_SINK = "rt_virtual_output"
-VIRTUAL_MIC_SOURCE = "rt_virtual_output.monitor"
-```
+## Requirements
+
+- NixOS with flakes enabled
+- NVIDIA GPU (CUDA) — for real-time Whisper + TTS inference
+- PipeWire audio server
+- Home Manager
 
 ## Installation
 
-### Prerequisites
-- Nix package manager
-- PipeWire audio server
-- systemd (for automatic virtual sink creation)
+Add this repository as a flake input in your NixOS configuration:
 
-### Setup
+```nix
+# flake.nix
+inputs.realtime-translation.url = "github:your-user/real-time-transletor";
+```
 
-1. **Clone the repository:**
-   ```bash
-   git clone <repository-url>
-   cd real-time-translator
-   ```
+Enable in your Home Manager configuration:
 
-2. **Enter the Nix development environment:**
-   ```bash
-   nix develop
-   ```
+```nix
+imports = [ inputs.realtime-translation.homeManagerModules.default ];
 
-3. **Set up virtual microphones using systemd service (recommended):**
-   ```bash
-   # Run the installation script to set up the systemd service
-   python install_pipewire_config.py
-   ```
-   
-   Or manually:
-   ```bash
-   # Copy the systemd service file
-   mkdir -p ~/.config/systemd/user
-   cp systemd/rt-virtual-sinks.service ~/.config/systemd/user/
-   
-   # Reload systemd daemon
-   systemctl --user daemon-reload
-   
-   # Enable and start the service
-   systemctl --user enable --now rt-virtual-sinks.service
-   ```
+rt-translator.enable = true;
 
-4. **Verify PipeWire nodes:**
-   ```bash
-   pactl list sinks short | grep rt_
-   pactl list sources short | grep rt_
-   ```
-   
-   You should see:
-   - `rt_virtual_input`
-   - `rt_virtual_output`
-   - `rt_virtual_output.monitor`
+# All settings below are optional — these are the defaults
+rt-translator.whisper.model       = "medium";  # tiny/base/small/medium/large
+rt-translator.whisper.device      = "cuda";
+rt-translator.whisper.computeType = "float16"; # float16 / int8 / int8_float16
+rt-translator.whisper.beamSize    = 5;
+rt-translator.whisper.temperature = 0.0;
 
-## Configuration
+rt-translator.translate.sourceLang       = "uk";  # ISO 639-1
+rt-translator.translate.targetLang       = "en";
+rt-translator.translate.numBeams         = 4;
+rt-translator.translate.repetitionPenalty = 1.2;
+rt-translator.translate.maxLength        = 200;
 
-### PipeWire Configuration
+rt-translator.tts.voice = "af_heart";  # Kokoro voice ID
+rt-translator.tts.speed = 1.0;
 
-The system uses a systemd service to create virtual devices automatically after PipeWire starts:
-- `rt_virtual_input` - sink where Python writes sound
-- `rt_virtual_output` - sink for Teams/Zoom to use as mic
-- `rt_virtual_output.monitor` - the actual microphone that Teams/Zoom sees
+rt-translator.wyoming.host = "localhost";
+rt-translator.wyoming.port = 10300;
+```
 
-The virtual sinks are created using pactl commands in the systemd service, which is the reliable approach on NixOS and modern PipeWire systems.
-
-### Fixed Device Names
-
-The system uses these fixed device names instead of creating virtual devices dynamically:
-```python
-VIRTUAL_INPUT_SINK = "rt_virtual_input"
-VIRTUAL_OUTPUT_SINK = "rt_virtual_output"
-VIRTUAL_MIC_SOURCE = "rt_virtual_output.monitor"
-
-## Usage
-
-### Starting the Services
-
-The system can be run using systemd socket activation:
-
-1. **Copy systemd service files:**
-   ```bash
-   mkdir -p ~/.config/systemd/user
-   cp systemd/*.socket systemd/*.service ~/.config/systemd/user/
-   ```
-
-2. **Enable and start socket activation:**
-   ```bash
-   systemctl --user enable rt-capture.socket
-   systemctl --user enable rt-whisper.socket
-   systemctl --user enable rt-translate.socket
-   systemctl --user enable rt-tts.socket
-   systemctl --user enable rt-playback.socket
-
-   systemctl --user start rt-capture.socket
-   systemctl --user start rt-whisper.socket
-   systemctl --user start rt-translate.socket
-   systemctl --user start rt-tts.socket
-   systemctl --user start rt-playback.socket
-   ```
-
-### Manual Usage
-
-Alternatively, you can run services manually:
+Apply:
 
 ```bash
-# In separate terminals, run each service:
-python -m src.capture.capture_service
-python -m src.whisper.whisper_service
-python -m src.translate.translate_service
-python -m src.tts.tts_service
-python -m src.playback.playback_service
+sudo nixos-rebuild switch --flake .#your-hostname
+# or
+home-manager switch --flake .#your-profile
 ```
 
-### Teams/Zoom Configuration
+## Runtime Configuration
 
-In Teams or Zoom audio settings:
-- Set microphone to "RT Virtual Output (Microphone)" (which is `rt_virtual_output.monitor`)
-
-## Services
-
-### Capture Service
-- Path: `src/capture/capture_service.py`
-- Socket: `/tmp/rt-capture.sock`
-- Handles audio input from the microphone
-- Supports start/stop capture and status queries
-
-### Whisper Service
-- Path: `src/whisper/whisper_service.py`
-- Socket: `/tmp/rt-whisper.sock`
-- Performs speech recognition
-- Supports language setting and processing
-
-### Translation Service
-- Path: `src/translate/translate_service.py`
-- Socket: `/tmp/rt-translate.sock`
-- Translates text between languages
-- Supports language setting and translation
-
-### TTS Service
-- Path: `src/tts/tts_service.py`
-- Socket: `/tmp/rt-tts.sock`
-- Synthesizes text to speech
-- Supports text synthesis
-
-### Playback Service
-- Path: `src/playback/playback_service.py`
-- Socket: `/tmp/rt-playback.sock`
-- Handles audio output to the virtual microphone
-- Supports audio playback and device setting
-
-## Systemd Integration
-
-The system includes systemd socket activation for efficient resource management:
-
-## Nix Flake Structure
-
-The project uses a modular Nix flake configuration to separate concerns and improve maintainability. The main flake.nix file imports from a modular structure in the `flake-global/` directory.
-
-### Directory Structure
+Settings changed through the UI are saved to `~/.config/real-time-translator/config.yml` and override the Nix defaults on the next service start. Priority chain:
 
 ```
+config.yml (UI override)  >  Nix ExecStart arg  >  built-in fallback
+```
+
+Key config paths:
+
+| Setting | Config key | Nix option |
+|---|---|---|
+| Whisper model | `models.whisper.model` | `rt-translator.whisper.model` |
+| Whisper device | `models.whisper.device` | `rt-translator.whisper.device` |
+| Compute type | `models.whisper.compute_type` | `rt-translator.whisper.computeType` |
+| Beam size | `models.whisper.beam_size` | `rt-translator.whisper.beamSize` |
+| Initial prompt | `models.whisper.initial_prompt` | — (UI only) |
+| Source language | `translation.source_lang` | `rt-translator.translate.sourceLang` |
+| Target language | `translation.target_lang` | `rt-translator.translate.targetLang` |
+| TTS voice | `models.tts.voice` | `rt-translator.tts.voice` |
+| TTS speed | `models.tts.speed` | `rt-translator.tts.speed` |
+
+## Whisper Model Management
+
+Models are downloaded to `~/.cache/whisper/<model>/`. To change the model at runtime:
+
+1. Open the UI → **Service Status** panel → **Settings** (next to Whisper)
+2. Select the desired model from the dropdown
+3. Click **Apply** — the system will download the model if not cached, save it to config, and restart the service
+
+Or via Settings → Models tab → select model → **Apply**.
+
+Models and approximate sizes:
+
+| Model | Size | VRAM | Notes |
+|---|---|---|---|
+| tiny | ~150 MB | ~1 GB | Fastest, lowest accuracy |
+| base | ~300 MB | ~1 GB | |
+| small | ~500 MB | ~2 GB | Good balance |
+| **medium** | ~1.5 GB | ~5 GB | **Default** |
+| large | ~3 GB | ~10 GB | Best accuracy |
+
+## Wyoming Integration
+
+To use a remote [Wyoming faster-whisper](https://github.com/rhasspy/wyoming-faster-whisper) server instead of local GPU inference:
+
+1. Open UI → Service Status → Settings (Whisper)
+2. Enable **"Route via Wyoming"**, set host/port
+3. Click OK — the pipeline switches to `rt-hybrid-whisper` service
+
+## Flake Structure
+
+```
+flake.nix                        # thin wrapper → flake-global/
 flake-global/
-├── flake.nix              # Main flake using flake-parts
-├── flake-parts.nix        # Flake-parts configuration framework
-├── home-manager-module.nix # Home Manager module for the application
-├── prod/                  # Production-specific configurations
-│   ├── packages.nix       # Production packages
-│   └── apps.nix           # Application definitions
-└── dev/                   # Development-specific configurations
-    └── devshell.nix       # Development shell environment
+├── flake.nix                    # flake-parts entry
+├── home-manager-module.nix      # systemd services + options (rt-translator.*)
+├── prod/
+│   ├── packages.nix             # per-service buildPythonApplication
+│   └── apps.nix                 # translator-ui app entry point
+├── dev/
+│   └── devshell.nix             # nix develop shell
+└── parts/python/
+    ├── common.nix               # shared Python package template
+    ├── whisper.nix
+    ├── hybrid-whisper.nix
+    ├── translate.nix
+    ├── tts.nix
+    ├── capture.nix
+    ├── playback.nix
+    └── ui.nix
+src/
+├── main.py                      # Qt app entry point
+├── translation_system.py        # pipeline coordinator
+├── adapters/direct_adapter.py   # backend adapter (service control)
+├── controller/                  # controller abstraction
+├── ui/widgets/                  # PySide6 Qt6 UI
+│   ├── main_window.py
+│   ├── settings_dialog.py
+│   ├── service_settings_dialog.py
+│   ├── service_status_panel.py
+│   ├── model_tab.py
+│   └── status_logger.py
+├── whisper/
+│   ├── whisper_service.py       # local faster-whisper
+│   └── hybrid_whisper_service.py # Wyoming proxy
+├── translate/translate_service.py
+├── tts/tts_service.py
+├── capture/capture_service.py
+├── playback/playback_service.py
+├── common/ipc.py                # UNIX socket IPC (JSON + length-prefix)
+└── core/
+    ├── config.py                # ConfigManager (YAML config)
+    ├── models.py                # ModelManager (cache check + download)
+    └── runtime.py               # socket path resolution
 ```
-
-### Components
-
-- **Production configurations** (`flake-global/prod/`): Contains packages and apps definitions optimized for production use
-- **Development configurations** (`flake-global/dev/`): Defines the development shell with all necessary tools and dependencies
-- **Home Manager module** (`flake-global/home-manager-module.nix`): Provides integration with Home Manager for user environment setup
-- **NixOS module**: Available in `nixosModules/virtual-sinks.nix` for system-level PipeWire virtual sink configuration
-
-This modular approach allows for better separation of development and production environments while maintaining a consistent interface through the main flake.nix file.
-
-### Socket Files
-- `rt-capture.socket` - Capture service socket
-- `rt-whisper.socket` - Whisper service socket
-- `rt-translate.socket` - Translation service socket
-- `rt-tts.socket` - TTS service socket
-- `rt-playback.socket` - Playback service socket
-
-### Service Files
-- `rt-capture.service` - Capture service
-- `rt-whisper.service` - Whisper service
-- `rt-translate.service` - Translation service
-- `rt-tts.service` - TTS service
-- `rt-playback.service` - Playback service
-
-Benefits:
-- Services start only when there's incoming data
-- Automatic restart on failure
-- Clean shutdown handling
-
-## Troubleshooting
-
-### Service Status
-Check service status with:
-```bash
-systemctl --user status rt-*.service
-systemctl --user status rt-*.socket
-```
-
-### Logs
-View service logs with:
-```bash
-journalctl --user -u rt-*.service -f
-```
-
-### Socket Status
-Check socket activation with:
-```bash
-systemctl --user list-sockets | grep rt-
-```
-
-### PipeWire Issues
-If virtual devices don't appear:
-```bash
-systemctl --user restart pipewire pipewire-pulse
-pactl list sinks short
-pactl list sources short
-```
-
-### Audio Issues
-- Verify that the correct input device is selected in your application
-- Check that the virtual microphone is selected in Teams/Zoom
-- Ensure PipeWire is running and the configuration file is in place
 
 ## Development
 
-### Adding New Features
-- Each service is modular and can be developed independently
-- Follow the IPC protocol when adding new message types
-- Use the base IPC classes for consistent communication
+```bash
+# Enter dev shell (sets up Python deps + PipeWire virtual sinks)
+nix develop
 
-### Testing Individual Services
-Each service can be tested independently by connecting to its socket and sending appropriate messages.
+# Run the UI directly
+python3 -m src.main
 
-## Benefits of Modular Architecture
+# Build a specific package
+nix build .#whisper
+nix build .#ui
 
-1. **Modularity**: Each component runs as a separate process
-2. **Resilience**: Failure in one service doesn't crash the entire pipeline
-3. **Resource Efficiency**: Socket activation means services only run when needed
-4. **Maintainability**: Easier to debug individual components
-5. **Scalability**: Services can be optimized independently
-6. **Flexibility**: Services can be updated independently
-
-## IPC Protocol
-
-### Message Format
-```
-[4-byte length][JSON message]
+# Run tests
+pytest tests/
 ```
 
-### Message Structure
-```json
-{
-  "type": "message_type",
-  "data": { ... }
-}
+## Service Management
+
+```bash
+# Status of all services
+systemctl --user status 'rt-*'
+
+# Restart a service (picks up config.yml changes)
+systemctl --user restart rt-whisper
+
+# Restart all pipeline services
+systemctl --user restart rt-whisper rt-translate rt-tts rt-capture rt-playback
+
+# Live logs
+journalctl --user -u rt-whisper -f
+journalctl --user -u rt-translate -f
+journalctl --user -u rt-app -f
+
+# Check socket activation
+systemctl --user list-sockets | grep rt-
 ```
 
-### Common Message Types
+## Troubleshooting
 
-#### Capture Service
-- `start_capture` - Start audio capture
-- `stop_capture` - Stop audio capture
-- `get_status` - Get service status
+**Pipeline produces no output:**
+```bash
+# Check all services are active
+systemctl --user is-active rt-whisper rt-translate rt-tts rt-capture rt-playback
 
-#### Whisper Service
-- `process_audio` - Process audio for speech recognition
-- `get_status` - Get service status
-- `set_languages` - Set source/target languages
+# Check logs for errors
+journalctl --user -u rt-whisper -n 50 --no-pager
+journalctl --user -u rt-translate -n 50 --no-pager
+```
 
-#### Translation Service
-- `translate_text` - Translate text
-- `get_status` - Get service status
-- `set_languages` - Set source/target languages
+**Whisper service fails to start:**
+- Check that the model is downloaded: `ls ~/.cache/whisper/`
+- Check VRAM availability: `nvidia-smi`
+- Try a smaller model via the UI Settings panel
 
-#### TTS Service
-- `synthesize_text` - Synthesize text to speech
-- `get_status` - Get service status
+**PipeWire virtual sinks missing:**
+```bash
+systemctl --user restart rt-virtual-sinks
+pactl list sinks short | grep rt_
+```
 
-#### Playback Service
-- `play_audio` - Play audio data
-- `get_status` - Get service status
-- `set_device` - Set output device
+**Translation always fails (broken pipe):**
+- The translate service may have restarted — use UI → **Reconnect IPC** button
+- Or restart the UI app: `systemctl --user restart rt-app`
+
+## License
+
+[GNU Affero General Public License v3.0](LICENSE)

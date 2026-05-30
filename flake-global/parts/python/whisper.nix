@@ -8,15 +8,8 @@ callPackage ./common.nix {
   src = ../../..;
 
   dependencies = with python3.pkgs; [
-    # Whisper service specific dependencies
-    whisper
-    torch
-    transformers
+    faster-whisper
     numpy
-    onnxruntime
-    soundfile
-    librosa
-    pulsectl
     pyyaml
     python-dotenv
     loguru

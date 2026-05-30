@@ -232,18 +232,32 @@ class TranslationService:
             return {"status": "error", "message": str(e)}
 
 
+def _cfg_get(key: str, default):
+    """Read a dot-notation key from the user config file (priority over CLI defaults)."""
+    from pathlib import Path
+    import yaml
+    try:
+        p = Path.home() / ".config" / "real-time-translator" / "config.yml"
+        cfg = yaml.safe_load(p.read_text()) or {}
+        for part in key.split("."):
+            cfg = cfg.get(part, {})
+        return cfg if cfg != {} else default
+    except Exception:
+        return default
+
+
 def main():
     """Main entry point for the translation service."""
     import argparse
     import os
     import signal
-    
+
     parser = argparse.ArgumentParser(description="Translation Service")
     parser.add_argument("--socket-path", default=get_runtime_config().get_translate_socket_path(),
                        help="Path to UNIX socket for IPC")
-    parser.add_argument("--source-lang", default="uk", 
+    parser.add_argument("--source-lang", default="uk",
                        help="Source language code (ISO 639-1 or FLORES-200 for NLLB)")
-    parser.add_argument("--target-lang", default="en", 
+    parser.add_argument("--target-lang", default="en",
                        help="Target language code (ISO 639-1 or FLORES-200 for NLLB)")
     parser.add_argument("--model-name", default=None,
                        help="HuggingFace model name (e.g. facebook/nllb-200-distilled-600M)")
@@ -253,18 +267,35 @@ def main():
 
     args = parser.parse_args()
 
+    # Priority: config file (UI override) > CLI arg (Nix default) > built-in fallback
+    source_lang        = _cfg_get("translation.source_lang",            None) or args.source_lang
+    target_lang        = _cfg_get("translation.target_lang",            None) or args.target_lang
+    model_name         = _cfg_get("models.translate.model",             None) or args.model_name
+    num_beams_cfg      = _cfg_get("models.translate.num_beams",         None)
+    num_beams          = num_beams_cfg if num_beams_cfg is not None else args.num_beams
+    rep_penalty_cfg    = _cfg_get("models.translate.repetition_penalty", None)
+    repetition_penalty = rep_penalty_cfg if rep_penalty_cfg is not None else args.repetition_penalty
+    max_len_cfg        = _cfg_get("models.translate.max_length",        None)
+    max_length         = max_len_cfg if max_len_cfg is not None else args.max_length
+
+    logger.info(
+        "translate_service starting: {}→{} model={} beams={} rep={} maxlen={}",
+        source_lang, target_lang, model_name or "Helsinki-NLP/opus-mt-{src}-{tgt}",
+        num_beams, repetition_penalty, max_length,
+    )
+
     # Create temporary directory if needed
     socket_dir = os.path.dirname(args.socket_path)
     os.makedirs(socket_dir, exist_ok=True)
 
     service = TranslationService(
         socket_path=args.socket_path,
-        source_lang=args.source_lang,
-        target_lang=args.target_lang,
-        model_name=args.model_name,
-        num_beams=args.num_beams,
-        repetition_penalty=args.repetition_penalty,
-        max_length=args.max_length,
+        source_lang=source_lang,
+        target_lang=target_lang,
+        model_name=model_name,
+        num_beams=num_beams,
+        repetition_penalty=repetition_penalty,
+        max_length=max_length,
     )
     
     def signal_handler(signum, frame):

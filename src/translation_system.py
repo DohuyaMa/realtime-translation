@@ -145,6 +145,7 @@ class TranslationSystem:
         self.status_callback: Optional[callable] = None
 
         self._capture_thread: Optional[threading.Thread] = None
+        self._chunk_worker_thread: Optional[threading.Thread] = None
 
         # User's preferred input/output device names (set via UI), None = system default
         self._preferred_input_device_name: Optional[str] = None
@@ -157,6 +158,10 @@ class TranslationSystem:
         self._pending_recognized: List[str] = []
         self._pending_translated: List[str] = []
         self._pipeline_lock = threading.Lock()
+
+        # Serialized chunk processing queue (prevents parallel whisper connections)
+        import queue as _q
+        self._chunk_queue: _q.Queue = _q.Queue(maxsize=2)
 
         # Pipeline diagnostics
         self._pipeline_cycles = 0
@@ -223,7 +228,18 @@ class TranslationSystem:
             logger.warning("Translation system already running")
             return
 
-        # Reconnect to any services that came up since last attempt
+        # Drop any stale IPC connections (services may have restarted since last run)
+        for name, attr, path in self._ipc_service_map():
+            client = getattr(self, attr)
+            if client is not None:
+                try:
+                    client.disconnect()
+                except Exception:
+                    pass
+                setattr(self, attr, None)
+                logger.debug(f"Dropped stale {name} IPC client before reconnect")
+
+        # Reconnect to any services that are up
         self._connect_ipc_clients()
         whisper_path = self._whisper_socket_path()
         connected = {
@@ -249,7 +265,11 @@ class TranslationSystem:
         self._capture_thread = threading.Thread(
             target=self._pipeline_loop, daemon=True, name="rt-pipeline"
         )
+        self._chunk_worker_thread = threading.Thread(
+            target=self._chunk_worker_loop, daemon=True, name="rt-chunk-worker"
+        )
         self._capture_thread.start()
+        self._chunk_worker_thread.start()
         logger.info("Translation system started")
 
     def stop(self):
@@ -259,6 +279,9 @@ class TranslationSystem:
         if self._capture_thread:
             self._capture_thread.join(timeout=6.0)
             self._capture_thread = None
+        if self._chunk_worker_thread:
+            self._chunk_worker_thread.join(timeout=6.0)
+            self._chunk_worker_thread = None
         total_pipeline_time = (
             self._total_whisper_time + self._total_translate_time + self._total_tts_time
         )
@@ -385,11 +408,10 @@ class TranslationSystem:
                             f"resampled in {resample_time*1000:.1f}ms "
                             f"level={audio_level:.3f}"
                         )
-                        threading.Thread(
-                            target=self._process_chunk,
-                            args=(audio_int16,),
-                            daemon=True,
-                        ).start()
+                        try:
+                            self._chunk_queue.put_nowait(audio_int16)
+                        except Exception:
+                            logger.warning("Chunk queue full — dropping audio chunk (whisper is busy)")
                     elif chunk_counter % 30 == 0:
                         logger.debug(
                             f"Capture running but translation disabled; "
@@ -400,6 +422,23 @@ class TranslationSystem:
             stream.close()
             logger.info(f"Microphone capture stopped after {chunk_counter} chunks "
                          f"({self._pipeline_cycles} pipeline cycles)")
+
+    def _chunk_worker_loop(self):
+        """Single worker that drains the chunk queue sequentially.
+
+        Serialises all whisper/translate/TTS calls so the whisper socket is
+        never hit by more than one connection at a time.
+        """
+        import queue as _q
+        while self.is_running:
+            try:
+                audio_int16 = self._chunk_queue.get(timeout=0.5)
+            except _q.Empty:
+                continue
+            try:
+                self._process_chunk(audio_int16)
+            except Exception as e:
+                logger.exception(f"Unhandled error in chunk worker: {e}")
 
     def _process_chunk(self, audio_int16: np.ndarray):
         """whisper → translate → TTS → sounddevice playback."""
@@ -467,7 +506,21 @@ class TranslationSystem:
                     "translated_text": translated,
                 })
 
+    def reconnect_ipc_clients(self) -> int:
+        """Try to reconnect any disconnected IPC clients. Returns number reconnected."""
+        before = sum(1 for _, attr, _ in self._ipc_service_map() if getattr(self, attr) is not None)
+        for name, attr, path in self._ipc_service_map():
+            if getattr(self, attr) is None and os.path.exists(path):
+                client = IPCClient(path)
+                if _try_connect(client):
+                    setattr(self, attr, client)
+                    logger.info(f"Reconnected to {name} service at {path}")
+        after = sum(1 for _, attr, _ in self._ipc_service_map() if getattr(self, attr) is not None)
+        return after - before
+
     def _translate(self, text: str) -> Optional[str]:
+        if not self.translate_client:
+            self._connect_ipc_clients()
         if not self.translate_client:
             logger.debug("Translate skipped: no translate_client (IPC not connected)")
             return None
@@ -485,6 +538,8 @@ class TranslationSystem:
         return None
 
     def _speak(self, text: str):
+        if not self.tts_client:
+            self._connect_ipc_clients()
         if not self.tts_client:
             logger.debug("TTS skipped: no tts_client (IPC not connected)")
             return

@@ -64,7 +64,7 @@ def run_server(socket_path: str, model_name: str, device: str, compute_type: str
 
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     server.bind(socket_path)
-    server.listen(1)
+    server.listen(5)
 
     logger.info("rt-whisper listening on {}", socket_path)
 
@@ -173,25 +173,62 @@ def run_server(socket_path: str, model_name: str, device: str, compute_type: str
             status.log_debug("Client disconnected")
 
 
+def _cfg_get(key: str, default):
+    """Read a dot-notation key from the user config file."""
+    from pathlib import Path
+    import yaml
+    try:
+        p = Path.home() / ".config" / "real-time-translator" / "config.yml"
+        cfg = yaml.safe_load(p.read_text()) or {}
+        for part in key.split("."):
+            cfg = cfg.get(part, {})
+        return cfg if cfg != {} else default
+    except Exception:
+        return default
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--socket-path", default=get_runtime_config().get_whisper_socket_path(), required=False)
-    parser.add_argument("--model", default="medium")
-    parser.add_argument("--device", default="auto")
-    parser.add_argument("--compute-type", default="float16")
-    parser.add_argument("--beam-size", type=int, default=5, help="Beam search width")
-    parser.add_argument("--temperature", type=float, default=0.0, help="Sampling temperature (0=deterministic)")
-    parser.add_argument("--initial-prompt", type=str, default="", help="Prompt text to bias recognition")
+    parser.add_argument("--model", default=None,
+                        help="Whisper model size (reads models.whisper.model from config if omitted)")
+    parser.add_argument("--device", default=None,
+                        help="Device: cuda/cpu/auto (reads models.whisper.device from config if omitted)")
+    parser.add_argument("--compute-type", default=None,
+                        help="Compute type: float16/int8/... (reads models.whisper.compute_type from config if omitted)")
+    parser.add_argument("--beam-size", type=int, default=None,
+                        help="Beam search width (reads models.whisper.beam_size from config if omitted)")
+    parser.add_argument("--temperature", type=float, default=None,
+                        help="Sampling temperature (reads models.whisper.temperature from config if omitted)")
+    parser.add_argument("--initial-prompt", type=str, default=None,
+                        help="Prompt text to bias recognition (reads models.whisper.initial_prompt from config if omitted)")
     args = parser.parse_args()
+
+    # Priority: config file (UI override) > CLI arg (Nix default) > built-in fallback
+    # This lets the user change model from the UI without touching Nix files.
+    model       = _cfg_get("models.whisper.model",         None) or args.model        or "medium"
+    device      = _cfg_get("models.whisper.device",        None) or args.device       or "auto"
+    compute     = _cfg_get("models.whisper.compute_type",  None) or args.compute_type or "float16"
+    beam_size   = _cfg_get("models.whisper.beam_size",     None)
+    if beam_size is None:
+        beam_size = args.beam_size if args.beam_size is not None else 5
+    temperature = _cfg_get("models.whisper.temperature",   None)
+    if temperature is None:
+        temperature = args.temperature if args.temperature is not None else 0.0
+    prompt      = _cfg_get("models.whisper.initial_prompt", None)
+    if prompt is None:
+        prompt = args.initial_prompt if args.initial_prompt is not None else ""
+
+    logger.info("whisper_service starting: model={} device={} compute={}", model, device, compute)
 
     run_server(
         socket_path=args.socket_path,
-        model_name=args.model,
-        device=args.device,
-        compute_type=args.compute_type,
-        beam_size=args.beam_size,
-        temperature=args.temperature,
-        initial_prompt=args.initial_prompt,
+        model_name=model,
+        device=device,
+        compute_type=compute,
+        beam_size=beam_size,
+        temperature=temperature,
+        initial_prompt=prompt,
     )
 
 

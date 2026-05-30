@@ -43,7 +43,7 @@ class IPCServer:
             
         self.server_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.server_socket.bind(self.socket_path)
-        self.server_socket.listen(1)
+        self.server_socket.listen(5)
         self.running = True
         
         logger.info(f"IPC Server started on {self.socket_path}")
