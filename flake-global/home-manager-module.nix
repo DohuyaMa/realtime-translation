@@ -47,6 +47,11 @@ in
     };
 
     translate = {
+      model = lib.mkOption {
+        type    = lib.types.str;
+        default = "facebook/nllb-200-distilled-600M";
+        description = "HuggingFace translation model. NLLB handles Ukrainian better than Helsinki-NLP opus-mt.";
+      };
       sourceLang = lib.mkOption {
         type    = lib.types.str;
         default = "uk";
@@ -110,49 +115,9 @@ in
     ];
 
     systemd.user.services = {
-      "rt-capture" = {
-        Unit = {
-          Description = "RT-Capture-service";
-          After   = [ "rt-capture.socket" ];
-          Requires = [ "rt-capture.socket" ];
-        };
-        Service = {
-          Type      = "simple";
-          ExecStart = "${rtPackages.capture}/bin/translator-capture --socket-path %t/rt/rt-capture.sock";
-          Restart   = "always";
-          RestartSec = 5;
-          Nice      = -5;
-          IOSchedulingClass     = "best-effort";
-          RuntimeDirectory      = "rt";
-          RuntimeDirectoryPreserve = "yes";
-        };
-        Install = {
-          WantedBy = [ "default.target" ];
-          Also     = [ "rt-capture.socket" ];
-        };
-      };
-
-      "rt-playback" = {
-        Unit = {
-          Description = "RT-Playback-service";
-          After   = [ "rt-playback.socket" ];
-          Requires = [ "rt-playback.socket" ];
-        };
-        Service = {
-          Type      = "simple";
-          ExecStart = "${rtPackages.playback}/bin/translator-playback --socket-path %t/rt/rt-playback.sock";
-          Restart   = "always";
-          RestartSec = 5;
-          Nice      = -5;
-          IOSchedulingClass     = "best-effort";
-          RuntimeDirectory      = "rt";
-          RuntimeDirectoryPreserve = "yes";
-        };
-        Install = {
-          WantedBy = [ "default.target" ];
-          Also     = [ "rt-playback.socket" ];
-        };
-      };
+      # Note: rt-capture and rt-playback are intentionally absent.
+      # Audio capture and playback happen inside the rt-app process via sounddevice
+      # (direct PipeWire access), so separate IPC services are not needed.
 
       "rt-translate" = {
         Unit = {
@@ -167,6 +132,7 @@ in
           ExecStart = lib.concatStringsSep " " [
             "${rtPackages.translate}/bin/translator-translate"
             "--socket-path %t/rt/rt-translate.sock"
+            "--model-name ${cfg.translate.model}"
             "--source-lang ${cfg.translate.sourceLang}"
             "--target-lang ${cfg.translate.targetLang}"
             "--num-beams ${toString cfg.translate.numBeams}"
@@ -346,23 +312,6 @@ in
     ];
 
     systemd.user.sockets = {
-      "rt-capture" = {
-        Socket = {
-          ListenStream = "%t/rt/rt-capture.sock";
-          SocketMode   = "0660";
-        };
-        Unit.After = [ "rt-virtual-sinks.service" ];
-        Install.WantedBy = [ "sockets.target" ];
-      };
-
-      "rt-playback" = {
-        Socket = {
-          ListenStream = "%t/rt/rt-playback.sock";
-          SocketMode   = "0660";
-        };
-        Install.WantedBy = [ "sockets.target" ];
-      };
-
       "rt-translate" = {
         Socket = {
           ListenStream = "%t/rt/rt-translate.sock";

@@ -155,11 +155,18 @@ class TranslationService:
         """Handle text translation request from IPC."""
         with self.processing_lock:
             try:
-                text = message.get('data', {}).get('text', '')
+                data = message.get('data', {})
+                text = data.get('text', '')
+                context: list = data.get('context', [])
                 if not text:
                     return {"status": "error", "message": "No text provided"}
-                
+
                 self.status.set_status("Translating text...")
+                if context:
+                    self.status.log_debug(
+                        f"Translation context ({len(context)} segments): "
+                        + " | ".join(c[:40] for c in context[-3:])
+                    )
                 self.status.log_info(f"Translating ({len(text)} chars): {text[:120]}{'...' if len(text) > 120 else ''}")
                 
                 t0 = _log_timing()

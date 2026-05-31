@@ -1,11 +1,13 @@
 import argparse
 import json
 import os
+import re
 import socket
 import struct
 import threading
 import time
-from typing import Optional
+from collections import deque
+from typing import List, Optional
 
 import numpy as np
 from faster_whisper import WhisperModel
@@ -18,6 +20,47 @@ _log_timing = time.monotonic  # micro-optimization: local ref
 
 PCM_DTYPE = np.int16
 SAMPLE_RATE = 16000
+
+
+def _filter_repetitions(text: str) -> str:
+    """Collapse consecutive repeated words or short phrases.
+
+    Examples:
+        "hello hello hello"  → "hello"
+        "I think think think" → "I think"
+        "yes yes"            → "yes"
+    """
+    if not text:
+        return text
+    words = text.split()
+    if len(words) < 2:
+        return text
+
+    result: List[str] = []
+    i = 0
+    while i < len(words):
+        result.append(words[i])
+        moved = False
+        # Try window sizes from small to large: single-word repeats take priority
+        # so "yes yes yes yes" collapses to "yes" before win=2 can grab "yes yes".
+        for win in range(1, min(6, len(words) - i + 1)):
+            seq = words[i : i + win]
+            j = i + win
+            count = 0
+            while j + win <= len(words) and words[j : j + win] == seq:
+                j += win
+                count += 1
+            if count > 0:
+                # seq[0] already appended; add the rest of the first occurrence
+                if win > 1:
+                    result.extend(seq[1:])
+                i = j
+                moved = True
+                break
+        if not moved:
+            i += 1
+
+    return " ".join(result)
 
 
 class WhisperSession:
@@ -68,13 +111,16 @@ def run_server(socket_path: str, model_name: str, device: str, compute_type: str
 
     logger.info("rt-whisper listening on {}", socket_path)
 
-    # Initialize status manager for logging
     status = StatusManager(component_name="whisper")
     status.log_info(
         f"Whisper service initialized: model={model_name} "
         f"device={device} compute={compute_type} "
         f"load_time={load_time:.1f}s"
     )
+
+    # Context buffer: accumulates the last N transcribed segments across sessions.
+    # Fed back as initial_prompt so Whisper understands ongoing speech better.
+    _context: deque = deque(maxlen=5)
 
     while True:
         conn, _ = server.accept()
@@ -110,6 +156,14 @@ def run_server(socket_path: str, model_name: str, device: str, compute_type: str
                         if audio is not None:
                             audio_len_sec = len(audio) / SAMPLE_RATE
                             t0 = _log_timing()
+
+                            # Build prompt: static initial_prompt + rolling context
+                            ctx_text = " ".join(_context)
+                            prompt = (
+                                f"{initial_prompt} {ctx_text}".strip()
+                                if initial_prompt else ctx_text
+                            )
+
                             transcribe_kwargs = dict(
                                 language=session.language,
                                 vad_filter=True,
@@ -122,9 +176,14 @@ def run_server(socket_path: str, model_name: str, device: str, compute_type: str
                                 no_speech_threshold=0.4,
                                 beam_size=beam_size,
                                 temperature=temperature,
+                                # Prevents within-chunk repetition loops in small models.
+                                # Each window is transcribed independently; initial_prompt
+                                # still seeds the first window with rolling context.
+                                condition_on_previous_text=False,
                             )
-                            if initial_prompt:
-                                transcribe_kwargs["initial_prompt"] = initial_prompt
+                            if prompt:
+                                transcribe_kwargs["initial_prompt"] = prompt
+
                             segments, info = model.transcribe(audio, **transcribe_kwargs)
                             transcribe_time = _log_timing() - t0
                             segments_list = list(segments)
@@ -140,11 +199,15 @@ def run_server(socket_path: str, model_name: str, device: str, compute_type: str
                                     f"probability={info.language_probability:.2f}"
                                 )
                             for s in segments_list:
-                                status.log_info(f"Recognized text: {s.text}")
+                                text = _filter_repetitions(s.text.strip())
+                                if not text:
+                                    continue
+                                _context.append(text)
+                                status.log_info(f"Recognized text: {text}")
                                 conn.sendall(
                                     (json.dumps({
                                         "type": "segment",
-                                        "text": s.text,
+                                        "text": text,
                                         "start": s.start,
                                         "end": s.end,
                                         "final": True,

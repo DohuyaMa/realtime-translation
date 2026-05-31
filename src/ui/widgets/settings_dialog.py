@@ -50,7 +50,6 @@ def _load_config():
         "tts_speed": cfg.get("models.tts.speed", 1.0),
         "beam_size": cfg.get("models.whisper.beam_size", 5),
         "temperature": cfg.get("models.whisper.temperature", 0.0),
-        "initial_prompt": cfg.get("models.whisper.initial_prompt", ""),
         "num_beams": cfg.get("models.translate.num_beams", 4),
         "repetition_penalty": cfg.get("models.translate.repetition_penalty", 1.2),
         "max_length": cfg.get("models.translate.max_length", 200),
@@ -77,7 +76,6 @@ def _save_config(settings: dict):
     cfg.set("models.tts.speed", settings.get("tts_speed", 1.0))
     cfg.set("models.whisper.beam_size", settings.get("beam_size", 5))
     cfg.set("models.whisper.temperature", settings.get("temperature", 0.0))
-    cfg.set("models.whisper.initial_prompt", settings.get("initial_prompt", ""))
     cfg.set("models.translate.num_beams", settings.get("num_beams", 4))
     cfg.set("models.translate.repetition_penalty", settings.get("repetition_penalty", 1.2))
     cfg.set("models.translate.max_length", settings.get("max_length", 200))
@@ -195,11 +193,6 @@ class _GeneralTab(QWidget):
         self.temperature.setSuffix(" temp")
         recog_layout.addRow("Temperature:", self.temperature)
 
-        self.initial_prompt = QLineEdit()
-        self.initial_prompt.setText(self._cfg.get("initial_prompt", ""))
-        self.initial_prompt.setPlaceholderText("e.g., conversation about technology")
-        recog_layout.addRow("Initial Prompt:", self.initial_prompt)
-
         recog_group.setLayout(recog_layout)
         layout.addWidget(recog_group)
 
@@ -260,7 +253,6 @@ class _GeneralTab(QWidget):
             "tts_speed": self.tts_speed.value(),
             "beam_size": self.beam_size.value(),
             "temperature": self.temperature.value(),
-            "initial_prompt": self.initial_prompt.text(),
             "num_beams": self.num_beams.value(),
             "repetition_penalty": self.repetition_penalty.value(),
             "max_length": self.max_length.value(),

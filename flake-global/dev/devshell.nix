@@ -75,6 +75,8 @@ in
           pyside6
           soundfile
           librosa
+          scipy
+          pysilero-vad
           pulsectl
           pyyaml
           python-dotenv
