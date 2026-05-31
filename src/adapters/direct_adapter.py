@@ -123,14 +123,13 @@ class DirectAdapter:
         'src.tts.tts_service':                  'translator-tts',
     }
 
-    # systemd user units (systemctl --user)
+    # systemd user units (systemctl --user).
+    # capture and playback run inside the rt-app process via sounddevice — no separate units.
     _USER_UNITS: Dict[str, str] = {
-        'capture':        'rt-capture',
         'whisper':        'rt-whisper',
         'hybrid-whisper': 'rt-hybrid-whisper',
         'translate':      'rt-translate',
         'tts':            'rt-tts',
-        'playback':       'rt-playback',
     }
     # systemd system units (sudo systemctl)
     _SYSTEM_UNITS: Dict[str, str] = {
@@ -366,7 +365,7 @@ class DirectAdapter:
     def restart_all_services(self) -> Dict[str, bool]:
         """Restart all pipeline services and reconnect IPC clients."""
         results: Dict[str, bool] = {}
-        for name in ['translate', 'tts', 'whisper', 'capture', 'playback']:
+        for name in ['translate', 'tts', 'whisper']:
             results[name] = self.restart_service(name)
         time.sleep(2.0)
         self.reconnect_ipc()
