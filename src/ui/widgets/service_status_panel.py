@@ -33,11 +33,9 @@ class ServiceStatusPanel(QGroupBox):
         outer.addLayout(grid)
 
         self._services = {
-            "capture":        "Capture",
             "whisper":        "Whisper",
             "translate":      "Translate",
             "tts":            "TTS",
-            "playback":       "Playback",
             "wyoming":        "Wyoming STT",
         }
 
