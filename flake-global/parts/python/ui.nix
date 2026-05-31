@@ -30,6 +30,8 @@ callPackage ./common.nix {
     python-dotenv
     loguru
     numpy
+    scipy
+    pysilero-vad
     huggingface-hub
     sounddevice
     # translate + tts run as systemd units (systemctl --user start/stop)

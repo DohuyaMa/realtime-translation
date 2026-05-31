@@ -7,6 +7,7 @@ import socket
 import struct
 import threading
 import time
+from collections import deque
 from typing import Optional, Dict, List
 from loguru import logger
 import numpy as np
@@ -163,6 +164,16 @@ class TranslationSystem:
         import queue as _q
         self._chunk_queue: _q.Queue = _q.Queue(maxsize=2)
 
+        # Rolling STT / translation context — fed back to whisper (initial_prompt)
+        # and passed to the translate service for context-aware translation.
+        self._stt_context: deque = deque(maxlen=5)
+        self._translation_context: deque = deque(maxlen=5)
+
+        # Async playback queue — keeps the pipeline worker free while audio plays.
+        import queue as _q
+        self._playback_queue: _q.Queue = _q.Queue(maxsize=4)
+        self._playback_thread: Optional[threading.Thread] = None
+
         # Pipeline diagnostics
         self._pipeline_cycles = 0
         self._pipeline_errors = 0
@@ -268,8 +279,12 @@ class TranslationSystem:
         self._chunk_worker_thread = threading.Thread(
             target=self._chunk_worker_loop, daemon=True, name="rt-chunk-worker"
         )
+        self._playback_thread = threading.Thread(
+            target=self._playback_worker, daemon=True, name="rt-playback"
+        )
         self._capture_thread.start()
         self._chunk_worker_thread.start()
+        self._playback_thread.start()
         logger.info("Translation system started")
 
     def stop(self):
@@ -282,6 +297,9 @@ class TranslationSystem:
         if self._chunk_worker_thread:
             self._chunk_worker_thread.join(timeout=6.0)
             self._chunk_worker_thread = None
+        if self._playback_thread:
+            self._playback_thread.join(timeout=6.0)
+            self._playback_thread = None
         total_pipeline_time = (
             self._total_whisper_time + self._total_translate_time + self._total_tts_time
         )
@@ -329,20 +347,43 @@ class TranslationSystem:
     # ------------------------------------------------------------------
 
     def _pipeline_loop(self):
-        """Capture via sounddevice at 48 kHz (PipeWire native), downsample to
-        16 kHz, chunk into 3-second windows, and drive the full pipeline.
+        """Capture at 48 kHz → Silero VAD (energy fallback) → whisper queue.
 
-        pyaudio + ALSA is avoided because the ALSA-PipeWire bridge module path
-        differs between build-time and run-time Nix store entries, causing
-        ALSA to reject the 16 kHz sample rate.
+        Silero VAD segments audio at natural speech boundaries instead of fixed
+        time windows. A short overlap (OVERLAP_SEC) is prepended to each chunk
+        so words at boundaries are not lost.
         """
         import queue as _queue
         import sounddevice as sd
+        from scipy.signal import resample_poly
 
-        CAPTURE_RATE = 48000          # PipeWire native rate
+        CAPTURE_RATE = 48000
         WHISPER_RATE = self.sample_rate  # 16000
-        CHUNK_SEC = 6.0               # longer window = fewer cut sentences
-        chunk_frames = int(CHUNK_SEC * CAPTURE_RATE)
+        BLOCKSIZE = 1024                 # ~21 ms per block at 48 kHz
+
+        SILENCE_SEC    = 0.7   # consecutive silence before flushing
+        MIN_SPEECH_SEC = 0.4   # minimum speech before flush is considered
+        MAX_CHUNK_SEC  = 8.0   # hard ceiling
+        OVERLAP_SEC    = 0.35  # overlap kept from previous chunk
+        SPEECH_PROB    = 0.5   # Silero threshold
+        ENERGY_THR     = 0.008 # energy fallback threshold (RMS)
+
+        silence_thresh_16k = int(SILENCE_SEC    * WHISPER_RATE)
+        min_speech_16k     = int(MIN_SPEECH_SEC * WHISPER_RATE)
+        max_chunk_48k      = int(MAX_CHUNK_SEC  * CAPTURE_RATE)
+        overlap_48k        = int(OVERLAP_SEC    * CAPTURE_RATE)
+        VAD_CHUNK_BYTES    = 1024  # 512 samples × 2 bytes at 16 kHz (32 ms)
+
+        # Silero VAD (with energy-based fallback if package unavailable)
+        try:
+            from pysilero_vad import SileroVoiceActivityDetector
+            _vad = SileroVoiceActivityDetector()
+            use_silero = True
+            logger.info("Silero VAD initialized")
+        except Exception as e:
+            _vad = None
+            use_silero = False
+            logger.warning(f"pysilero-vad unavailable ({e}) — using energy-based VAD fallback")
 
         audio_q: _queue.Queue = _queue.Queue()
 
@@ -350,78 +391,123 @@ class TranslationSystem:
             if status:
                 logger.debug(f"Sounddevice input status: {status}")
             mono = indata[:, 0]
-            # RMS → 0..1 range (speech typically 0.01–0.3 full-scale)
-            rms = float(np.sqrt(np.mean(mono ** 2)))
-            self._audio_level_input = min(rms * 5.0, 1.0)
+            self._audio_level_input = min(float(np.sqrt(np.mean(mono ** 2))) * 5.0, 1.0)
             audio_q.put(mono.copy())
 
         input_device = self._resolve_preferred_device()
         try:
             stream = sd.InputStream(
-                samplerate=CAPTURE_RATE,
-                channels=1,
-                dtype="float32",
-                blocksize=1024,
-                callback=_cb,
-                device=input_device,
+                samplerate=CAPTURE_RATE, channels=1, dtype="float32",
+                blocksize=BLOCKSIZE, callback=_cb, device=input_device,
             )
             stream.start()
-            logger.info(f"Capture input stream opened: device={input_device} {CAPTURE_RATE}Hz blocksize=1024")
+            logger.info(
+                f"Capture opened: device={input_device} {CAPTURE_RATE}Hz "
+                f"({'Silero' if use_silero else 'energy'} VAD)"
+            )
         except Exception as e:
             logger.exception(f"Cannot open microphone (device={input_device}): {e}")
             self.is_running = False
             return
 
-        logger.info(f"Microphone capture started at {CAPTURE_RATE} Hz")
-        buf = np.empty(0, dtype=np.float32)
-        chunk_counter = 0
+        buf_48k        = np.empty(0, dtype=np.float32)
+        overlap_buf    = np.empty(0, dtype=np.float32)
+        vad_byte_buf   = bytearray()
+        speech_16k     = 0   # accumulated speech samples at 16 kHz
+        silence_16k    = 0   # accumulated silence samples at 16 kHz
+        chunk_counter  = 0
+
+        def _flush_segment():
+            nonlocal buf_48k, overlap_buf, vad_byte_buf
+            nonlocal speech_16k, silence_16k, chunk_counter
+
+            if speech_16k < min_speech_16k:
+                buf_48k      = np.empty(0, dtype=np.float32)
+                vad_byte_buf = bytearray()
+                speech_16k   = 0
+                silence_16k  = 0
+                if _vad:
+                    _vad.reset()
+                return
+
+            segment     = (np.concatenate([overlap_buf, buf_48k])
+                           if len(overlap_buf) > 0 else buf_48k.copy())
+            overlap_buf = (buf_48k[-overlap_48k:].copy()
+                           if len(buf_48k) >= overlap_48k else buf_48k.copy())
+            buf_48k      = np.empty(0, dtype=np.float32)
+            vad_byte_buf = bytearray()
+            speech_16k   = 0
+            silence_16k  = 0
+            if _vad:
+                _vad.reset()
+
+            if not self.translation_enabled:
+                return
+
+            chunk_counter += 1
+            seg_sec       = len(segment) / CAPTURE_RATE
+            resampled     = resample_poly(segment, 1, 3).astype(np.float32)
+            audio_int16   = np.clip(resampled * 32767, -32768, 32767).astype(np.int16)
+
+            self._pipeline_cycles += 1
+            logger.debug(
+                f"VAD chunk #{chunk_counter}: {seg_sec:.1f}s "
+                f"→ {len(audio_int16)} samples @ {WHISPER_RATE}Hz"
+            )
+            try:
+                self._chunk_queue.put_nowait(audio_int16)
+            except Exception:
+                logger.warning("Chunk queue full — dropping VAD segment (whisper busy)")
+
         try:
             while self.is_running:
                 try:
-                    chunk = audio_q.get(timeout=0.5)
-                    buf = np.append(buf, chunk)
+                    block = audio_q.get(timeout=0.5)
                 except _queue.Empty:
+                    # Timeout counts as ~32 ms of silence
+                    if speech_16k >= min_speech_16k:
+                        silence_16k += 512
+                        if silence_16k >= silence_thresh_16k:
+                            _flush_segment()
                     continue
 
-                if len(buf) >= chunk_frames:
-                    chunk_counter += 1
-                    segment = buf[:chunk_frames]
-                    buf = buf[chunk_frames:]
+                buf_48k = np.append(buf_48k, block)
 
-                    # Downsample float32 48k→16k via linear interpolation
-                    t0 = _log_timing()
-                    new_len = int(len(segment) * WHISPER_RATE / CAPTURE_RATE)
-                    resampled = np.interp(
-                        np.linspace(0, len(segment) - 1, new_len),
-                        np.arange(len(segment)),
-                        segment,
-                    )
-                    audio_int16 = np.clip(resampled * 32767, -32768, 32767).astype(np.int16)
-                    resample_time = _log_timing() - t0
+                # Downsample block → 16 kHz int16 for VAD
+                block_16k     = resample_poly(block, 1, 3).astype(np.float32)
+                block_16k_i16 = np.clip(block_16k * 32767, -32768, 32767).astype(np.int16)
+                vad_byte_buf.extend(block_16k_i16.tobytes())
 
-                    if self.translation_enabled:
-                        self._pipeline_cycles += 1
-                        audio_level = self._audio_level_input
-                        logger.debug(
-                            f"Pipeline chunk #{chunk_counter}: "
-                            f"{len(segment)}→{len(audio_int16)} samples "
-                            f"resampled in {resample_time*1000:.1f}ms "
-                            f"level={audio_level:.3f}"
-                        )
-                        try:
-                            self._chunk_queue.put_nowait(audio_int16)
-                        except Exception:
-                            logger.warning("Chunk queue full — dropping audio chunk (whisper is busy)")
-                    elif chunk_counter % 30 == 0:
-                        logger.debug(
-                            f"Capture running but translation disabled; "
-                            f"level={self._audio_level_input:.3f}"
-                        )
+                # Process all complete 512-sample VAD windows
+                while len(vad_byte_buf) >= VAD_CHUNK_BYTES:
+                    chunk_bytes = bytes(vad_byte_buf[:VAD_CHUNK_BYTES])
+                    del vad_byte_buf[:VAD_CHUNK_BYTES]
+
+                    if use_silero:
+                        is_speech = _vad.process_chunk(chunk_bytes) >= SPEECH_PROB
+                    else:
+                        rms = float(np.sqrt(np.mean(block ** 2)))
+                        is_speech = rms >= ENERGY_THR
+
+                    if is_speech:
+                        speech_16k  += 512
+                        silence_16k  = 0
+                    else:
+                        silence_16k += 512
+
+                if (speech_16k >= min_speech_16k
+                        and silence_16k >= silence_thresh_16k):
+                    _flush_segment()
+                elif len(buf_48k) >= max_chunk_48k:
+                    _flush_segment()
+
         finally:
             stream.stop()
             stream.close()
-            logger.info(f"Microphone capture stopped after {chunk_counter} chunks "
-                         f"({self._pipeline_cycles} pipeline cycles)")
+            logger.info(
+                f"Capture stopped after {chunk_counter} VAD chunks "
+                f"({self._pipeline_cycles} pipeline cycles)"
+            )
 
     def _chunk_worker_loop(self):
         """Single worker that drains the chunk queue sequentially.
@@ -466,15 +552,24 @@ class TranslationSystem:
                              f"(whisper took {whisper_time*1000:.0f}ms)")
 
         for text in texts:
+            text = text.strip()
             if not text:
                 continue
+
+            # Skip near-duplicates caused by overlap between consecutive VAD chunks
+            if self._is_duplicate_stt(text):
+                logger.debug(f"STT duplicate skipped: {text[:60]}")
+                continue
+
             logger.info(f"Recognized: {text}")
             self._total_chunks_processed += 1
             with self._pipeline_lock:
                 self._pending_recognized.append(text)
+                self._stt_context.append(text)
+                stt_ctx_snapshot = list(self._stt_context)[:-1]  # all but current
 
             t0 = _log_timing()
-            translated = self._translate(text)
+            translated = self._translate(text, context=stt_ctx_snapshot)
             translate_time = _log_timing() - t0
             self._total_translate_time += translate_time
             if not translated:
@@ -484,6 +579,7 @@ class TranslationSystem:
             logger.info(f"Translated: {translated}")
             with self._pipeline_lock:
                 self._pending_translated.append(translated)
+                self._translation_context.append(translated)
 
             t0 = _log_timing()
             self._speak(translated)
@@ -506,6 +602,20 @@ class TranslationSystem:
                     "translated_text": translated,
                 })
 
+    def _is_duplicate_stt(self, text: str) -> bool:
+        """Return True if text is a near-duplicate of a recently recognised segment."""
+        text_l = text.lower().strip()
+        if len(text_l) < 5:
+            return False
+        for prev in self._stt_context:
+            prev_l = prev.lower().strip()
+            if text_l == prev_l:
+                return True
+            # Substring containment catches boundary-overlap double-transcriptions
+            if len(text_l) > 15 and (text_l in prev_l or prev_l in text_l):
+                return True
+        return False
+
     def reconnect_ipc_clients(self) -> int:
         """Try to reconnect any disconnected IPC clients. Returns number reconnected."""
         before = sum(1 for _, attr, _ in self._ipc_service_map() if getattr(self, attr) is not None)
@@ -518,14 +628,15 @@ class TranslationSystem:
         after = sum(1 for _, attr, _ in self._ipc_service_map() if getattr(self, attr) is not None)
         return after - before
 
-    def _translate(self, text: str) -> Optional[str]:
+    def _translate(self, text: str, context: List[str] = None) -> Optional[str]:
         if not self.translate_client:
             self._connect_ipc_clients()
         if not self.translate_client:
             logger.debug("Translate skipped: no translate_client (IPC not connected)")
             return None
         try:
-            result = self.translate_client.send_message("translate_text", {"text": text})
+            payload = {"text": text, "context": context or []}
+            result = self.translate_client.send_message("translate_text", payload)
             if result and result.get("status") == "success":
                 return result["data"]["translated_text"]
             logger.warning(f"Translate service returned error: {result} (text: {text[:80]})")
@@ -537,7 +648,25 @@ class TranslationSystem:
             self.translate_client = None   # force reconnect next cycle
         return None
 
+    def _playback_worker(self):
+        """Drain the playback queue and play audio without blocking the pipeline."""
+        import queue as _q
+        import sounddevice as sd
+        while self.is_running:
+            try:
+                item = self._playback_queue.get(timeout=0.5)
+            except _q.Empty:
+                continue
+            audio_arr, samplerate, duration = item
+            try:
+                out_dev = self._resolve_preferred_output_device()
+                logger.debug(f"Playback worker: playing {duration:.1f}s on device={out_dev}")
+                sd.play(audio_arr, samplerate=samplerate, device=out_dev, blocking=True)
+            except Exception as e:
+                logger.exception(f"Sounddevice playback error: {e}")
+
     def _speak(self, text: str):
+        """Synthesize text and enqueue audio for async playback."""
         if not self.tts_client:
             self._connect_ipc_clients()
         if not self.tts_client:
@@ -553,18 +682,15 @@ class TranslationSystem:
             samplerate = result["data"].get("sample_rate", 24000)
             duration = result["data"].get("duration", 0)
             try:
-                import sounddevice as sd
-                out_dev = self._resolve_preferred_output_device()
-                logger.debug(f"Playing {duration:.1f}s audio on device={out_dev}")
-                sd.play(audio_arr, samplerate=samplerate, device=out_dev, blocking=True)
-            except Exception as e:
-                logger.exception(f"Sounddevice playback error (device={out_dev}): {e}")
+                self._playback_queue.put_nowait((audio_arr, samplerate, duration))
+            except Exception:
+                logger.warning("Playback queue full — dropping TTS audio (playback is behind)")
         except (BrokenPipeError, ConnectionRefusedError) as e:
             logger.error(f"TTS IPC connection lost: {e}")
-            self.tts_client = None   # force reconnect next cycle
+            self.tts_client = None
         except Exception as e:
             logger.exception(f"TTS error for text '{text[:80]}': {e}")
-            self.tts_client = None   # force reconnect next cycle
+            self.tts_client = None
 
     # ------------------------------------------------------------------
     # Service control (IPC, forwarded)
