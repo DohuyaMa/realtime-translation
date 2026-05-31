@@ -9,8 +9,8 @@ audio:
   
   # Audio detection settings
   silence_threshold: 0.01
-  min_speech_duration: 0.5
-  max_speech_duration: 10.0
+  min_speech_duration: 0.1
+  max_speech_duration: 3.0
   
   # Buffer settings
   input_buffer_size: 4096
@@ -22,7 +22,7 @@ translation:
   target_lang: "en"    # English
 
   # Whisper model settings
-  whisper_model: "medium"  # tiny, base, small, medium, large
+  whisper_model: "tiny"  # tiny, base, small, medium, large
   whisper_device: "cuda"   # cpu, cuda
 
   # Batch processing
@@ -42,7 +42,7 @@ speech:
   # TTS settings
   tts_engine: "kokoro"     # kokoro, coqui
   tts_device: "cuda"       # cpu, cuda
-  tts_voice: "af_heart"    # Kokoro voice: af_heart, af_bella, af_nicole, am_adam, am_liam
+  tts_voice: "am_adam"    # Kokoro voice: af_heart, af_bella, af_nicole, am_adam, am_liam
   tts_speed: 1.0
   tts_pitch: 0.0
   tts_energy: 1.0
@@ -54,7 +54,7 @@ speech:
 
 ui:
   # Window settings
-  minimize_to_tray: true
+  minimize_to_tray: false
   start_minimized: false
   always_on_top: false
   
