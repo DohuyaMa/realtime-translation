@@ -1,107 +1,82 @@
-# Nix Flake Architecture Documentation
+# Nix Flake Architecture
 
-## Overview
+## Структура
 
-This document describes the architecture of the refactored `flake.nix` file for the Real-time Speech Translation System.
+Один кореневий `flake.nix` без суб-флейків. Пакети і devShell живуть у `flake-global/` як звичайні `.nix` файли, які імпортуються напряму.
 
-## Structure
-
-The flake is organized into the following main components:
-
-### 1. Inputs
-- `nixpkgs`: Core Nix packages (nixos-25.11)
-- `flake-utils`: Utility functions for flake operations
-- `home-manager`: Home Manager integration (follows nixpkgs)
-
-### 2. Home Manager Module
-- Defined as `homeManagerModules.rt-translator`
-- Provides systemd user services and socket activation
-- Uses proper Python environment for runtime
-- Separated from `eachSystem` block to avoid system dependency
-
-### 3. System-Specific Outputs
-- Uses `flake-utils.lib.eachSystem` for x86_64-linux
-- Provides devShells, packages, and apps
-
-## Key Improvements
-
-### Fixed Issues from Original Flake
-
-1. **Home Manager Integration**
-   - Added missing `home-manager` input
-   - Created proper `homeManagerModules.rt-translator` instead of invalid `homeManagerConfiguration`
-   - Moved HM configuration outside of `eachSystem`
-
-2. **Systemd Services**
-   - Fixed Python environment usage with proper runtime wrappers
-   - Corrected `rt-playback` service module path from `src.playback_service` to `src.playback.playback_service`
-   - Removed GUI dependencies from systemd services
-   - Used proper pipewire commands for audio virtual sinks
-
-3. **Audio Stack**
-   - Replaced conflicting pulseaudio/pipewire usage with proper pipewire commands
-   - Used `pactl` from pipewire instead of pulseaudio directly
-
-4. **Python Packaging**
-   - Replaced incorrect `buildPythonPackage` with proper `mkDerivation`
-   - Added `buildPhase = "true"` to skip unnecessary build steps
-   - Fixed PYTHONPATH in runtime wrappers
-
-5. **Runtime Environment**
-   - Created proper service wrappers with correct Python environment
-   - Fixed PYTHONPATH issues that caused `ModuleNotFoundError`
-   - Added proper environment variables in devShell
-
-## Home Manager Module Details
-
-The `rtTranslatorModule` provides:
-
-### Systemd User Services
-- `rt-capture`: Audio capture service with socket activation
-- `rt-playback`: Audio playback service with socket activation
-- `rt-translate`: Translation service with socket activation
-- `rt-tts`: Text-to-speech service with socket activation
-- `rt-whisper`: Speech recognition service with socket activation
-- `rt-virtual-sinks`: PipeWire virtual audio devices
-
-### Systemd User Sockets
-- Socket files for each service enabling socket activation
-
-### Runtime Dependencies
-- Proper Python environment with all required packages
-- Service wrapper executables
-
-## Development Environment
-
-The `devShells.default` provides:
-- All required Python packages
-- System dependencies for development
-- Proper environment variables for Hugging Face models
-- Setup hooks for cache directories
-
-## Packages and Apps
-
-- `packages.default`: The main application package
-- `apps.default`: Runnable application with proper wrapper
-
-## Audio Configuration
-
-The system uses PipeWire for audio routing with virtual sinks:
-- `rt_virtual_input`: Virtual input device
-- `rt_virtual_output`: Virtual output device (configured as microphone)
-
-## Runtime Wrapper Pattern
-
-Each service uses a runtime wrapper pattern:
-```nix
-serviceWrapper = name: modulePath: pkgs.writeShellApplication {
-  name = "rt-${name}-service";
-  runtimeInputs = [ pythonEnv pkgs.coreutils ];
-  text = ''
-    export PYTHONPATH="${pythonEnv}/lib/python3.12/site-packages:$PYTHONPATH"
-    exec ${pythonEnv.interpreter} -m ${modulePath} "$@"
-  '';
-};
+```
+flake.nix                          ← єдина точка входу
+flake-global/
+  prod/packages.nix                ← визначає всі Python-пакети
+  prod/apps.nix                    ← (не використовується напряму, збережено для довідки)
+  dev/devshell.nix                 ← devShell з усіма залежностями
+  home-manager-module.nix          ← HM-модуль з systemd-сервісами
+  parts/python/
+    common.nix                     ← шаблон buildPythonApplication
+    capture.nix / playback.nix / translate.nix
+    tts.nix / whisper.nix / hybrid-whisper.nix / ui.nix
+nixosModules/
+  virtual-sinks.nix                ← NixOS-модуль для PipeWire null sinks
 ```
 
-This ensures services run with the correct Python environment and dependencies.
+## Inputs
+
+| Input | Використання |
+|---|---|
+| `nixpkgs` → `nixpkgs-unstable` | Всі пакети |
+| `flake-utils` | `eachSystem` для ітерації по системах |
+| `home-manager` | Home Manager модуль |
+
+**Видалено порівняно зі старою версією:** `flake-parts`, `nix-unit`, `flake-global` (суб-флейк).
+
+## Outputs
+
+```nix
+flake-utils.lib.eachSystem [ "x86_64-linux" "aarch64-linux" "aarch64-darwin" "x86_64-darwin" ]
+  → packages    # всі сервіси + аліаси для home-manager
+  → devShells   # середовище розробки
+  → apps        # translator-ui як nix run
+
+// (system-агностик)
+  → homeManagerModules.rt-translator
+  → nixosModules.virtual-sinks
+```
+
+## Пакети (`packages.*`)
+
+Кожен сервіс — окремий `buildPythonApplication` зі спільним `pyproject.toml` (весь `src/` в одному пакеті):
+
+| Ім'я | Бінарник | Опис |
+|---|---|---|
+| `capture` | `translator-capture` | Захват аудіо |
+| `whisper` | `translator-whisper` | Whisper STT |
+| `hybrid-whisper` | `translator-hybrid-whisper` | Whisper + Wyoming proxy |
+| `translate` | `translator-translate` | MarianMT переклад |
+| `tts` | `translator-tts` | Kokoro TTS |
+| `playback` | `translator-playback` | Відтворення аудіо |
+| `ui` / `app` / `default` | `translator-ui` | PySide6 UI |
+
+## Home Manager модуль
+
+`homeManagerModules.rt-translator` надає:
+
+- **systemd user сервіси** з socket-активацією: `rt-capture`, `rt-playback`, `rt-translate`, `rt-tts`, `rt-whisper`, `rt-hybrid-whisper`, `rt-app`, `rt-virtual-sinks`
+- **systemd user сокети**: один `.socket` на кожен сервіс, шлях `%t/rt/*.sock`
+- **xdg.configFile**: PipeWire конфіг для null sinks (`rt_virtual_input`, `rt_virtual_output`)
+- **Опції конфігурації** (NixOS-стиль): `rt-translator.whisper.*`, `rt-translator.translate.*`, `rt-translator.tts.*`, `rt-translator.wyoming.*`
+
+## NixOS модуль
+
+`nixosModules.virtual-sinks` — системний PipeWire модуль для машин де virtual sinks потрібні на рівні системи (не home-manager).
+
+## Відомі виправлення
+
+### `src/models` не включався у збірку (2026-05-31)
+
+`.gitignore` мав патерн `models/` який відповідав `src/models/` (Python-пакет з `TTSEngine`, `WhisperRecognition`). Оскільки Nix будує з git-трекінгу, `src/models/` не потрапляло у `buildPythonApplication` → `ModuleNotFoundError: No module named 'src.models'`.
+
+**Виправлення:** змінено `models/` → `/models/` у `.gitignore`, `src/models/` додано до git.
+
+### Спрощення flake (2026-05-31)
+
+Стара структура мала два рівні flake (`flake.nix` → `flake-global/flake.nix`) і використовувала `flake-parts` тільки для `perSystem` блоку. Замінено єдиним `flake.nix` з `flake-utils.lib.eachSystem`. Прибрано 15 вкладених inputs з `flake.lock`.
