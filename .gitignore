@@ -42,7 +42,7 @@ log/
 config/local.yml
 
 # Models and data
-models/
+/models/
 data/
 *.pt
 *.pth
