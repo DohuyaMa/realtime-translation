@@ -22,13 +22,22 @@ PCM_DTYPE = np.int16
 SAMPLE_RATE = 16000
 
 
+def _normalize_word(w: str) -> str:
+    """Strip leading/trailing punctuation for comparison."""
+    return re.sub(r"^[^\w]+|[^\w]+$", "", w, flags=re.UNICODE).lower()
+
+
 def _filter_repetitions(text: str) -> str:
     """Collapse consecutive repeated words or short phrases.
 
+    Punctuation is stripped for comparison so "знаю, знаю" and "Добре. Добре"
+    are caught, but the original token (with punctuation) is kept in output.
+
     Examples:
-        "hello hello hello"  → "hello"
-        "I think think think" → "I think"
-        "yes yes"            → "yes"
+        "hello hello hello"      → "hello"
+        "I think think think"    → "I think"
+        "я не знаю, я не знаю"  → "я не знаю,"
+        "Добре. Добре"           → "Добре."
     """
     if not text:
         return text
@@ -36,24 +45,23 @@ def _filter_repetitions(text: str) -> str:
     if len(words) < 2:
         return text
 
+    normed = [_normalize_word(w) for w in words]
+
     result: List[str] = []
     i = 0
     while i < len(words):
         result.append(words[i])
         moved = False
-        # Try window sizes from small to large: single-word repeats take priority
-        # so "yes yes yes yes" collapses to "yes" before win=2 can grab "yes yes".
         for win in range(1, min(6, len(words) - i + 1)):
-            seq = words[i : i + win]
+            seq_n = normed[i : i + win]
             j = i + win
             count = 0
-            while j + win <= len(words) and words[j : j + win] == seq:
+            while j + win <= len(words) and normed[j : j + win] == seq_n:
                 j += win
                 count += 1
             if count > 0:
-                # seq[0] already appended; add the rest of the first occurrence
                 if win > 1:
-                    result.extend(seq[1:])
+                    result.extend(words[i + 1 : i + win])
                 i = j
                 moved = True
                 break

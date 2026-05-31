@@ -162,7 +162,7 @@ class TranslationSystem:
 
         # Serialized chunk processing queue (prevents parallel whisper connections)
         import queue as _q
-        self._chunk_queue: _q.Queue = _q.Queue(maxsize=2)
+        self._chunk_queue: _q.Queue = _q.Queue(maxsize=5)
 
         # Rolling STT / translation context — fed back to whisper (initial_prompt)
         # and passed to the translate service for context-aware translation.
