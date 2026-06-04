@@ -52,6 +52,9 @@ data/
 .DS_Store
 Thumbs.db
 
+# Agent instructions (local only)
+CLAUDE.md
+
 # Application specific
 .kokoro/
 .ollama/
