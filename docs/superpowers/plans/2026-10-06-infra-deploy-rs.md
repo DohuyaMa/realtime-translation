@@ -22,6 +22,7 @@
 - swarm-nix: код/коментарі/коміти англійською; **без** рядків `Co-Authored-By` у комітах (пам'ять користувача). Django-тести — через `nix develop ./flake` з кореня swarm-nix; ніколи `pip install`.
 - Тести Django не чіпають живі рядки `applications/registry.nix`/`machines/inventory.nix` у `NixFile` (TD-18) — лише `_uniq`-шляхи/імена.
 - Llama-профілі мають лишитись byte-identical (`drvPath` до/після, Task 5).
+- **Cluster-generic (overview §7 C0):** розміщення сервісів — дані clusterops (Service × targets) + per-host `enable`; план не фіксує, що де працює. Імена хостів у Tasks 7–12 — **приклади** для конкретних команд; обов'язкова частина — процедура з `<host>`-плейсхолдерами (Task 10). Модель — за класом заліза (SP5 §4.8), per-host override — `services.rtSpeech.*`. Кожне розміщення проходить admission check (≤ 90 % VRAM/RAM пристрою, SP5 `system`-gate з `--host-profile <host>`).
 
 ## Review Focus
 
@@ -54,7 +55,7 @@
 | `system-conf/applications/services/rt-<svc>-<variant>.nix` | Create (≤9) | по файлу на ім'я Service |
 | `system-conf/common/modules/rt-speech.nix` | Create | імпорт `inputs.realtime-translation.nixosModules.rt-speech` |
 | `system-conf/common/modules/nix/cuda-substituter.nix` | Create | `cache.nixos-cuda.org` у системних `nix.settings` CUDA-хостів (Task 7a) |
-| `system-conf/machines/{cyborg,SKTOP-NOTE27-NIXOS}/configuration.nix` | Modify | імпорт `cuda-substituter.nix` (Task 7a) |
+| `system-conf/machines/<cuda-host>/configuration.nix` | Modify | імпорт `cuda-substituter.nix` (Task 7a; кожен CUDA-хост) |
 | `system-conf/machines/{cyborg,sktop-nixos-top}/modules/flake-services/rt-speech.nix` (+ fallback MT: `sktop-note27-nixos` або `kira-kiosk`) | Create | per-host `services.rtSpeech.*` |
 | `system-conf/machines/{cyborg,sktop-nixos-top}/configuration.nix` (+ fallback MT-хост) | Modify | 2 імпорти |
 | `system-conf/machines/cyborg/system.nix` | Modify | прибрати стару HM-згадку (Task 4), edge HM (Task 12) |
@@ -759,7 +760,7 @@ cd $SN && git add system-conf/applications system-conf/common/modules/rt-speech.
 git commit -m "feat(system-conf): rt-speech deploy-rs app builder and per-Service app files"
 ```
 
-### Task 7: cyborg — `services.rtSpeech.asr` (T1)
+### Task 7: Перший per-host конфіг — `services.rtSpeech.<svc>` на `<host>` (приклад нижче: cyborg, `rt-asr-gpu`)
 
 **Files:**
 - Create: `system-conf/machines/cyborg/modules/flake-services/rt-speech.nix`
@@ -790,7 +791,7 @@ git commit -m "feat(system-conf): rt-speech deploy-rs app builder and per-Servic
     openFirewall = false;
     device = "cuda";
     # VRAM budget (sub-project 5 §4.6, infra spec §7): llama (Qwen3.5-4B Q4,
-    # ctx 16384) + rt-asr + rt-mt on the RTX 4060 8 GB, gate <= 7.4 GiB.
+    # ctx 16384) + co-located rt-* — admission check <= 90% of device VRAM (spec §7.3). EXAMPLE values.
     model = "whisper-large-v3-turbo";   # sub-project 5 registry alias
     computeType = "int8_float16";
   };
@@ -868,7 +869,7 @@ Expected: `import_infra` завершується `Done (…)`; у `/cluster/con
 
 **Interfaces:** Produces: `nix.settings.extra-substituters ∋ https://cache.nixos-cuda.org` (+ ключ) на cyborg і SKTOP-NOTE27-NIXOS. Не змінює llama-профілі (лише toplevel цих двох хостів).
 
-Задача незалежна від Tasks 5–7 і може виконуватись раніше (overview §6 крок 1∥ — потрібна SP5 `bench-gpu` на cyborg). Якщо `/tmp/rt-infra-baseline/llama-before.txt` ще не існує — спершу виконати Task 5 Step 2 (baseline) на поточному `main`.
+Задача незалежна від Tasks 5–7 і може виконуватись раніше (overview §6 крок 1∥ — потрібна SP5 `bench-gpu`). Виконується для **кожного** CUDA-хоста (`<cuda-host>`; нижче приклад — cyborg і SKTOP-NOTE27-NIXOS). Якщо `/tmp/rt-infra-baseline/llama-before.txt` ще не існує — спершу виконати Task 5 Step 2 (baseline) на поточному `main`.
 
 - [ ] **Step 1: Модуль**
 
@@ -982,7 +983,7 @@ DEVSH "python manage.py import_infra"
 
 ## Phase 3 — Deploy & verify
 
-### Task 9: Деплой T1 (rt-asr-gpu @ cyborg) і smoke
+### Task 9: Перший деплой на `<host>` і smoke (приклад: `rt-asr-gpu` @ cyborg)
 
 **Files:** лише `system-conf/flake.lock` (оновлення перед деплоєм).
 
@@ -1057,144 +1058,70 @@ curl -sf -F file=@<(ssh SKTOP-NOTE27-NIXOS cat /tmp/rt-uk.wav) -F language=uk ht
 nvidia-smi --query-gpu=memory.used,memory.total --format=csv
 nvidia-smi --query-compute-apps=process_name,used_memory --format=csv
 ```
-Expected: `memory.used` ≤ 7577 MiB (7.4 GiB, поріг gate `system-cyborg` SP5; тут лише llama + ASR — запас під MT має лишитися ≥ ~0.9 GiB). Більше — зменшити `model` у `machines/cyborg/modules/flake-services/rt-speech.nix` (`whisper-large-v3-turbo` → `whisper-small`, драбина SP5 §4.6), commit+push, `nix run .#deploy-rs -- '.#cyborg.rt-asr-gpu' --remote-build --skip-checks` (зміна значення — deploy-rs-only), повторити Step 9. Записати фактичні числа в `system-conf/machines/cyborg/README.md` (розділ GPU/VRAM) і закомітити.
+Expected: `memory.used` ≤ 90 % `memory.total` (admission check, spec §7.3; для 8188 MiB ≈ 7369 MiB). Більше — зменшити `model` у `machines/cyborg/modules/flake-services/rt-speech.nix` (`whisper-large-v3-turbo` → `whisper-small`, драбина SP5 §4.6), commit+push, `nix run .#deploy-rs -- '.#cyborg.rt-asr-gpu' --remote-build --skip-checks` (зміна значення — deploy-rs-only), повторити Step 9. Записати фактичні числа в `system-conf/machines/cyborg/README.md` (розділ GPU/VRAM) і закомітити.
 
-### Task 10: T2 — rt-mt-gpu @ cyborg (gate SP5) або fallback, і rt-tts-cpu @ sktop-nixos-top
+### Task 10: Додати / перенести сервіс на `<host>` (загальна процедура, spec §7.4; повторюється для кожного розміщення)
 
-**Files:**
-- Modify: `system-conf/machines/cyborg/modules/flake-services/rt-speech.nix` (додати `services.rtSpeech.mt`) — основний шлях; **або** (fallback) Create `system-conf/machines/sktop-note27-nixos/modules/flake-services/rt-speech.nix` / `system-conf/machines/kira-kiosk/modules/flake-services/rt-speech.nix`
-- Create: `system-conf/machines/sktop-nixos-top/modules/flake-services/rt-speech.nix`
-- Modify: відповідні `configuration.nix` (2 імпорти кожен, лише для нових хостів), registry (генерація), `system-conf/AGENTS.md`, `system-conf/machines/README.md`, `system-conf/machines/cyborg/README.md` (VRAM)
+Розміщення — дані clusterops, не рішення плану (overview §7 C0). Задача виконується для кожної пари `<svc>`×`<host>`, яку власник хоче мати (напр. *приклад* «повний переклад»: `rt-mt-gpu` поруч з `rt-asr-gpu` на `<cuda-host>`, `rt-tts-cpu` на `<cpu-host>`). Змінні: `H=<host>` (ім'я nixosConfiguration), `D=<dir>` (тека `machines/`), `SVC=asr|mt|tts`, `VAR=cpu|gpu|rocm`, `PORT=8091|8092|8093`.
 
-**Interfaces:** Consumes: Task 3/6/7a механізми; результат gate `system-cyborg` (SP5 план Task 19 Step 5, записаний у SP5 spec §11). Produces: профілі `cyborg.rt-mt-gpu` (або fallback `SKTOP-NOTE27-NIXOS.rt-mt-gpu` / `kira-kiosk.rt-mt-cpu`) і `sktop-nixos-top.rt-tts-cpu`.
+**Files:** `system-conf/machines/$D/modules/flake-services/rt-speech.nix` (create/modify), `system-conf/machines/$D/configuration.nix` (2 імпорти, якщо файл новий; для `gpu` — ще `cuda-substituter.nix`, Task 7a), registry (лише генерацією), `system-conf/machines/$D/README.md` (виміри).
 
-- [ ] **Step 1: Рішення про розміщення MT (overview §7 C3, spec §7)**
+**Interfaces:** Consumes: Tasks 3/6/7a; SP5 harness `system`-gate (SP5 план Task 17/19, параметризований хостом). Produces: профіль `$H.rt-$SVC-$VAR`.
 
-Прочитати SP5 spec §11 (`docs/superpowers/specs/2026-10-06-model-optimization-design.md`): gate `system-cyborg` (llama завантажена + ASR + MT, 5 хв) — PASS з піком ≤ 7577 MiB і без OOM?
-- PASS → **Step 2a** (`rt-mt-gpu` @ cyborg, ASR-модель — та, з якою gate пройдено).
-- FAIL або SP5 Task 19 ще не виконано → **Step 1b** (fallback).
+- [ ] **Step 1: Клас заліза → варіант** (spec §7.1): `nvidia-smi -L` / `rocminfo` / CPU-only на `$H`; `VAR` має бути дозволений класом (`rocm` — лише після GO SP5 Task 22 для цього GPU).
 
-- [ ] **Step 1b (лише fallback): VRAM-гейт note27**
-
+- [ ] **Step 2: Admission check** (spec §7.3) — на `$H`, з завантаженою llama (якщо є) і всіма сервісами, що вже є/будуть co-located:
 ```bash
-ssh SKTOP-NOTE27-NIXOS 'm=$(systemctl show llamaService -p Environment | tr " " "\n" | sed -n "s/^MODEL_PATH=//p")
-  curl -s -X POST "http://127.0.0.1:8080/models/load?model_name=$(basename "$m")" >/dev/null
-  nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv'
+ssh $H 'cd rt-bench && git pull --ff-only && nix develop .#bench-gpu -c python -m scripts.bench system --duration 300 --host-profile $H --out bench-results/$H/system.json --gate system-host'   # cpu-хости: .#bench-cpu
 ```
-Рішення: `memory.total − memory.used ≥ 1536 MiB` → **Step 2b** (`rt-mt-gpu` @ SKTOP-NOTE27-NIXOS); інакше → **Step 2c** (`rt-mt-cpu` @ kira-kiosk). Записати назву GPU і числа в `system-conf/machines/sktop-note27-nixos/README.md` (відповідь на spec Q2).
+Expected: `gate system-host: PASS` — пік ≤ 90 % VRAM пристрою (або RAM для cpu), без OOM, RTF у порогах SP5 §6.4. FAIL → драбина SP5 §4.6 (менша модель через `model`, CPU-варіант або інший `<host>`). Записати числа в `machines/$D/README.md`.
 
-- [ ] **Step 2a: cyborg — додати MT у наявний per-host файл** (`machines/cyborg/modules/flake-services/rt-speech.nix`, поруч з `services.rtSpeech.asr`; імпорти вже є з Task 7):
-
+- [ ] **Step 3: Per-host конфіг** — у `machines/$D/modules/flake-services/rt-speech.nix` (шапка і правила — як у Task 7; файл без top-level `enable`):
 ```nix
-  # rt-mt on the same RTX 4060 as llama + rt-asr: allowed only because the
-  # sub-project 5 gate system-cyborg (llama loaded + ASR + MT, 5 min) passed
-  # at <= 7.4 GiB (infra spec §7). Fallback: rt-mt-cpu on kira-kiosk.
-  services.rtSpeech.mt = {
+  services.rtSpeech.<svc> = {
     enable = true;
-    deployRsPath = "/var/lib/rt-mt/current";
+    deployRsPath = "/var/lib/rt-<svc>/current";
     host = "0.0.0.0";        # tailscale0 trusted fleet-wide; no port opened
     openFirewall = false;
-    device = "cuda";
-    model = "nllb-200-distilled-600M-ct2-int8";   # sub-project 5 registry alias
-    computeType = "int8_float16";
+    device = "cuda";         # cpu | cuda | rocm — must match VAR
+    # model / computeType / extraEnv only to override the device-class defaults (SP5 §4.8), e.g.:
+    # model = "whisper-small";
   };
 ```
+Новий файл → 2 імпорти в `machines/$D/configuration.nix` (як Task 7 Step 2). `nix build --no-link ".#nixosConfigurations.\"$H\".config.system.build.toplevel"`; `allowedTCPPorts` без `$PORT`; Task 7 Step 6 для `applications/services/rt-$SVC-$VAR.nix` проти `nixosConfigurations.$H`.
 
-- [ ] **Step 2b (fallback): note27 per-host файл** (`machines/sktop-note27-nixos/modules/flake-services/rt-speech.nix`) — той самий блок `services.rtSpeech.mt` у файлі зі шапкою `# Speech services on SKTOP-NOTE27-NIXOS (deploy-rs app: rt-mt-gpu). No top-level enable (see cyborg's copy); imported from ../../configuration.nix.`, обгорнутий у `{ ... }: { … }`. Імпорти в `machines/sktop-note27-nixos/configuration.nix`: `../../common/modules/rt-speech.nix` після `../../common/modules/llm/llama-service.nix`; `./modules/flake-services/rt-speech.nix` після `./modules/flake-services/llama-service.nix` (substituter — уже з Task 7a).
-
-- [ ] **Step 2c (fallback): kira-kiosk** — той самий файл у `machines/kira-kiosk/modules/flake-services/rt-speech.nix` з `device = "cpu"; computeType = "int8";` (`extraEnv.RT_NUM_THREADS = "2";`, SP5 §4.6) і коментарем `(deploy-rs app: rt-mt-cpu)`; імпорти в `machines/kira-kiosk/configuration.nix` після рядків llama.
-
-- [ ] **Step 3: sktop-nixos-top** (`machines/sktop-nixos-top/modules/flake-services/rt-speech.nix`):
-
-```nix
-# system-conf/machines/sktop-nixos-top/modules/flake-services/rt-speech.nix
-# Speech services on sktop-nixos-top (deploy-rs app: rt-tts-cpu).
-# Imported from ../../configuration.nix. Shares CPU with llm-cpu (ctx 4096):
-# expect TTS latency spikes while the llama worker generates (spec §7, R-CPU).
-{ ... }:
-{
-  services.rtSpeech.tts = {
-    enable = true;
-    deployRsPath = "/var/lib/rt-tts/current";
-    host = "0.0.0.0";        # tailscale0 trusted fleet-wide; no port opened
-    openFirewall = false;
-    device = "cpu";
-    model = "kokoro-82m-v1.0-onnx";   # sub-project 5 registry alias (ORT engine, RT_TTS_ENGINE=onnx default)
-  };
-}
-```
-Імпорти в `machines/sktop-nixos-top/configuration.nix`: `../../common/modules/rt-speech.nix` після `../../common/modules/llm/llama-service.nix`; `./modules/flake-services/rt-speech.nix` після `./modules/flake-services/llama-service.nix`.
-
-- [ ] **Step 4: Build + firewall + eval-перевірки** (для кожного зміненого `<node>`/`<svc>`):
-
+- [ ] **Step 4: Commit + clusterops Service/target + registry**
 ```bash
-cd $SC && git add -A machines
-for h in cyborg sktop-nixos-top; do   # fallback: + SKTOP-NOTE27-NIXOS або kira-kiosk
-  nix build --no-link ".#nixosConfigurations.\"$h\".config.system.build.toplevel"
-  nix eval --json ".#nixosConfigurations.\"$h\".config.networking.firewall.allowedTCPPorts"
-done
-```
-Expected: збірки успішні; у списках портів немає `8092`/`8093`.
-Додатково для 2a: повторити Task 7 Step 6 для `applications/services/rt-mt-gpu.nix` проти `nixosConfigurations.cyborg` (`hasPort` з `RT_PORT=8092`).
-
-- [ ] **Step 5: Commit, import, Services, registry**
-
-```bash
-cd $SN && git add system-conf/machines && git commit -m "feat(machines): enable rt-mt and rt-tts speech services (T2 topology)"
-DEVSH "python manage.py import_infra"
-for spec in "rt-mt-gpu:cyborg:mt:8092" "rt-tts-cpu:sktop-nixos-top:tts:8093"; do   # fallback: rt-mt-gpu:SKTOP-NOTE27-NIXOS:mt:8092 або rt-mt-cpu:kira-kiosk:mt:8092
-  IFS=: read name node svc port <<<"$spec"
-  NPK=$(DEVSH "python manage.py shell -c \"from clusterops.models import Node; print(Node.objects.get(name='$node').pk)\"" | tail -1)
-  SPK=$(curl -sf -H "Authorization: Token $TOKEN" -H 'Content-Type: application/json' -X POST $API/services/ -d "{
-    \"name\": \"$name\", \"service_type\": \"custom\", \"deploy_backend\": \"deploy_rs\",
-    \"state_dir\": \"/var/lib/rt-$svc\", \"service_name\": \"rt-$svc\",
-    \"health_check_cmd\": \"curl -sf http://127.0.0.1:$port/health\",
-    \"activation_script\": \"systemctl restart rt-$svc\", \"magic_rollback_enabled\": true,
-    \"status\": \"active\", \"flake_module\": \"applications/services/$name.nix\"}" | jq -r .id)
-  curl -sf -H "Authorization: Token $TOKEN" -H 'Content-Type: application/json' -X POST $API/services/$SPK/targets/ \
-    -d "{\"node\": $NPK, \"ssh_user\": \"deploy\", \"target_user\": \"root\"}" | jq -c '{service_name,node_name}'
-done
+cd $SN && git add system-conf/machines && git commit -m "feat($D): enable rt-$SVC ($VAR)" && DEVSH "python manage.py import_infra"
+# Service rt-$SVC-$VAR — створити, якщо ще нема (поля як Task 8 Step 2 з $SVC/$PORT); target — node $H:
+NPK=$(DEVSH "python manage.py shell -c \"from clusterops.models import Node; print(Node.objects.get(name='$H').pk)\"" | tail -1)
+curl -sf -H "Authorization: Token $TOKEN" -H 'Content-Type: application/json' -X POST $API/services/$SPK/targets/ \
+  -d "{\"node\": $NPK, \"ssh_user\": \"deploy\", \"target_user\": \"root\"}" | jq -c '{service_name,node_name}'
 DEVSH "python manage.py generate_infra --regenerate applications/registry.nix"
 cd $SC && git diff applications/registry.nix && nix flake check --no-build
+cd $SN && git add system-conf && git commit -m "feat(registry): rt-$SVC-$VAR -> $H (generated by clusterops NixGen)" && git push && DEVSH "python manage.py import_infra"
 ```
-Expected: diff — лише два нові блоки; check PASS.
+Expected: diff — лише новий target/блок; check PASS. Документація (`AGENTS.md` колонка deploy-rs app, `machines/README.md` Deploy Methods) — оновити для `$H`.
 
-- [ ] **Step 6: Docs + commit + push** — `system-conf/AGENTS.md` колонка deploy-rs app: cyborg `llm-gpu`, `rt-asr-gpu`, `rt-mt-gpu` (fallback: note27 `llm-gpu`, `rt-mt-gpu` або kira-kiosk `llm-cpu`, `rt-mt-cpu`); sktop-nixos-top `llm-cpu`, `rt-tts-cpu`; `machines/README.md` Deploy Methods — відповідні `deploy-rs .#<node>.<profile>`.
-
-```bash
-cd $SN && git add system-conf && git commit -m "feat(registry): add rt-mt and rt-tts targets (generated by clusterops NixGen)" && git push
-DEVSH "python manage.py import_infra"
-```
-
-- [ ] **Step 7: Платформа → deploy-rs на кожному хості** (з cyborg; спершу Task 9 Step 1 для синхронізації lock):
-
+- [ ] **Step 5: Платформа → deploy-rs** (після Task 9 Step 1 — синхронізація lock):
 ```bash
 cd $SC
-# cyborg (2a): self-deploy платформи — sudo nixos-rebuild switch --flake .#cyborg; потім deploy-rs як нижче для "cyborg:rt-mt-gpu:rt-mt"
-for p in "sktop-nixos-top:rt-tts-cpu:rt-tts"; do   # fallback MT: + "SKTOP-NOTE27-NIXOS:rt-mt-gpu:rt-mt" або "kira-kiosk:rt-mt-cpu:rt-mt"
-  IFS=: read node prof unit <<<"$p"
-  nix run .#colmena -- apply --on "$node"
-  nix run .#colmena -- exec --on "$node" "sudo systemctl reset-failed $unit || true"
-  nix run .#deploy-rs -- ".#$node.$prof" --remote-build --skip-checks --dry-activate
-  nix run .#deploy-rs -- ".#$node.$prof" --remote-build --skip-checks
-done
+nix run .#colmena -- apply --on "$H"        # self-deploy controller: sudo nixos-rebuild switch --flake .#$H
+nix run .#colmena -- exec --on "$H" "sudo systemctl reset-failed rt-$SVC || true"
+nix run .#deploy-rs -- ".#$H.rt-$SVC-$VAR" --remote-build --skip-checks --dry-activate
+nix run .#deploy-rs -- ".#$H.rt-$SVC-$VAR" --remote-build --skip-checks
 ```
-Expected: кожен деплой — `✓ Health check passed`. Провал першого деплою → план відновлення spec §8.4 на тому хості.
+Expected: `✓ Health check passed`. Провал першого деплою → spec §8.4.
 
-- [ ] **Step 8: Smoke T2 через Tailscale (з cyborg)**
-
+- [ ] **Step 6: Smoke через Tailscale (з іншого хоста) і живий вимір**
 ```bash
-MT=127.0.0.1   # 2a: rt-mt на cyborg; fallback: $(tailscale ip -4 sktop-note27-nixos) або $(tailscale ip -4 kira-kiosk)
-TTS=$(tailscale ip -4 sktop-nixos-top)
-curl -sf http://$MT:8092/health; curl -sf http://$TTS:8093/health
-curl -sf -H 'Content-Type: application/json' -d '{"text":"Привіт, як справи?","source_lang":"uk","target_lang":"en"}' http://$MT:8092/v1/translate | jq .
-curl -sf -H 'Content-Type: application/json' -d '{"input":"Hello, how are you?","response_format":"wav"}' -o /tmp/rt-tts.wav http://$TTS:8093/v1/audio/speech
-file /tmp/rt-tts.wav
+IP=$(tailscale ip -4 "$H"); curl -sf http://$IP:$PORT/health
+# mt:  curl -sf -H 'Content-Type: application/json' -d '{"text":"Привіт, як справи?","source_lang":"uk","target_lang":"en"}' http://$IP:8092/v1/translate | jq .
+# tts: curl -sf -H 'Content-Type: application/json' -d '{"input":"Hello, how are you?","response_format":"wav"}' -o /tmp/rt-tts.wav http://$IP:8093/v1/audio/speech && file /tmp/rt-tts.wav
 ```
-Expected: `{"status":"ok"}` ×2; `translations[0]` — англійський переклад; `/tmp/rt-tts.wav: RIFF (little-endian) data, WAVE audio`.
+Потім 2 хв навантаження на всі co-located сервіси і `nvidia-smi --query-gpu=memory.used --format=csv,noheader -lms 500 | sort -n | tail -1` (або `free -m`) на `$H`. Expected: ≤ 90 % пристрою, без OOM у `journalctl`. Інакше — драбина / перенесення (Step 7).
 
-- [ ] **Step 9 (лише 2a): живий VRAM-вимір на cyborg (критерій 4)** — llama завантажена (як Task 9 Step 9), паралельно 2 хв ASR-запитів і MT-запитів (`for i in $(seq 60); do curl … /v1/audio/transcriptions; curl … /v1/translate; done`), під час навантаження `nvidia-smi --query-gpu=memory.used --format=csv,noheader -lms 500 | sort -n | tail -1`.
-Expected: пік ≤ 7577 MiB (7.4 GiB), жодного OOM у `journalctl -u rt-asr -u rt-mt -u llamaService`. Більше → драбина SP5 §4.6 (ASR → `whisper-small`, deploy-rs-only), якщо й тоді більше — перенести MT на fallback (Step 1b) і видалити `rt-mt-gpu`-target cyborg через clusterops. Числа записати в `system-conf/machines/cyborg/README.md`.
+- [ ] **Step 7: Перенесення** (за потреби) — Steps 1–6 для нового `<host>` → оновити edge `rt-translator.endpoints.<svc>` (Task 12) → видалити старий target у clusterops, `enable = false` на старому хості → регенерація registry → colmena.
 
 ### Task 11: Фаза B — токен через clusterops Secret (sops)
 
@@ -1213,7 +1140,7 @@ Expected: `True` для rt-хостів. Хост з `False` лишається 
 
 ```bash
 RT_TOKEN=$(head -c 32 /dev/urandom | base64 | tr -d '/+=' | head -c 40)
-for node in cyborg sktop-nixos-top; do   # лише хости з True у Step 1 (+ fallback MT-хост, якщо використано)
+for node in <rt-host-1> <rt-host-2>; do   # усі хости з rt-сервісами і True у Step 1 (приклад: cyborg sktop-nixos-top)
   NPK=$(DEVSH "python manage.py shell -c \"from clusterops.models import Node; print(Node.objects.get(name='$node').pk)\"" | tail -1)
   curl -sf -H "Authorization: Token $TOKEN" -H 'Content-Type: application/json' -X POST $API/secrets/ -d "{
     \"name\": \"$node-rt-api-token\", \"value\": \"$RT_TOKEN\", \"target_node\": $NPK,
@@ -1251,7 +1178,7 @@ sudo ls -l /run/secrets/rt-api-token; systemctl show rt-asr -p LoadCredential
 ```
 Expected: `401`, `200`, `200`; файл `-r-------- root root`; `LoadCredential=api-token:/run/secrets/rt-api-token`. Повторити `401/200` для `$MT:8092/v1/translate` і `$TTS:8093/v1/audio/speech`.
 
-### Task 12: Edge (Home Manager) на cyborg + e2e
+### Task 12: Edge (Home Manager) на `<edge-host>` + e2e (приклад: cyborg)
 
 **Files:**
 - Modify: `system-conf/machines/cyborg/system.nix` (`home-manager.users.dmaslo`)
@@ -1274,8 +1201,8 @@ Expected: `401`, `200`, `200`; файл `-r-------- root root`; `LoadCredential=
       mode = "translate";
       endpoints = {
         asr = "http://127.0.0.1:8091";
-        mt = "http://127.0.0.1:8092";       # rt-mt-gpu on cyborg (fallback T2: note27 100.87.250.83 / kira-kiosk 100.120.81.4)
-        tts = "http://100.123.195.44:8093"; # sktop-nixos-top
+        mt = "http://127.0.0.1:8092";       # EXAMPLE: rt-mt on the edge host; else http://<tailscale-ip>:8092 of its host
+        tts = "http://100.123.195.44:8093"; # EXAMPLE: sktop-nixos-top — whichever host runs rt-tts (clusterops data)
       };
       apiTokenFile = "/run/secrets/rt-api-token-dmaslo";   # omit if Task 11 left cyborg in phase A
     };
@@ -1302,7 +1229,7 @@ git push && DEVSH "python manage.py import_infra"
 
 ## Self-review (виконано при написанні)
 
-- **Spec coverage:** §5.1 → Task 5 (+ git-only, Step 8, Task 9 Step 1); §5.2 → Task 6 Step 3; §5.3 → Task 5; §5.4 → Task 6; §5.5 → Tasks 1–3; §5.6 → Tasks 7, 10; §5.7 → Task 12; §6 throws → Task 7 Step 6, Condition → Task 7 Step 4 / Task 9 Step 2; §5.8 substituter → Task 7a; §7 топології/VRAM → Task 9 Step 9, Task 10 Steps 1/9 (gate SP5); §8.1 порядок → фази 1–3; §8.3 → Task 11; §8.4 → Task 9 Step 4; §9 → кроки verify у кожній задачі; §10 → Task 4; документація → Tasks 4, 8, 10.
+- **Spec coverage:** §5.1 → Task 5 (+ git-only, Step 8, Task 9 Step 1); §5.2 → Task 6 Step 3; §5.3 → Task 5; §5.4 → Task 6; §5.5 → Tasks 1–3; §5.6 → Tasks 7, 10; §5.7 → Task 12; §6 throws → Task 7 Step 6, Condition → Task 7 Step 4 / Task 9 Step 2; §5.8 substituter → Task 7a; §7 процедура розміщення/admission → Task 10 (generic), Task 9 Step 9; §8.1 порядок → фази 1–3; §8.3 → Task 11; §8.4 → Task 9 Step 4; §9 → кроки verify у кожній задачі; §10 → Task 4; документація → Tasks 4, 8, 10.
 - **Placeholders:** немає; моделі мають конкретні дефолти з відсиланням до підпроєкту 5.
 - **Type consistency:** `envLinesFor`, `mkEnvFile lines`, `regenerate_generated_file(path, method)`, `GENERATED_FILES`, `_infer_service_type`, імена профілів `rt-<svc>-<variant>` однакові в усіх задачах.
 - **Review Focus:** 5 пунктів, кожен прив'язаний до кроку з перевіркою.

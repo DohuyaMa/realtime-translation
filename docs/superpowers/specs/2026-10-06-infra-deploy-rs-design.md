@@ -1,7 +1,7 @@
 # Підпроєкт 3 — Інтеграція speech-сервісів в інфру (swarm-nix, deploy-rs) — design
 
 Дата: 2026-10-06
-Статус: draft, архітектурне рішення делеговане (напрямок A затверджено, без інтерактивного Q&A). Припущення і відкриті питання зібрано наприкінці. Узгоджено з іншими підпроєктами 2026-10-06 — overview §7 (C3: розміщення/VRAM за виміряним бюджетом SP5; C4: CUDA substituter; C1/C2: пакування GPU/ROCm).
+Статус: draft, архітектурне рішення делеговане (напрямок A затверджено, без інтерактивного Q&A). Припущення і відкриті питання зібрано наприкінці. Узгоджено з іншими підпроєктами 2026-10-06 — overview §7 (C0: cluster-generic, розміщення — дані clusterops, §7; C4: CUDA substituter; C1/C2: пакування GPU/ROCm).
 Базовий документ: [`2026-10-06-distributed-speech-services-overview.md`](2026-10-06-distributed-speech-services-overview.md) (далі — **overview**). Контракт з §4 overview обов'язковий; відхилення — у розділі 11.
 Код, який змінюватиметься: `~/repos/swarm-nix` (`system-conf/` + `django_api/clusterops/`). Цей документ код не змінює.
 
@@ -15,7 +15,7 @@
 - Per-host `services.rtSpeech.*` рендериться в `env` бандла через `lib.rtSpeech.envLines` — через **узагальнений** env-merge hook (llama лишається byte-identical).
 - `registry.nix`/`inventory.nix` згенеровані clusterops NixGen з Django DB — нові Service створюються через систему, не ручною правкою згенерованого файлу.
 - Per-host увімкнення в `machines/<host>/modules/flake-services/`, firewall лише Tailscale, токен лише з файлу (sops-nix / colmena keys).
-- Початкове розміщення з VRAM-бюджетом поруч з llama; топології «тільки транскрипція» і «повний переклад».
+- Загальна процедура розміщення (клас заліза → варіанти, admission check за VRAM/RAM, add/move через clusterops) — без фіксованого розміщення (overview §7 C0); топології «тільки транскрипція» і «повний переклад» — як приклади.
 - Прибирання застарілих артефактів; rollout і перевірка.
 
 **Поза scope:** внутрішня реалізація Python-сервісів (підпроєкт 1), збірка пакетів/модуля/HM-модуля в цьому репо (2), маршрутизація WorkItem у Django engine (4), вибір конкретних моделей (5 — тут лише VRAM-стелі на хост).
@@ -23,8 +23,8 @@
 **Критерії успіху:**
 1. `nix flake check --no-build` у `system-conf/` проходить; `drvPath` усіх п'яти llama-профілів (`kira-kiosk.llm-cpu`, `sktop-nixos-top.llm-cpu`, `cyborg.llm-gpu`, `SKTOP-NOTE27-NIXOS.llm-gpu`, `SKTOP-NOTE17-NIXOS.llm-rocm`) **не змінився** після всіх змін.
 2. `registry.nix` з `rt-*` записами отримано **генерацією** з clusterops DB (`git diff` = лише результат генерації), а `import_infra` не перекласифіковує `rt-*-cpu`/`-gpu`/`-rocm` у `llm-*`.
-3. `nix run .#deploy-rs -- .#cyborg.rt-asr-gpu` (і через clusterops API `service-targets/<pk>/deploy/`) проходить health check; `curl` з іншої машини по Tailscale отримує `200` від `/health` і коректну відповідь `/v1/*`; з LAN-адреси порт закритий.
-4. Топологія «повний переклад» працює; на cyborg (llama завантажена + `rt-asr-gpu` + `rt-mt-gpu`) пік VRAM ≤ **7.4 GiB** (7577 MiB) без OOM — gate `system-cyborg` підпроєкту 5 (план SP5 Task 19) **і** живий вимір після деплою (план Task 10).
+3. `nix run .#deploy-rs -- .#<host>.rt-<svc>-<variant>` (приклад: `.#cyborg.rt-asr-gpu`) (і через clusterops API `service-targets/<pk>/deploy/`) проходить health check; `curl` з іншої машини по Tailscale отримує `200` від `/health` і коректну відповідь `/v1/*`; з LAN-адреси порт закритий.
+4. Топологія «повний переклад» працює на будь-якому розміщенні, обраному даними clusterops; для кожного хоста з rt-сервісами admission check (§7.3: пік ≤ 90 % VRAM/RAM пристрою з усіма co-located сервісами, без OOM) пройдено до і після деплою.
 5. Застарілі rt/wyoming-артефакти видалені з коду **і** з усіх згадок (README, tasks, TD, коментарі).
 6. `system-conf/flake.lock` (у git) пінить `realtime-translation` як `type = github` з конкретним `rev`; на обох контролерах (cyborg, SKTOP-NOTE27-NIXOS) після `git pull` ця ревізія однакова; у swarm-nix немає жодного `path:`/`git+file:`-посилання на цей репо.
 
@@ -218,7 +218,7 @@ Service-рядки (по одному на використаний варіан
 
 ### 5.6 Per-host конфіг — `machines/<dir>/modules/flake-services/rt-speech.nix`
 ```nix
-# machines/cyborg/modules/flake-services/rt-speech.nix
+# machines/<host>/modules/flake-services/rt-speech.nix   (приклад: cyborg)
 # NOTE: no top-level `enable` — flake-services/default.nix only forwards
 # systemd.services/timers/deployment.keys of files with `enable = true`;
 # this file is a real NixOS module imported explicitly from configuration.nix.
@@ -233,7 +233,7 @@ Service-рядки (по одному на використаний варіан
     model = "whisper-large-v3-turbo";   # alias from sub-project 5 registry; budget spec §7
     computeType = "int8_float16";
   };
-  # T2 (only after SP5 gate system-cyborg PASS, spec §7):
+  # EXAMPLE only — placement is clusterops data (spec §7); add more services after the admission check:
   # services.rtSpeech.mt = { enable = true; deployRsPath = "/var/lib/rt-mt/current"; host = "0.0.0.0";
   #   openFirewall = false; device = "cuda"; model = "nllb-200-distilled-600M-ct2-int8"; computeType = "int8_float16"; };
 }
@@ -248,14 +248,14 @@ Service-рядки (по одному на використаний варіан
 ### 5.8 CUDA substituter на CUDA-хостах (`common/modules/nix/cuda-substituter.nix`)
 `rt-*-gpu` бандли (і `bench-gpu` підпроєкту 5) збираються з окремого `cudaSupport`-інстансу nixpkgs (SP2 `variant-pkgs.nix`); усі важкі CUDA-пакети є лише в `cache.nixos-cuda.org` (SP5 F7). deploy-rs будує на таргеті (`--remote-build`) як `deploy`, а звичайні користувачі не trusted (`trusted-users = root deploy`) — тому `nixConfig`/`--option extra-substituters` не діють, substituter має бути в **системних** `nix.settings`:
 ```nix
-# common/modules/nix/cuda-substituter.nix — import on CUDA hosts only (cyborg, SKTOP-NOTE27-NIXOS)
+# common/modules/nix/cuda-substituter.nix — import on every CUDA-class host
 { ... }:
 {
   nix.settings.extra-substituters = [ "https://cache.nixos-cuda.org" ];
   nix.settings.extra-trusted-public-keys = [ "cache.nixos-cuda.org:74DUi4Ye579gUqzH4ziL9IyiJBlDpMRn9MBN8oNan9M=" ];
 }
 ```
-Розкочується colmena (`colmena apply --on SKTOP-NOTE27-NIXOS`) / self-deploy `nixos-rebuild switch` (cyborg) **до першого** деплою будь-якого `rt-*-gpu` (план Task 7a). Змінює toplevel лише цих двох хостів (llama-профілі — без змін).
+Розкочується colmena (`colmena apply --on <cuda-host>`) / self-deploy `nixos-rebuild switch` **до першого** деплою будь-якого `rt-*-gpu` на цьому хості (план Task 7a). Змінює лише toplevel CUDA-хостів (llama-профілі — без змін).
 
 ## 6. Обробка помилок і явні відмови
 
@@ -269,37 +269,37 @@ Service-рядки (по одному на використаний варіан
 | `NixFile` ноди `divergent` після ручної правки | clusterops `deploy()` відмовляє (F9) → `import_infra` або Adopt у `/cluster/config/?tab=artifacts` |
 | Overlay підпроєкту 2 змінив існуючі пакети | drvPath llama/хостів змінився → Task-перевірка падає до будь-якого деплою |
 
-## 7. Розміщення і VRAM-бюджет
+## 7. Розміщення: загальна процедура (cluster-generic, overview §7 C0)
 
-**Джерело цифр — підпроєкт 5** (виміряний бюджет, overview §7 C3); початкові оцінки цього spec (десктоп ≤ 0.8 GiB, llama ≤ 5.0 GiB, «на cyborg лише ASR») **замінено**: на cyborg дисплей на Intel iGPU (kwin на NVIDIA — ~7 MiB, SP5 F14), KV llama Qwen3.5-4B Q4 @16384 ≈ 512 MiB (SP5 F15).
+**Розміщення — це дані, не дизайн.** Який сервіс на якому хості — рядки clusterops (Service × deploy targets) і per-host `services.rtSpeech.<svc>.enable`; змінюється будь-коли без змін коду чи spec. Будь-який хост може запускати будь-який сервіс у будь-якому варіанті, який підтримує його залізо. Імена хостів нижче — лише **приклади**.
 
-| Компонент (cyborg, RTX 4060 Laptop 8188 MiB) | VRAM (SP5 §4.6) |
-|---|---|
-| llama Qwen3.5-4B Q4_K_M, ctx 16384, модель завантажена (гірший випадок; `idleUnloadTimeout`) | ~3.9 GiB (ваги ~2.7 + KV 0.5 + compute ~0.4 + ctx ~0.3) |
-| `rt-asr-gpu` — `whisper-large-v3-turbo`, `int8_float16` | ~1.3 GiB |
-| `rt-mt-gpu` — `nllb-200-distilled-600M-ct2-int8`, `int8_float16` | ~0.9 GiB |
-| десктоп (Intel iGPU) | ~0 |
-| **Сума / гейт** | ~6.1 GiB; **≤ 7.4 GiB виміряно** (gate `system-cyborg`, SP5 план Task 19 Step 5) |
+### 7.1 Клас заліза → дозволені варіанти
+| Клас хоста | Варіанти | Примітка |
+|---|---|---|
+| NVIDIA (CUDA) | `rt-*-gpu`, `rt-*-cpu` | потрібен `cache.nixos-cuda.org` у системних `nix.settings` (§5.8) до першого `-gpu` деплою |
+| AMD ROCm | `rt-{asr,mt}-rocm` (experimental, лише після GO ROCm-spike SP5 Task 22 для цього GPU), `rt-*-cpu` | `rocmGfxVersion` за потреби (`HSA_OVERRIDE_GFX_VERSION`); `rt-tts-rocm` не існує |
+| CPU-only | `rt-*-cpu` | real-time ASR — лише якщо admission check (CPU RTF) пройдено; інакше batch (фаза 4) |
 
-**cyborg:** `rt-asr-gpu` (T1) **і** `rt-mt-gpu` (T2) — друге лише після PASS gate `system-cyborg` (llama завантажена + ASR + MT під 5-хв навантаженням, `nvidia-smi` ≤ 7577 MiB, жодного OOM) і повторного живого виміру після деплою (план Task 10). Драбина при FAIL (SP5 §4.6): ASR → `whisper-small`; далі MT переїжджає з cyborg (fallback нижче). TTS на cyborg — ні (VRAM-first).
+### 7.2 Модель — за класом заліза / бюджетом, не за hostname
+Defaults беруться з Python (SP5 §4.3/§4.8: `RT_DEVICE` → модель, compute type, beams). Per-host override — опціями `services.rtSpeech.<svc>.{model,computeType,extraEnv}` (alias-и реєстру SP5). Вибір за вільним бюджетом `F` пристрою — правило SP5 §4.6.
 
-**Fallback для MT (якщо gate на cyborg не пройдено):** (a) `rt-mt-gpu` @ SKTOP-NOTE27-NIXOS — якщо вимір там дає ≥ 1.5 GiB вільного при завантаженій llama (PRIME sync — десктоп теж на NVIDIA; модель/обсяг VRAM невідомі — Q2); інакше (b) `rt-mt-cpu` @ kira-kiosk (NLLB int8, `RT_NUM_THREADS=2`, ~0.9 GB RAM; SP5 §4.6 CPU-бокси).
+### 7.3 Admission check (обов'язковий для кожного нового/зміненого розміщення)
+SP5 harness `system`-gate, параметризований хостом: усі сервіси, що будуть co-located на цьому пристрої (+ llama з завантаженою моделлю, гірший випадок), під 5-хв навантаженням. Поріг: пік ≤ **90 % VRAM пристрою** (GPU) / ≤ 90 % RAM (CPU), без OOM, RTF у межах порогів SP5 §6.4. FAIL → драбина SP5 §4.6 (менша модель → CPU-варіант → інший хост). Після деплою — повторний живий вимір (`nvidia-smi` / `free`), той самий поріг.
 
-**sktop-nixos-top (CPU, relay `waw`):** `rt-tts-cpu` (Kokoro ORT на CPU, ~1.0–1.3 GB RAM). Співіснує з `llm-cpu` (ctx 4096): під час генерації llama займає ядра → можливі піки затримки TTS (ризик R-CPU).
+### 7.4 Додати / перенести сервіс
+1. Перевірити клас заліза (§7.1) і пройти admission check (§7.3) для `<host>`.
+2. `machines/<host>/modules/flake-services/rt-speech.nix`: `services.rtSpeech.<svc> = { enable = true; deployRsPath = "/var/lib/rt-<svc>/current"; host = "0.0.0.0"; openFirewall = false; device = …; }` + 2 імпорти в `configuration.nix` (§5.6); для `cuda` — імпорт `common/modules/nix/cuda-substituter.nix`.
+3. colmena `apply --on <host>` (або `nixos-rebuild switch` для self-deploy).
+4. clusterops API: Service `rt-<svc>-<variant>` (якщо ще нема) + target `<host>` (§5.5) → `generate_infra --regenerate applications/registry.nix` → commit → `import_infra`.
+5. deploy-rs `.#<host>.rt-<svc>-<variant>` → health → smoke → живий вимір (§7.3).
+6. Перенесення = додати на новому хості (1–5) → перемкнути edge-endpoint → видалити target на старому хості в clusterops + `enable = false` → регенерація registry.
 
-**kira-kiosk (CPU, direct peer):** резерв — `rt-mt-cpu` (fallback MT) або другий `rt-tts-cpu`. У початковому rollout Service не створюється.
+### 7.5 Приклади (ілюстративні, не рішення)
+- *Приклад* cyborg (RTX 4060 8188 MiB, дисплей на Intel iGPU): виміряний бюджет SP5 — llama ~3.9 + `rt-asr-gpu` (turbo) ~1.3 + `rt-mt-gpu` (NLLB CT2) ~0.9 ≈ 6.1 GiB ≤ 90 % → ASR+MT можуть бути co-located з llama.
+- *Приклад* CPU-бокс із вільними ядрами: `rt-tts-cpu` (Kokoro ORT, ~1.0–1.3 GB RAM).
+- *Приклад* ROCm iGPU (gfx90c): CPU-варіанти, доки spike не дав GO.
 
-**SKTOP-NOTE17-NIXOS (ROCm, Vega 8 gfx90c, 0.5 GiB carve-out + GTT, офіційно не підтримується ROCm; llama-rocm там повільніша за CPU):** не на критичному шляху. `rt-{asr,mt}-rocm` пакуються штатно (nixpkgs `ctranslate2.override { rocmSupport = true; }`, C1), але лишаються «experimental» з апаратних причин; деплой (`rt-mt-rocm` з `rocmGfxVersion = "9.0.0"`) — лише після GO ROCm-spike SP5 Task 22 (Q3).
-
-### Топології
-
-| Топологія | Edge (HM) | `rt-asr` | `rt-mt` | `rt-tts` | Service-рядки |
-|---|---|---|---|---|---|
-| **T1 «тільки транскрипція»** | cyborg | `rt-asr-gpu` @ cyborg (loopback) | — | — | `rt-asr-gpu` |
-| **T2 «повний переклад»** | cyborg | `rt-asr-gpu` @ cyborg | `rt-mt-gpu` @ cyborg (loopback; gate `system-cyborg`), fallback `rt-mt-gpu` @ SKTOP-NOTE27-NIXOS або `rt-mt-cpu` @ kira-kiosk | `rt-tts-cpu` @ sktop-nixos-top | + `rt-mt-gpu` (або fallback-рядок), `rt-tts-cpu` |
-| T3 «експеримент/резерв» (не в початковому rollout) | — | — | `rt-mt-rocm` @ SKTOP-NOTE17-NIXOS (після GO spike) | `rt-tts-cpu` 2-й target @ kira-kiosk | за потреби |
-
-Обґрунтування: ASR і MT — realtime-шлях на машині з мікрофоном (без мережевого RTT і relay), бюджет VRAM підтверджено вимірюванням SP5. TTS — потік аудіо назад до edge (~48 KB/s PCM16 24 kHz) → прийнятно навіть через relay, а CPU-варіант не конкурує з llama за VRAM.
+Edge (HM) може бути на будь-якій машині з мікрофоном; `rt-translator.endpoints.*` — URL обраних хостів (loopback, якщо сервіс на тому ж хості). Обґрунтування для latency: ASR — найчутливіший до RTT, тож бажано на edge-хості або direct-peer; TTS толерантний до relay.
 
 ## 8. Rollout
 
@@ -310,10 +310,10 @@ Service-рядки (по одному на використаний варіан
 4. `flake.nix` input+overlay, generic env hook, llama-міграція → **перевірка drvPath до/після** → commit.
 5. `mkRtSpeechApplication.nix`, 9 (або менше, 5.4) `applications/services/*.nix`, `common/modules/rt-speech.nix` → commit.
 5a. CUDA substituter (§5.8) на cyborg і SKTOP-NOTE27-NIXOS → `nixos-rebuild switch` / `colmena apply` → перевірка `nix config show substituters` → commit. **До** будь-якого `rt-*-gpu` деплою.
-6. Per-host `rt-speech.nix` + імпорти для T1 (cyborg) → `nix build …toplevel` → commit → `import_infra`.
+6. Per-host `rt-speech.nix` + імпорти для першого `<host>` (приклад: cyborg, `rt-asr`) → `nix build …toplevel` → commit → `import_infra`.
 7. Service `rt-asr-gpu` + target через API → `generate_infra --regenerate applications/registry.nix` → `nix flake check --no-build` → commit → `import_infra`.
-8. Деплой T1 (з контролера після `git pull` swarm-nix): `nix flake update` → commit+push `flake.lock` → `nix flake check` → `sudo nixos-rebuild switch --flake .#cyborg` (self-deploy, nix.md §5; для віддалених хостів — `colmena apply --on <node>`) → `deploy-rs --dry-activate` → `deploy-rs` (CLI або clusterops API deploy) → smoke.
-9. T2: `rt-mt-gpu` на cyborg (після PASS gate `system-cyborg` SP5; інакше fallback note27/kira-kiosk, §7) і `rt-tts-cpu` на sktop-nixos-top.
+8. Перший деплой на `<host>` (з контролера після `git pull` swarm-nix): `nix flake update` → commit+push `flake.lock` → `nix flake check` → `sudo nixos-rebuild switch --flake .#cyborg` (self-deploy, nix.md §5; для віддалених хостів — `colmena apply --on <node>`) → `deploy-rs --dry-activate` → `deploy-rs` (CLI або clusterops API deploy) → smoke.
+9. Наступні сервіси/хости — за процедурою §7.4 (admission check §7.3).
 10. Фаза B — токен (8.3).
 11. Edge HM на cyborg (5.7), e2e.
 12. Документація swarm-nix (AGENTS.md machines-таблиця, `machines/README.md`, `.claude/rules/nix.md` §2/§5 «зараз лише llm-*», `context/tasks.md`).
@@ -338,7 +338,7 @@ Colmena створює юзера `rt-<svc>`, `/var/lib/rt-<svc>`, юніт з `
 - **Build:** `nix build .#nixosConfigurations.<host>.config.system.build.toplevel` для кожного зміненого хоста; профіль rt будується на таргеті (`--remote-build`).
 - **Deploy:** `nix run .#deploy-rs -- .#cyborg.rt-asr-gpu --dry-activate`, потім справжній; `systemctl is-active rt-asr`; `journalctl -u rt-asr -n 50`.
 - **Smoke по Tailscale (з іншої машини):** `/health` = 200; `/status` `ready:true` (з очікуванням завантаження моделі); ASR `POST /v1/audio/transcriptions` з wav-файлом; MT `POST /v1/translate`; TTS `POST /v1/audio/speech` → валідний WAV; з LAN-IP — з'єднання відхилено/таймаут; у фазі B — без `Authorization` → 401, з токеном → 200, `/health` без токена → 200.
-- **VRAM:** `nvidia-smi --query-gpu=memory.used --format=csv` на cyborg з завантаженою llama (запит до llama) і активними ASR + MT ≤ 7.4 GiB (7577 MiB) — той самий поріг, що gate `system-cyborg` SP5.
+- **VRAM/RAM:** на кожному хості з rt-сервісами — живий вимір з завантаженою llama і всіма co-located сервісами під навантаженням ≤ 90 % пристрою (§7.3; той самий поріг, що SP5 `system`-gate).
 
 ## 10. Прибирання застарілого
 
@@ -360,7 +360,7 @@ Colmena створює юзера `rt-<svc>`, `/var/lib/rt-<svc>`, юніт з `
 
 1. **`pkgs.rtSpeech.lib.envLines`** — overlay додатково експонує ту саму функцію, що `lib.rtSpeech.envLines` (alias), бо registry-файли бачать лише `{ pkgs, lib }` (той самий аргумент, з якого overview обрав overlay для пакетів). Сигнатура: `envLines :: svc -> cfg -> [string]` (svc ∈ `asr|mt|tts`, cfg = `config.services.rtSpeech.<svc>`).
 2. **`openFirewall = false` на всіх хостах** — опція модуля лишається за контрактом, але інфра її не вмикає: `tailscale0` уже trusted fleet-wide (F11), другий механізм не додаємо.
-3. **Не всі 9 варіантів отримують Service** — лише ті, що мають target (T1/T2); app-файли — для всіх експортованих варіантів.
+3. **Не всі 9 варіантів отримують Service** — лише ті, що мають target (розміщення — дані clusterops, §7); app-файли — для всіх експортованих варіантів.
 4. Overview §2 називає `mergeEnvFromLlamaService` «треба узагальнити» — узагальнення зроблено hook-функцією `envLinesFor`, а не опцією в registry.
 
 ## 12. Вимоги до підпроєкту 2 (інтерфейс, від якого залежить цей план)
@@ -379,20 +379,20 @@ Colmena створює юзера `rt-<svc>`, `/var/lib/rt-<svc>`, юніт з `
 |---|---|
 | Повний `nix flake check` будує rt-бандли локально через deploy-rs activate-check (F14) — torch/CUDA години | Для eval — `nix flake check --no-build`; рішення про повний check — Q4 |
 | Збірка CUDA/torch на таргеті довга (прецедент llm-gpu timeout) | `--remote-build`; перший деплой — CLI з ручним моніторингом, не clusterops-кнопка |
-| VRAM OOM на cyborg при одночасній llama + ASR + MT | Gate `system-cyborg` SP5 (≤ 7.4 GiB) до створення `rt-mt-gpu`@cyborg, живий вимір після деплою; драбина: ASR → `whisper-small`, MT → fallback-хост; llama `idleUnloadTimeout` |
+| VRAM OOM на хості з co-located llama + rt-* | Admission check §7.3 до і після деплою; драбина SP5 §4.6 (менша модель → CPU → інший хост); llama `idleUnloadTimeout` |
 | Збірка CUDA-бандлів з сорців (немає substituter на таргеті) | §5.8 / Task 7a до першого `rt-*-gpu` деплою |
-| CPU-конкуренція TTS з llama на sktop-nixos-top (R-CPU) | Моніторинг затримки; перенос на kira-kiosk (T3) |
-| relay-латентність до sktop-nixos-top | ASR лишається loopback; TTS толерантний |
+| CPU-конкуренція rt-*-cpu з llama на спільному хості (R-CPU) | Admission check §7.3 (RTF), моніторинг; перенесення за §7.4 |
+| relay-латентність до хостів через DERP (приклад: sktop-nixos-top) | ASR бажано на edge-хості/direct-peer; TTS толерантний |
 | Контролери розходяться в ревізії rt (один не зробив `git pull`) | lock у git — єдине джерело; перевірка `locks.nodes."realtime-translation".locked.rev` у плані перед кожним деплоєм; clusterops `deploy()` уже фіксує `git_rev` swarm-nix у `DeployEvent` |
 | `config={}` clobber у `import_all` (знайдено попутно) | Виправляється тим самим пунктом 5.5.1 (не перезаписувати існуючі) |
 
 ## 14. Відкриті питання (рішення прийняті як припущення; власник може перевизначити)
 
 - **Q1** ~~Чи репо публічне?~~ Вирішено (overview §4.5a): публічне, лише `github:`-input. Відкрито лише: чи вводити обов'язкові теги `rt-vX.Y.Z` (`?ref=`) — припущення: ні, достатньо lock-піну.
-- **Q2** Яка NVIDIA-карта і скільки VRAM на SKTOP-NOTE27-NIXOS? Актуально лише для fallback MT (якщо gate на cyborg не пройдено); рішення `rt-mt-gpu`@note27 vs `rt-mt-cpu@kira-kiosk` — за вимірюванням у плані (Task 10 Step 1b).
-- **Q3** ~~Чи збирається CTranslate2-ROCm~~ — збірка штатна (nixpkgs `rocmSupport`, C1); відкрито лише, чи стабільно працює на gfx90c під `HSA_OVERRIDE_GFX_VERSION=9.0.0` (SP5 Task 22). Припущення: NOTE17 поза T1/T2.
+- **Q2** Невідомий VRAM/модель GPU на деяких хостах (приклад: SKTOP-NOTE27-NIXOS) — вирішується не тут, а admission check §7.3 при спробі розмістити там сервіс.
+- **Q3** ~~Чи збирається CTranslate2-ROCm~~ — збірка штатна (nixpkgs `rocmSupport`, C1); відкрито лише, чи стабільно працює на gfx90c під `HSA_OVERRIDE_GFX_VERSION=9.0.0` (SP5 Task 22). Припущення: ROCm-хости використовують `-cpu` до GO.
 - **Q4** Чи прийнятно, що повний `nix flake check` (правило власника перед деплоєм) тепер будує rt-бандли? Припущення: для rt-деплоїв достатньо `--no-build` + `--remote-build`; потрібне підтвердження власника.
 - **Q5** Чи має збереження/зміна Service чи target у clusterops **автоматично** перегенеровувати `applications/registry.nix` (зараз — ніхто, лише hostname rename)? Припущення: поки ручний виклик `generate_infra --regenerate`; автоматизація — окрема задача clusterops.
 - **Q6** MagicDNS vs Tailscale-IP для edge-endpoint-ів. Припущення: IP, як у llama-конфігах.
-- **Q7** Edge на kira-kiosk (має `desktop-audio.nix`)? Припущення: edge поки лише cyborg.
+- **Q7** Edge — будь-яка машина з мікрофоном і HM (приклади: cyborg, kira-kiosk); не фіксується.
 - **Q8** Чи вмикати токен (фаза B) до того, як sops-поставка має бодай один робочий прецедент у флоті? Припущення: так, rt — перший споживач; якщо хост не має pubkey-рядка — лишається у фазі A явно.

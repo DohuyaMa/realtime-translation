@@ -1,7 +1,7 @@
 # Підпроєкт 5 — Model optimization & VRAM budget (design)
 
 Дата: 2026-10-06
-Статус: **draft, делеговано** (architectural path; партнер делегував рішення, без інтерактивних питань — припущення і відкриті питання в §9). Узгоджено з іншими підпроєктами 2026-10-06 — overview §7 (C1–C3: ROCm через nixpkgs `rocmSupport`, GPU-пакування за цим spec, VRAM-бюджет cyborg за цим spec).
+Статус: **draft, делеговано** (architectural path; партнер делегував рішення, без інтерактивних питань — припущення і відкриті питання в §9). Узгоджено з іншими підпроєктами 2026-10-06 — overview §7 (C0: cluster-generic — моделі за класом заліза, admission check per host, жодного фіксованого розміщення; C1–C2: ROCm через nixpkgs `rocmSupport`, GPU-пакування за цим spec).
 Базовий документ: [`2026-10-06-distributed-speech-services-overview.md`](2026-10-06-distributed-speech-services-overview.md) (напрямок A, спільний контракт §4). Відхилення — §8.
 План: [`../plans/2026-10-06-model-optimization.md`](../plans/2026-10-06-model-optimization.md).
 
@@ -17,8 +17,8 @@
 - Nix-only: жодного pip/venv.
 
 **Критерії успіху:**
-1. Для кожного класу пристроїв (cuda 8 GB із llama, rocm iGPU, cpu) є визначений default (модель, compute type, потоки), обґрунтований вимірюванням harness'у.
-2. Сумарний пік VRAM на cyborg (llama завантажена + rt-asr + rt-mt під навантаженням) ≤ 7.4 GiB з 8 GiB.
+1. Для кожного **класу** пристроїв (cuda з різним вільним бюджетом, rocm iGPU, cpu) є визначений default (модель, compute type, потоки), обґрунтований вимірюванням harness'у.
+2. Для будь-якого хоста й набору co-located сервісів admission check (`system`-gate з `--host-profile`) дає пік ≤ 90 % VRAM/RAM пристрою без OOM (приклад: cyborg, llama + rt-asr + rt-mt, 8 GiB).
 3. Рантайм-закриття сервісів не потребує source-build torch/libnvshmem (усе з `cache.nixos.org` / `cache.nixos-cuda.org`).
 4. Моделі провізіонуються в `<stateDir>/models` з pin'ом ревізії і sha256; після провізіонування сервіс працює з `HF_HUB_OFFLINE=1`.
 
@@ -229,50 +229,28 @@ src/services/mt/ctranslate2_backend.py  # Task 12a: SP1 MtBackend поверх C
 5. `rt-models` CLI — entry point у тому ж bundle кожного сервісу (`src.services.common.models_cli:main`).
 6. `model-tools` (конвертер; `torch` CPU, `transformers`, `ctranslate2`) — **лише devShell**, не входить у bundle.
 
-### 4.6 VRAM-бюджет за хостами
+### 4.6 Бюджет і вибір моделі — за класом заліза (cluster-generic, overview §7 C0)
 
-Оцінки — до вимірювання; інтеграційні завдання плану (Phase E) замінюють їх виміряними піками і фіксують тут.
+Розміщення сервісів по хостах — дані clusterops (SP3 §7), не рішення цього spec. Тут — правила вибору **за класом заліза та вільним бюджетом**, однакові для будь-якого хоста, і admission check.
 
-**cyborg — RTX 4060 Laptop, 8188 MiB (дисплей на Intel iGPU)**
+**Вільний бюджет пристрою:** `F = 0.9·V − L − S`, де `V` — VRAM пристрою (або RAM для cpu), `L` — пік llama з завантаженою моделлю (гірший випадок; 0, якщо llama нема), `S` — піки вже co-located rt-сервісів (виміряні harness'ом).
 
-| Компонент | Варіант | VRAM (оцінка) |
-|---|---|---|
-| llama-service (коли модель завантажена) | Qwen3.5-4B Q4_K_M, ctx 16384, all layers | ~3.9 GiB (ваги ~2.7 + KV 0.5 (F15) + compute ~0.4 + ctx ~0.3) |
-| rt-asr-gpu | whisper-large-v3-turbo, int8_float16 | ~1.3 GiB |
-| rt-mt-gpu | NLLB-600M, int8_float16 | ~0.9 GiB |
-| rt-tts-cpu | Kokoro ONNX fp32, 4 потоки | 0 |
-| **Сума** | | **~6.1 GiB**, запас ≥ 1.3 GiB; **гейт: ≤ 7.4 GiB виміряно** |
-
-Драбина деградації, якщо гейт не пройдено: (1) ASR → `whisper-small` (−~0.7 GiB); (2) MT → cpu (−~0.9 GiB); (3) запропонувати інфрі llama `ctxSize` 16384 → 8192 (−256 MiB; рішення не наше). TTS → GPU лише якщо після всіх вимірів лишається ≥ 1.0 GiB.
-
-Цей бюджет — **узгоджене розміщення** (overview §7 C3): SP3 §7 ставить на cyborg `rt-asr-gpu` **і** `rt-mt-gpu` за умови PASS gate `system-cyborg` (≤ 7.4 GiB = 7577 MiB, без OOM; план Task 19 Step 5). Крок (2) драбини = SP3-fallback `rt-mt-cpu` на іншому хості (kira-kiosk) або `rt-mt-gpu` на SKTOP-NOTE27-NIXOS (за його VRAM-правилом нижче).
-
-**SKTOP-NOTE27-NIXOS — NVIDIA, VRAM невідомий (F17)**
-
-Правило вибору за виміряними `V` (total), `L` (пік llama): `F = V − L − 0.6 GiB`.
-
-| F | ASR | MT | TTS |
+| Клас / `F` | ASR | MT | TTS |
 |---|---|---|---|
-| ≥ 2.3 GiB | gpu, large-v3-turbo | gpu | cpu |
-| 1.0–2.3 GiB | gpu, small | gpu, якщо `F − 0.6 ≥ 0.9`, інакше cpu | cpu |
-| < 1.0 GiB | cpu, small | cpu | cpu |
+| cuda, `F` ≥ 2.3 GiB | gpu, `whisper-large-v3-turbo` `int8_float16` (~1.3 GiB) | gpu, NLLB CT2 `int8_float16` (~0.9 GiB) | cpu (gpu лише якщо після ASR+MT лишається ≥ 1.0 GiB) |
+| cuda, 1.0–2.3 GiB | gpu, `whisper-small` (~0.6 GiB) | gpu, якщо `F − 0.6 ≥ 0.9`, інакше cpu | cpu |
+| cuda, < 1.0 GiB | cpu, `whisper-small` | cpu | cpu |
+| rocm (iGPU, carve-out) | cpu до GO spike R1 | cpu до GO spike R1 | cpu |
+| cpu ≥ 8 потоків | `whisper-small` int8 (real-time, якщо RTF-гейт §6.4) | NLLB int8 | Kokoro ORT |
+| cpu ≤ 4 потоки | лише batch (фаза 4) | NLLB int8, `RT_NUM_THREADS=2` | Kokoro ORT |
 
-Застереження: мало RAM (~4 GB за коментарем) — CPU-варіанти ASR+MT+TTS разом (~3–3.5 GB RSS) можуть не вміститись (OQ2).
+**Admission check (обов'язковий для кожного розміщення):** `python -m scripts.bench system --host-profile <host> --gate system-host` — llama завантажена + усі сервіси, що будуть co-located, паралельно 5 хв: пік ≤ **90 % VRAM пристрою** (`nvidia-smi`/sysfs) або RAM, без OOM, RTF/латентність у порогах §6.4. Драбина при FAIL: (1) ASR → `whisper-small`; (2) MT → cpu або інший хост; (3) запропонувати інфрі менший llama `ctxSize` (рішення не наше); (4) перенести сервіс (SP3 §7.4).
 
-**SKTOP-NOTE17-NIXOS — Vega 8 iGPU (0.5 GiB carve-out + 7.5 GiB GTT), 14 GiB RAM**
-
-| Компонент | Варіант | Ресурс |
-|---|---|---|
-| llama | ROCm, ≤1 GiB GGUF | carve-out + GTT |
-| rt-asr-cpu | whisper-small int8, `RT_NUM_THREADS=4` | ~1.0 GB RAM |
-| rt-mt-cpu | NLLB-600M int8, `RT_NUM_THREADS=2` | ~0.9 GB RAM |
-| rt-tts-cpu | Kokoro ONNX, `RT_NUM_THREADS=2` | ~1.0–1.3 GB RAM (torch імпортується для misaki) |
-
-Сумарно ~3.2 GB RAM з 14 GiB. Ризик — CPU-конкуренція з інтерактивним використанням (власник свідомо тримає llama на GPU, щоб звільнити CPU) — OQ4.
-
-**CPU-бокси (kira-kiosk, sktop-nixos-top — 2-потокова llama, Tier-1)**
-
-Real-time ролі не мають. Допустимо лише batch (фаза 4): `rt-mt-cpu` (NLLB int8, `RT_NUM_THREADS=2`, ~0.9 GB RAM) і `rt-tts-cpu`. ASR — лише batch `whisper-small` int8.
+**Приклади (ілюстративні виміри/оцінки, не розміщення):**
+- *Приклад* cyborg — RTX 4060 Laptop 8188 MiB, дисплей на Intel iGPU (F14), llama Qwen3.5-4B Q4 ctx 16384 ~3.9 GiB (KV 512 MiB, F15): ASR turbo ~1.3 + MT ~0.9 → ~6.1 GiB ≤ 0.9·8 GiB → клас «cuda, F ≥ 2.3».
+- *Приклад* SKTOP-NOTE27-NIXOS — NVIDIA з невідомим VRAM (F17), мало RAM (~4 GB): клас визначає вимір (OQ2).
+- *Приклад* SKTOP-NOTE17-NIXOS — Vega 8 gfx90c (0.5 GiB carve-out + GTT, 14 GiB RAM): клас rocm → CPU-варіанти (~3.2 GB RAM на ASR+MT+TTS); ризик CPU-конкуренції (OQ4).
+- *Приклад* kira-kiosk / sktop-nixos-top — CPU-only, 2-потокова llama: клас «cpu ≤ 4 потоки».
 
 ### 4.7 Провізіонування моделей
 
@@ -364,8 +342,8 @@ Real-time ролі не мають. Допустимо лише batch (фаза 
 python -m scripts.bench asr   --model <alias|path> --device cpu|cuda|rocm --compute-type … --threads N --beam N --vad-silence-ms N --data bench-data/asr --langs uk,pl --out bench-results/<host>/<name>.json
 python -m scripts.bench mt    --model … --device … --compute-type … --beams N --data bench-data/mt --pairs uk-en,pl-en --out …
 python -m scripts.bench tts   --engine onnx|torch --model … --device … --compute-type … --voice af_heart --data bench-data/tts/sentences.txt --roundtrip-asr <alias> --out …
-python -m scripts.bench system --duration 300 --out … --gate system-cyborg   # llama завантажена + ASR + MT паралельно
-python -m scripts.bench matrix --matrix scripts/bench/matrix.yml --profile cyborg|note17|cpu-box --out-dir bench-results/<host>/
+python -m scripts.bench system --duration 300 --host-profile <host> --out … --gate system-host   # llama + усі co-located сервіси хоста паралельно; поріг 0.9·VRAM пристрою (system-cyborg — приклад-профіль)
+python -m scripts.bench matrix --matrix scripts/bench/matrix.yml --profile <hw-class-profile> --out-dir bench-results/<host>/   # приклади профілів: cyborg|note17|cpu-box
 python -m scripts.bench fetch-data --out bench-data [--hf-token-file F] [--fleurs-limit 100]
 ```
 - Кожен кейс матриці запускається в **окремому підпроцесі** (свіжий CUDA context — VRAM виміряється чесно, включно з контекстом).
@@ -392,7 +370,7 @@ python -m scripts.bench fetch-data --out bench-data [--hf-token-file F] [--fleur
 | TTS cpu (onnx fp32, 4 потоки) | RTF ≤ 0.35; first-chunk p95 ≤ 0.8 с; sanity 100 %; round-trip WER ≤ 15 % |
 | TTS cuda (onnx) | RTF ≤ 0.05; first-chunk p95 ≤ 0.25 с; VRAM ≤ 0.9 GiB |
 | TTS engine choice | onnx лишається default, якщо RTF(onnx, cpu) ≤ RTF(torch, cpu) і round-trip WER(onnx) ≤ WER(torch) + 2 п.п. |
-| Система cyborg | llama завантажена + ASR + MT під 5-хв навантаженням (паралельні запити): `nvidia-smi` used ≤ 7.4 GiB, жодного OOM |
+| Система (`system-host`, будь-який хост) | llama завантажена + усі co-located сервіси під 5-хв навантаженням: пік ≤ 90 % VRAM пристрою (або RAM), жодного OOM. Приклад `system-cyborg`: ≤ 7577 MiB (історичний профіль; генерик-поріг для 8188 MiB ≈ 7369 MiB) |
 
 WER-пороги — початкові; якщо large-v3-turbo не проходить на FLEURS, рішення (поріг vs модель) — за власником, з цифрами з `summary.md`.
 

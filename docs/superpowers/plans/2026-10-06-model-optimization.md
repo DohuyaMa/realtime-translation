@@ -25,6 +25,7 @@
 - `rt-tts` не має `rocm` (DeviceError); CT2-рушії приймають `rocm` (бекенд-рядок `cuda`).
 - Коміти: звичайні conventional-повідомлення, **без** рядків `Co-Authored-By` (правило власника репо).
 - Не чіпати старі сервіси `src/translate`, `src/whisper`, `src/tts`, `src/models` — міграція поза скоупом.
+- Cluster-generic (overview §7 C0): defaults — за класом заліза (`RT_DEVICE` + бюджет), не за hostname; хости в Phase E — **приклади** класів; admission check будь-якого розміщення — `system --host-profile <host> --gate system-host` (≤ 90 % пристрою).
 - Імена тест-файлів унікальні з префіксом `test_rt_` (у `tests/` нема `__init__.py`); виняток — Task 12a `test_svc_sp5_integration.py` (імпортує модулі SP1, тому живе в групі `test_svc_*` і запускається в `nix develop`, не в bench-shell).
 
 ## Review Focus
@@ -3465,8 +3466,11 @@ gates:
     metrics.first_chunk.p95: {max: 0.25}
     metrics.sanity_rate: {min: 1.0}
     resources.vram_peak_mib: {max: 921}
-  system-cyborg:
+  system-cyborg:   # EXAMPLE profile (historical absolute threshold for an 8 GiB card)
     resources.device_used_peak_mib: {max: 7577}
+    metrics.error_count: {max: 0}
+  system-host:     # GENERIC admission check for ANY host (overview §7 C0, SP3 §7.3)
+    resources.device_used_peak_fraction: {max: 0.90}
     metrics.error_count: {max: 0}
 ```
 
@@ -4595,7 +4599,8 @@ git commit -m "feat(bench): add asr/mt/tts runners and bench CLI with gates"
 
 **Interfaces:**
 - Consumes: `evaluate`, `gate_passed`, `load_thresholds` (Task 13); `ResourceSampler`, `auto_probe` (Task 14); `load_asr_dir`, `read_audio_16k`, `load_mt_pair` (Task 15); `host_info`, `settings_from_args` (Task 16); `WhisperEngine` (Task 10); `Ct2NllbTranslator` (Task 8); `prepare_model` (Task 5).
-- Produces: `matrix.run_matrix(matrix_path: Path, profile: str, out_dir: Path, thresholds_path: Path, runner=default_runner) -> tuple[list[dict], bool]` (пише `out_dir/summary.md`); `matrix.default_runner(cmd: list[str], out_path: Path, env: dict[str, str]) -> int`; `system_load.run(args, *, probe=None, spawn=None) -> dict` (`metrics.requests`, `metrics.error_count`, `metrics.errors`, `resources.device_used_peak_mib`).
+- Produces: `matrix.run_matrix(matrix_path: Path, profile: str, out_dir: Path, thresholds_path: Path, runner=default_runner) -> tuple[list[dict], bool]` (пише `out_dir/summary.md`); `matrix.default_runner(cmd: list[str], out_path: Path, env: dict[str, str]) -> int`; `system_load.run(args, *, probe=None, spawn=None) -> dict` (`metrics.requests`, `metrics.error_count`, `metrics.errors`, `resources.device_used_peak_mib`, **`resources.device_total_mib`, `resources.device_used_peak_fraction`** = peak/total — для generic gate `system-host`).
+- Cluster-generic (overview §7 C0): `system` приймає `--host-profile <name>` — секцію `hosts.<name>` у `matrix.yml` зі списком co-located сервісів (`asr`/`mt`/`tts` з model/device/compute) і чи вантажити llama; профілі `cyborg`/`note17`/`cpu-box` — лише **приклади**, новий хост = новий профіль-дані, без змін коду. У тест цього Task додати `test_system_reports_peak_fraction` (фейковий probe: total 8000, peak 7000 → fraction 0.875, gate `system-host` PASS; peak 7300 → FAIL).
 
 - [ ] **Step 1: Написати тест**
 
@@ -5025,7 +5030,7 @@ Expected: завершується успішно (exit 0) без мережев
 
 ---
 
-### Task 19: GPU-матриця на cyborg, системний тест і рішення за defaults
+### Task 19: GPU-матриця на `<cuda-host>` (приклад: cyborg), системний тест і рішення за defaults класу cuda
 
 **Files:**
 - Modify (лише якщо цього вимагає рішення): `src/services/tts/engines.py` (`DEFAULT_TTS_ENGINE`), `src/services/asr/whisper_engine.py` (`STREAMING_VAD`), `src/services/common/device.py` (`_DEFAULT_COMPUTE[("tts","cpu")]`, `_DEFAULT_MODEL[("asr","cuda")]`) і відповідні тести
@@ -5062,8 +5067,9 @@ Expected: JSON-відповідь `/models/load` з `model_path`; `memory.used` 
 
 - [ ] **Step 5: Системний тест (llama завантажена + ASR + MT, 5 хв)**
 
-Run: `DATE=$(date +%F); nix develop .#bench-gpu -c python -m scripts.bench system --duration 300 --out bench-results/cyborg/$DATE/system.json --gate system-cyborg`
-Expected: `gate system-cyborg: PASS` (`resources.device_used_peak_mib` ≤ 7577, `metrics.error_count` = 0). Якщо FAIL — драбина spec §4.6: повторити з `--asr-model whisper-small`; якщо PASS — змінити default (Step 7d).
+Run: `DATE=$(date +%F); H=cyborg   # приклад <cuda-host>
+nix develop .#bench-gpu -c python -m scripts.bench system --duration 300 --host-profile $H --out bench-results/$H/$DATE/system.json --gate system-host`
+Expected: `gate system-host: PASS` (`resources.device_used_peak_fraction` ≤ 0.90, `metrics.error_count` = 0). Якщо FAIL — драбина spec §4.6: повторити з `--asr-model whisper-small`; якщо PASS — змінити default (Step 7d).
 
 - [ ] **Step 6: Прийняти рішення за правилами spec (записати цифри)**
 
@@ -5089,7 +5095,7 @@ Expected: PASS.
 - §4.6 таблиця cyborg: колонку "VRAM (оцінка)" перейменувати на "VRAM (виміряно $DATE)" і вписати `L` (Step 4), `asr-turbo-cuda.resources.vram_peak_mib`, `mt-nllb-cuda.resources.vram_peak_mib`, суму і `system.resources.device_used_peak_mib`;
 - додати в кінець розділ `## 11. Виміряні результати` з копією таблиці `summary.md`, результатом `system` і рішеннями a–e (одним рядком кожне, з цифрами);
 - якщо рішення змінили defaults — оновити §4.2/§4.3/§4.4/§4.8 відповідно;
-- результат gate `system-cyborg` (PASS/FAIL, пік MiB, обрана ASR-модель) — це вхід для SP3 Task 10 Step 1 (розміщення `rt-mt-gpu` на cyborg; overview §7 C3).
+- результат gate `system-host` (PASS/FAIL, пік MiB і частка, обрані моделі) — калібрує правила класу cuda (spec §4.6); для конкретних розміщень admission check повторюється per host (SP3 Task 10 Step 2; overview §7 C0).
 
 - [ ] **Step 9: Commit**
 
@@ -5216,7 +5222,7 @@ git commit -m "feat(models): add NLLB HF reference script and record MT source/q
 
 ---
 
-### Task 21: Виміри на SKTOP-NOTE17-NIXOS, SKTOP-NOTE27-NIXOS і CPU-боксі
+### Task 21: Калібрування інших класів заліза (rocm iGPU, cuda з іншим VRAM, cpu) — на прикладних хостах (напр. SKTOP-NOTE17-NIXOS, SKTOP-NOTE27-NIXOS, CPU-бокс)
 
 **Files:**
 - Modify: `docs/superpowers/specs/2026-10-06-model-optimization-design.md` (§4.6 NOTE17/NOTE27/CPU, §11)
