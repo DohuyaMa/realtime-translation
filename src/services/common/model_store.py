@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterator, Mapping, Optional
 
-from .hf_env import configure_hf_home, read_token_file, set_offline
+from .hf_env import configure_hf_home, read_token_file, set_offline, set_online
 from .model_registry import ModelSpec, get_spec
 
 log = logging.getLogger(__name__)
@@ -244,6 +244,8 @@ class ModelSettings:
 def prepare_model(value: str, settings: ModelSettings) -> Path:
     """Loader entry point: HF_HOME -> resolve/provision -> HF_HUB_OFFLINE=1."""
     configure_hf_home(settings.model_dir)
+    if settings.download:
+        set_online()  # an earlier load left the process offline
     path = resolve_model(
         value,
         settings.store(),

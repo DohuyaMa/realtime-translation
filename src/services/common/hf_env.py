@@ -30,6 +30,14 @@ def set_offline() -> None:
         hub_constants.HF_HUB_OFFLINE = True
 
 
+def set_online() -> None:
+    """Undo set_offline so a later reload may download a new model."""
+    os.environ.pop("HF_HUB_OFFLINE", None)
+    hub_constants = sys.modules.get("huggingface_hub.constants")
+    if hub_constants is not None:
+        hub_constants.HF_HUB_OFFLINE = False
+
+
 def read_token_file(path: str | None) -> str | None:
     if not path:
         return None

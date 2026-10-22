@@ -227,3 +227,38 @@ def test_prepare_model_sets_offline(tmp_path, monkeypatch):
     assert ms.prepare_model(str(model_dir), settings) == model_dir
     assert os.environ["HF_HUB_OFFLINE"] == "1"
     assert os.environ["HF_HOME"] == str(tmp_path / "models" / "hf")
+
+
+def test_prepare_model_is_online_during_download_and_offline_after(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")  # left over from an earlier load
+    seen = []
+
+    def fake_resolve(value, store, **kwargs):
+        seen.append(os.environ.get("HF_HUB_OFFLINE"))
+        return tmp_path
+
+    monkeypatch.setattr(ms, "resolve_model", fake_resolve)
+    settings = ms.ModelSettings(
+        model_dir=tmp_path, download=True, full_verify=False, token_file=None
+    )
+    ms.prepare_model("m", settings)
+    assert seen == [None]
+    assert os.environ["HF_HUB_OFFLINE"] == "1"
+
+
+def test_prepare_model_stays_offline_when_download_disabled(tmp_path, monkeypatch):
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    seen = []
+    monkeypatch.setattr(
+        ms,
+        "resolve_model",
+        lambda value, store, **kw: seen.append(os.environ.get("HF_HUB_OFFLINE"))
+        or tmp_path,
+    )
+    settings = ms.ModelSettings(
+        model_dir=tmp_path, download=False, full_verify=False, token_file=None
+    )
+    ms.prepare_model("m", settings)
+    assert seen == ["1"]

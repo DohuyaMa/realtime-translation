@@ -52,3 +52,12 @@ def test_read_token_file_empty(tmp_path):
     f.write_text("\n")
     with pytest.raises(ValueError, match="empty"):
         hf_env.read_token_file(str(f))
+
+
+def test_set_online_clears_env_and_hub_constant(monkeypatch):
+    fake_constants = types.SimpleNamespace(HF_HUB_OFFLINE=True)
+    monkeypatch.setitem(sys.modules, "huggingface_hub.constants", fake_constants)
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    hf_env.set_online()
+    assert "HF_HUB_OFFLINE" not in os.environ
+    assert fake_constants.HF_HUB_OFFLINE is False

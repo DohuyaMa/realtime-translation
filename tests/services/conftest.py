@@ -20,24 +20,19 @@ def pytest_collection_modifyitems(config, items):
 
 @pytest.fixture(scope="session")
 def real_model_dir(tmp_path_factory):
-    """Fresh RT_MODEL_DIR for slow tests.
+    """Fresh RT_MODEL_DIR for slow tests; models download on first load.
 
-    Both pinned models are provisioned up front: the first backend load flips
-    HF_HUB_OFFLINE=1 process-wide, so a later download would fail.
+    prepare_model re-enables downloads itself, so no pre-provisioning is needed.
     """
-    from src.services.common.hf_env import configure_hf_home
-    from src.services.common.model_store import ModelSettings, resolve_model
+    from src.services.common.hf_env import set_online
 
     path = tmp_path_factory.mktemp("rt-models")
     mp = pytest.MonkeyPatch()
     for key in ("HF_HOME", "HF_HUB_OFFLINE", "HF_HUB_DISABLE_TELEMETRY"):
         mp.setenv(key, os.environ.get(key, ""))  # restored on undo
-    mp.delenv("HF_HUB_OFFLINE")
     mp.setenv("RT_MODEL_DIR", str(path))
     mp.setenv("RT_MODEL_DOWNLOAD", "true")
-    settings = ModelSettings.from_env()
-    configure_hf_home(settings.model_dir)
-    for alias in ("whisper-small", "kokoro-82m-v1.0-onnx"):
-        resolve_model(alias, settings.store(), download=True, token=settings.token())
+    set_online()
     yield path
     mp.undo()
+    set_online()
