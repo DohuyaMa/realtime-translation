@@ -5,6 +5,8 @@ from typing import Any, Dict, Optional
 
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
+    QCheckBox,
+    QLabel,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -121,11 +123,18 @@ class SegmentationTab(QWidget):
         self.soft_max_ms = self._ms(tl.soft_max_ms)
         self.hard_max_ms = self._ms(tl.hard_max_ms)
         self.end_silence_ms = self._ms(tl.end_silence_ms or 0)
+        self.end_silence_off = QCheckBox("вимкнено (None)")
+        self.end_silence_off.setChecked(tl.end_silence_ms is None)
+        self.end_silence_ms.setEnabled(tl.end_silence_ms is not None)
+        self.end_silence_off.toggled.connect(
+            lambda off: self.end_silence_ms.setEnabled(not off)
+        )
         form.addRow("transcribe: chunk_min_s", self.chunk_min_s)
         form.addRow("transcribe: chunk_max_s", self.chunk_max_s)
         form.addRow("translate: soft_max_ms", self.soft_max_ms)
         form.addRow("translate: hard_max_ms", self.hard_max_ms)
         form.addRow("translate: end_silence_ms", self.end_silence_ms)
+        form.addRow("", self.end_silence_off)
 
     @staticmethod
     def _ms(value: int) -> QSpinBox:
@@ -141,7 +150,11 @@ class SegmentationTab(QWidget):
             "segmentation.transcribe.chunk_max_s": self.chunk_max_s.value(),
             "segmentation.translate.soft_max_ms": self.soft_max_ms.value(),
             "segmentation.translate.hard_max_ms": self.hard_max_ms.value(),
-            "segmentation.translate.end_silence_ms": self.end_silence_ms.value(),
+            "segmentation.translate.end_silence_ms": (
+                None
+                if self.end_silence_off.isChecked()
+                else self.end_silence_ms.value()
+            ),
         }
 
 
@@ -151,12 +164,43 @@ def current_settings() -> EdgeSettings:
     return resolve_edge_settings(get_config_manager().get_all(), os.environ)
 
 
-def save_and_resolve(values: Dict[str, Any]) -> EdgeSettings:
+def _config_key(managed_name: str) -> str:
+    if managed_name.startswith("llm."):
+        return "services." + managed_name
+    return "services." + managed_name
+
+
+def build_settings(values: Dict[str, Any]):
+    """Resolve settings from form values without saving.
+
+    Returns (settings, values_to_save); keys managed by RT_EDGE_* are
+    dropped from values_to_save.
+    """
+    import copy
+
+    from ...core.config import get_config_manager
+
+    base = get_config_manager().get_all()
+    managed = {_config_key(m) for m in current_settings().managed}
+    to_save = {k: v for k, v in values.items() if k not in managed}
+    merged = copy.deepcopy(base)
+    for key, value in to_save.items():
+        node = merged
+        parts = key.split(".")
+        for part in parts[:-1]:
+            if not isinstance(node.get(part), dict):
+                node[part] = {}
+            node = node[part]
+        node[parts[-1]] = value
+    return resolve_edge_settings(merged, os.environ), to_save
+
+
+def save_values(to_save: Dict[str, Any]) -> EdgeSettings:
     """Persist dotted config values and return the re-resolved settings."""
     from ...core.config import get_config_manager
 
     cfg = get_config_manager()
-    for key, value in values.items():
+    for key, value in to_save.items():
         cfg.set(key, value)
     cfg.save()
     reset_runtime_config()
@@ -180,6 +224,10 @@ class EndpointsDialog(QDialog):
         tabs.addTab(self.endpoints_tab, "Ендпоінти")
         tabs.addTab(self.segmentation_tab, "Сегментація")
         layout.addWidget(tabs)
+        self.error_label = QLabel("")
+        self.error_label.setStyleSheet("color: red;")
+        self.error_label.setWordWrap(True)
+        layout.addWidget(self.error_label)
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
@@ -191,7 +239,15 @@ class EndpointsDialog(QDialog):
         return {**self.endpoints_tab.values(), **self.segmentation_tab.values()}
 
     def accept(self):
-        settings = save_and_resolve(self.values())
+        try:
+            settings, to_save = build_settings(self.values())
+            errors = settings.validate()
+        except Exception as e:  # malformed value: keep dialog open
+            errors = [str(e)]
+        if errors:
+            self.error_label.setText("; ".join(errors))
+            return
+        settings = save_values(to_save)
         self.settings_changed.emit(settings)
         super().accept()
 

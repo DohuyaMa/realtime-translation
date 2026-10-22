@@ -23,6 +23,7 @@ from .settings_dialog import SettingsButton
 class MainWindow(QMainWindow):
     """Main window for the real-time translation application using controller pattern."""
     _update_signal = Signal(object)
+    _task_done = Signal(object, object)  # callback, result
 
     def __init__(self, controller: Optional[UIController] = None):
         super().__init__()
@@ -43,6 +44,7 @@ class MainWindow(QMainWindow):
         
         # Connect UI controller callbacks
         self._update_signal.connect(self._apply_ui_update)
+        self._task_done.connect(lambda cb, res: cb(res))
         self.ui_controller.set_status_callback(self.handle_status_update)
         self.ui_controller.set_update_callback(self.update_ui_from_controller)
         
@@ -258,28 +260,49 @@ class MainWindow(QMainWindow):
             logger.error(f"Error refreshing device lists: {e}")
             self.status_manager.log_error(f"Error refreshing device lists: {e}")
         
+    def _run_async(self, fn, done):
+        """Run blocking backend work off the GUI thread; done(result) runs on it."""
+        import threading
+
+        def work():
+            try:
+                result = fn()
+            except Exception as e:
+                logger.error(f"Background task failed: {e}")
+                result = e
+            self._task_done.emit(done, result)
+
+        threading.Thread(target=work, daemon=True, name="ui-task").start()
+
     def toggle_translation(self):
-        """Toggle translation on/off."""
-        if not self.ui_controller:
+        """Toggle translation on/off without blocking the GUI thread."""
+        if not self.ui_controller or not self.translate_button.isEnabled():
             return
-            
-        success = self.ui_controller.toggle_pipeline()
-        if success:
-            # Update the button text and status based on current state
-            status = self.ui_controller.get_status()
-            is_running = status.get('running', False)
-            
-            if is_running:
-                self.translate_button.setText("Stop Translation")
-                self.status_manager.set_status('Translation active')
-                self.status_manager.log_info('Translation pipeline started')
-                self.is_translating = True
-            else:
-                self.translate_button.setText("Start Translation")
-                self.status_manager.set_status('Translation stopped')
-                self.status_manager.log_info('Translation pipeline stopped')
-                self.is_translating = False
-            
+        self.translate_button.setEnabled(False)
+        self.translate_button.setText("...")
+
+        def work():
+            ok = self.ui_controller.toggle_pipeline()
+            running = self.ui_controller.get_status().get('running', False)
+            return ok, running
+
+        self._run_async(work, self._on_toggle_done)
+
+    def _on_toggle_done(self, result):
+        self.translate_button.setEnabled(True)
+        ok, running = result if isinstance(result, tuple) else (False, self.is_translating)
+        if not ok:
+            err = self.ui_controller.last_error() or 'unknown error'
+            self.status_manager.log_error(f'Pipeline toggle failed: {err}')
+        else:
+            self.is_translating = bool(running)
+            msg = 'Translation active' if running else 'Translation stopped'
+            self.status_manager.set_status(msg)
+            self.status_manager.log_info(msg)
+        self.translate_button.setText(
+            "Stop Translation" if self.is_translating else "Start Translation"
+        )
+
     def toggle_always_on_top(self, state):
         """Toggle always-on-top window state."""
         flags = self.windowFlags()
@@ -300,7 +323,9 @@ class MainWindow(QMainWindow):
         if lang_code.lower() == 'auto':
             lang_code = 'auto'
             
-        self.ui_controller.set_languages(lang_code)
+        self._run_async(
+            lambda: self.ui_controller.set_languages(lang_code), lambda _r: None
+        )
     
     def on_input_device_changed(self, text):
         """Handle input device selection change."""
@@ -368,24 +393,31 @@ class MainWindow(QMainWindow):
             logger.error(f"Cannot resolve LLM source: {e}")
 
     def on_refresh_requested(self):
-        """Force a health poll of the remote services."""
-        if self.ui_controller:
-            self.ui_controller.refresh_services()
-            self.status_manager.log_info('Service health refreshed')
+        """Force a health poll of the remote services (off the GUI thread)."""
+        if not self.ui_controller:
+            return
+        self._run_async(
+            self.ui_controller.refresh_services,
+            lambda _r: self.status_manager.log_info('Service health refreshed'),
+        )
 
     def on_general_settings_changed(self, settings):
-        """Apply EdgeSettings saved from the endpoints dialog."""
+        """Apply EdgeSettings saved from the endpoints dialog (async)."""
         if not self.ui_controller or not isinstance(settings, EdgeSettings):
             return
         self.service_status_panel.llm_source = settings.llm.source()
-        if self.ui_controller.reconfigure_services(settings):
-            self.status_manager.log_info("Settings applied successfully")
-            self._update_language_combo(
-                self.source_lang_combo, settings.source_language
-            )
-        else:
-            err = self.ui_controller.last_error() or "unknown error"
-            self.status_manager.log_error(f"Settings rejected: {err}")
+
+        def done(ok):
+            if ok is True:
+                self.status_manager.log_info("Settings applied successfully")
+                self._update_language_combo(
+                    self.source_lang_combo, settings.source_language
+                )
+            else:
+                err = self.ui_controller.last_error() or "unknown error"
+                self.status_manager.log_error(f"Settings rejected: {err}")
+
+        self._run_async(lambda: self.ui_controller.reconfigure_services(settings), done)
 
     def on_settings_changed(self, settings):
         """Handle settings changes from the settings dialog - legacy method."""
