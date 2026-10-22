@@ -1,3 +1,5 @@
+import dataclasses
+
 import pytest
 
 from src.services.common.env import (
@@ -17,17 +19,21 @@ from src.services.common.settings import (
 )
 
 
+class AsrSettings(BaseSettings):
+    BACKEND_ENV = "RT_ASR_BACKEND"
+
+
 def _base(env):
-    return BaseSettings(
+    return AsrSettings(
         **base_from_env(
             env,
             service="rt-asr",
-            backend_key="RT_ASR_BACKEND",
             backends=("faster-whisper", "fake"),
             default_backend="faster-whisper",
             default_model="small",
             compute_cpu="int8",
             compute_gpu="float16",
+            settings_cls=AsrSettings,
         )
     )
 
@@ -121,22 +127,18 @@ def test_config_state_from_env():
 
 
 def test_env_keys_cover_every_env_backed_field():
-    assert BaseSettings.ENV_KEYS == {
-        "host": "RT_HOST",
-        "port": "RT_PORT",
-        "device": "RT_DEVICE",
-        "model": "RT_MODEL",
-        "compute_type": "RT_COMPUTE_TYPE",
-        "model_dir": "RT_MODEL_DIR",
-        "api_token_file": "RT_API_TOKEN_FILE",
-        "log_level": "RT_LOG_LEVEL",
-        "max_pending": "RT_MAX_PENDING",
-        "config_state": "RT_CONFIG_STATE",
-    }
+    fields = {f.name for f in dataclasses.fields(AsrSettings)} - {"service"}
+    assert set(AsrSettings.env_keys()) == fields
+    assert AsrSettings.env_keys()["backend"] == "RT_ASR_BACKEND"
 
 
-def test_base_bootstrap_fields():
-    assert BaseSettings.bootstrap_fields() == {
+def test_tunable_and_reload_fields_have_env_keys():
+    keys = set(AsrSettings.env_keys())
+    assert (AsrSettings.TUNABLE_FIELDS | AsrSettings.RELOAD_FIELDS) <= keys
+
+
+def test_bootstrap_fields():
+    assert AsrSettings.bootstrap_fields() == {
         "host",
         "port",
         "api_token_file",
@@ -144,3 +146,40 @@ def test_base_bootstrap_fields():
         "config_state",
         "max_pending",
     }
+
+
+def test_base_without_backend_env_is_rejected():
+    with pytest.raises(TypeError):
+        BaseSettings.bootstrap_fields()
+    with pytest.raises(TypeError):
+        base_from_env(
+            {},
+            service="rt-asr",
+            backends=("fake",),
+            default_backend="fake",
+            default_model="m",
+            compute_cpu="int8",
+            compute_gpu="float16",
+        )
+
+
+def test_base_from_env_ignores_os_environ(monkeypatch):
+    monkeypatch.setenv("RT_PORT", "1")
+    assert _base({}).port == 8091
+
+
+def test_base_from_env_uses_subclass_env_keys():
+    class Custom(AsrSettings):
+        ENV_KEYS = {**BaseSettings.ENV_KEYS, "host": "RT_CUSTOM_HOST"}
+
+    kw = dict(
+        service="rt-asr",
+        backends=("fake",),
+        default_backend="fake",
+        default_model="m",
+        compute_cpu="int8",
+        compute_gpu="float16",
+        settings_cls=Custom,
+    )
+    assert base_from_env({"RT_CUSTOM_HOST": "h"}, **kw)["host"] == "h"
+    assert base_from_env({"RT_HOST": "x"}, **kw)["host"] == "127.0.0.1"

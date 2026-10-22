@@ -47,9 +47,10 @@ class BaseSettings:
     max_pending: int
     config_state: Optional[str] = None
 
-    # field -> env key. "backend" is service specific (RT_<SVC>_BACKEND), so
-    # each service's settings class adds it; base_from_env receives that key.
-    ENV_KEYS: ClassVar[Dict[str, str]] = {
+    # field -> env key, except "backend": its key is service specific, so
+    # subclasses set BACKEND_ENV (e.g. "RT_ASR_BACKEND"). Always read the full
+    # mapping through env_keys().
+    ENV_KEYS: ClassVar[Mapping[str, str]] = {
         "host": "RT_HOST",
         "port": "RT_PORT",
         "device": "RT_DEVICE",
@@ -62,16 +63,32 @@ class BaseSettings:
         "config_state": "RT_CONFIG_STATE",
     }
     # Changeable at runtime without reloading the model.
-    TUNABLE_FIELDS: ClassVar[frozenset] = frozenset({"log_level"})
+    BACKEND_ENV: ClassVar[Optional[str]] = None
+    TUNABLE_FIELDS: ClassVar[frozenset[str]] = frozenset({"log_level"})
     # Changeable at runtime, but the model has to be reloaded.
-    RELOAD_FIELDS: ClassVar[frozenset] = frozenset(
+    RELOAD_FIELDS: ClassVar[frozenset[str]] = frozenset(
         {"backend", "model", "device", "compute_type"}
     )
 
     @classmethod
-    def bootstrap_fields(cls) -> frozenset:
+    def env_keys(cls) -> Dict[str, str]:
+        """Field -> env key for every env-backed field (single accessor)."""
+        keys = dict(cls.ENV_KEYS)
+        if cls.BACKEND_ENV is not None:
+            keys["backend"] = cls.BACKEND_ENV
+        return keys
+
+    @classmethod
+    def bootstrap_fields(cls) -> frozenset[str]:
         """Env-backed fields that can only change via restart."""
-        return frozenset(cls.ENV_KEYS) - cls.TUNABLE_FIELDS - cls.RELOAD_FIELDS
+        keys = frozenset(cls.env_keys())
+        missing = (cls.TUNABLE_FIELDS | cls.RELOAD_FIELDS) - keys
+        if missing:
+            raise TypeError(
+                f"{cls.__name__}: no env key for {sorted(missing)}"
+                " (set BACKEND_ENV?)"
+            )
+        return keys - cls.TUNABLE_FIELDS - cls.RELOAD_FIELDS
 
     @property
     def is_gpu(self) -> bool:
@@ -87,19 +104,21 @@ def base_from_env(
     env: Mapping[str, str],
     *,
     service: str,
-    backend_key: str,
     backends: Sequence[str],
     default_backend: str,
     default_model: str,
     compute_cpu: str,
     compute_gpu: str,
+    settings_cls: type[BaseSettings] = BaseSettings,
 ) -> Dict[str, Any]:
     """Pure function of ``env``; no os.environ access."""
-    keys = BaseSettings.ENV_KEYS
+    keys = settings_cls.env_keys()
+    if "backend" not in keys:
+        raise TypeError(f"{settings_cls.__name__}.BACKEND_ENV is not set")
     device = env_choice(env, keys["device"], "cpu", DEVICES)
     return dict(
         service=service,
-        backend=env_choice(env, backend_key, default_backend, backends),
+        backend=env_choice(env, keys["backend"], default_backend, backends),
         host=env_str(env, keys["host"], "127.0.0.1"),
         port=env_int(
             env,
