@@ -1,80 +1,56 @@
-# Real-Time Translator Configuration
+# Real-Time Translator: edge configuration (~/.config/real-time-translator/config.yml)
+# Precedence: RT_EDGE_* environment > this file > defaults.
+
+services:
+  mode: auto                    # auto | transcribe | translate (auto: translate iff LLM source and tts_urls set)
+  asr_urls: ["http://127.0.0.1:8091"]   # rt-asr endpoints (least-pending pick)
+  tts_urls: []                  # rt-tts endpoints (required for translate)
+  api_token_file: null          # bearer token file for rt-* (never the token itself)
+  source_language: auto         # auto | pl | uk | ru | en
+  timeouts:
+    connect_s: 3
+    asr_s: 30
+    tts_s: 30
+  llm:
+    # Lease mode (primary): Django hands out an llama worker
+    django_urls: []
+    django_token_file: null     # user DRF token file
+    service: null               # preferred worker name; null = Django picks
+    lease_ttl_s: 60             # 15..300
+    # Dev mode (used when django_urls is empty): local llama-server / OpenAI-compatible
+    direct_url: null            # e.g. "http://127.0.0.1:8080"
+    direct_token_file: null
+    model: local
+    max_tokens_cap: 512
+    temperature: 0.1
+    context_pairs: 3
+    timeout_s: 15
+
+segmentation:
+  translate:                    # SegmenterConfig fields (phrase-sized segments)
+    threshold: 0.5
+    min_speech_ms: 400
+    end_silence_ms: 700
+    soft_max_ms: 8000
+    soft_silence_ms: 250
+    hard_max_ms: 20000
+    lookback_ms: 1500
+    preroll_ms: 300
+  transcribe:                   # long chunks, chunk_max_s <= 900
+    chunk_min_s: 300
+    chunk_max_s: 600
+    soft_silence_ms: 500
+    lookback_ms: 5000
+    keep_silence_ms: 2000
 
 audio:
-  # Audio processing settings
   sample_rate: 16000
   chunk_size: 1024
-  channels: 1
   use_virtual_devices: true
-  
-  # Audio detection settings
-  silence_threshold: 0.01
-  min_speech_duration: 0.1
-  max_speech_duration: 3.0
-  
-  # Buffer settings
-  input_buffer_size: 4096
-  output_buffer_size: 4096
-
-translation:
-  # Language settings
-  source_lang: "auto"  # auto, uk (Ukrainian), pl (Polish)
-  target_lang: "en"    # English
-
-  # Whisper model settings
-  whisper_model: "tiny"  # tiny, base, small, medium, large
-  whisper_device: "cuda"   # cpu, cuda
-
-  # Batch processing
-  max_queue_size: 10
-
-models:
-  whisper:
-    beam_size: 5
-    temperature: 0.0
-    initial_prompt: ""
-  translate:
-    num_beams: 4
-    repetition_penalty: 1.2
-    max_length: 200
-
-speech:
-  # TTS settings
-  tts_engine: "kokoro"     # kokoro, coqui
-  tts_device: "cuda"       # cpu, cuda
-  tts_voice: "am_adam"    # Kokoro voice: af_heart, af_bella, af_nicole, am_adam, am_liam
-  tts_speed: 1.0
-  tts_pitch: 0.0
-  tts_energy: 1.0
-  
-  # Speech processing
-  use_noise_reduction: true
-  use_echo_cancellation: true
-  auto_gain: true
 
 ui:
-  # Window settings
   minimize_to_tray: false
   start_minimized: false
-  always_on_top: false
-  
-  # Display settings
-  show_audio_levels: true
-  update_interval_ms: 100
-  
-  # Theme
-  theme: "system"  # light, dark, system
 
 logging:
-  # Logging settings
-  level: "INFO"  # DEBUG, INFO, WARNING, ERROR
-  log_to_file: true
-  max_log_size: "10MB"
-  keep_logs_days: 7
-
-system:
-  # Performance settings
-  num_threads: 4
-  batch_size: 16
-  use_gpu: true
-  gpu_memory_limit: "4GB"
+  level: "INFO"

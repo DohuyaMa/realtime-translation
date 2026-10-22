@@ -32,42 +32,11 @@ class ConfigManager:
             },
             'translation': {
                 'source_lang': 'auto',
-                'target_lang': 'en',
-                'whisper_model': 'medium'
-            },
-            'wyoming': {
-                'use_wyoming': False,
-                'host': 'localhost',
-                'port': 10300
+                'target_lang': 'en'
             },
             'ui': {
                 'minimize_to_tray': True,
                 'start_minimized': False
-            },
-            'models': {
-                'whisper': {
-                    'backend': 'local',
-                    'model': 'medium',
-                    'device': 'cuda',
-                    'compute_type': 'float16',
-                    'beam_size': 5,
-                    'temperature': 0.0,
-                    'initial_prompt': '',
-                },
-                'translate': {
-                    'model': 'Helsinki-NLP/opus-mt-uk-en',
-                    'device': 'cuda',
-                    'num_beams': 4,
-                    'repetition_penalty': 1.2,
-                    'max_length': 200,
-                },
-                'tts': {
-                    'engine': 'kokoro',
-                    'model': 'hexgrad/Kokoro-82M',
-                    'voice': 'af_heart',
-                    'device': 'cuda',
-                    'speed': 1.0,
-                },
             }
         }
         
