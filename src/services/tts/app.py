@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
-from typing import Callable, Dict, Optional, Sequence, Union
+from typing import Callable, Mapping, Optional, Sequence, Union
 
 from fastapi import FastAPI
 
@@ -11,18 +12,9 @@ from ..common.app import LifespanHook, create_service_app
 from ..common.auth import load_token
 from ..common.runtime import ServiceRuntime
 from ..common.runtime_config import RuntimeConfig
-from ..common.settings import render_env_value
 from .backend import TtsBackend, make_backend
 from .http import build_http_router
 from .settings import TtsSettings
-
-
-def _settings_env(settings: TtsSettings) -> Dict[str, str]:
-    """Env that reproduces ``settings`` (bootstrap for the runtime config)."""
-    return {
-        key: render_env_value(getattr(settings, field))
-        for field, key in TtsSettings.env_keys().items()
-    }
 
 
 def create_app(
@@ -30,13 +22,13 @@ def create_app(
     backend_factory: Optional[Callable[[], TtsBackend]] = None,
     lifespan_hooks: Sequence[LifespanHook] = (),
     state_path: Optional[Union[str, Path]] = None,
+    bootstrap_env: Optional[Mapping[str, str]] = None,
 ) -> FastAPI:
-    settings = settings or TtsSettings.from_env()
+    env = os.environ if bootstrap_env is None else bootstrap_env
+    settings = settings or TtsSettings.from_env(env)
     token = load_token(settings.api_token_file)
     state = state_path or settings.config_state
-    config = RuntimeConfig(
-        TtsSettings, _settings_env(settings), Path(state) if state else None
-    )
+    config = RuntimeConfig(TtsSettings, env, Path(state) if state else None)
     config.restore()
     runtime = ServiceRuntime(
         settings.service,

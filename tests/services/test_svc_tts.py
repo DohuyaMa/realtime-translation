@@ -19,7 +19,12 @@ ROOT = Path(__file__).resolve().parents[2]
 def make(backend=None, state_path=None, **env):
     settings = TtsSettings.from_env({"RT_TTS_BACKEND": "fake", **env})
     backend = backend or FakeTtsBackend()
-    app = create_app(settings, backend_factory=lambda: backend, state_path=state_path)
+    app = create_app(
+        settings,
+        backend_factory=lambda: backend,
+        state_path=state_path,
+        bootstrap_env={"RT_TTS_BACKEND": "fake", **env},
+    )
     return app, backend
 
 
@@ -162,7 +167,8 @@ def test_tts_service_never_imports_sounddevice():
         "from fastapi.testclient import TestClient\n"
         "from src.services.tts.app import create_app\n"
         "from src.services.tts.settings import TtsSettings\n"
-        "app = create_app(TtsSettings.from_env({'RT_TTS_BACKEND': 'fake'}))\n"
+        "env = {'RT_TTS_BACKEND': 'fake'}\n"
+        "app = create_app(TtsSettings.from_env(env), bootstrap_env=env)\n"
         "with TestClient(app) as c:\n"
         "    app.state.runtime.wait_ready(5)\n"
         "    r = c.post('/v1/audio/speech', json={'input': 'hi'})\n"
@@ -202,3 +208,14 @@ def test_sample_rate_differs_from_backend_native_rate_is_resampled():
     assert r.headers["x-sample-rate"] == "16000"
     # 0.1 s of audio at the native 48 kHz -> 1600 samples at 16 kHz
     assert len(r.content) == 1600 * 2
+
+
+def test_config_bootstrap_reflects_only_given_env(tmp_path):
+    app, _ = make(state_path=tmp_path / "state.json", RT_TTS_SPEED="1.5")
+    with running(app) as client:
+        client.post("/config", json={"version": 1, "values": {"voice": "am_adam"}})
+        body = client.get("/config").json()
+    assert body["values"]["voice"] == "am_adam"
+    assert body["bootstrap"]["speed"] == 1.5
+    assert body["bootstrap"]["voice"] == "af_heart"  # not in env -> default
+    assert body["source"]["voice"] == "override"
