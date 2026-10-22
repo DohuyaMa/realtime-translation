@@ -248,6 +248,39 @@ def test_submit_iter_factory_exception(worker):
     assert worker.pending == 0
 
 
+def test_submit_iter_on_item_stop_iteration_is_an_error(worker):
+    cleaned, made = [], []
+
+    def gen():
+        try:
+            yield 1
+            yield 2
+        finally:
+            cleaned.append(True)
+
+    def factory():
+        g = gen()
+        made.append(g)
+        return g
+
+    def on_item(item):
+        raise StopIteration
+
+    fut = worker.submit_iter(factory, on_item=on_item)
+    assert isinstance(fut.exception(5), StopIteration)
+    assert cleaned == [True]
+    assert inspect.getgeneratorstate(made[0]) == inspect.GEN_CLOSED
+    assert worker.pending == 0
+
+
+def test_submit_iter_factory_stop_iteration_is_an_error(worker):
+    def factory():
+        raise StopIteration
+
+    assert isinstance(worker.submit_iter(factory).exception(5), StopIteration)
+    assert worker.pending == 0
+
+
 def test_submit_iter_pending_counts_one_slot():
     w = InferenceWorker(max_pending=1)
     w.start()

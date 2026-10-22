@@ -184,18 +184,21 @@ class InferenceWorker:
             self._done()
             job.fut.set_exception(CancelledJob())
             return
+        # Only next() may finish the job via StopIteration; a StopIteration
+        # leaking from the factory or on_item is an error like any other.
         try:
             if job.gen is None:
                 job.gen = job.factory(*job.args, **job.kwargs)
-            item = next(job.gen)
+            try:
+                item = next(job.gen)
+            except StopIteration:
+                self._done()
+                job.fut.set_result(job.items)
+                return
             if job.on_item is not None:
                 job.on_item(item)
-        except StopIteration:
-            self._done()
-            job.fut.set_result(job.items)
-            return
         except Exception as exc:  # noqa: BLE001 — propagated to the caller
-            logger.debug("inference generator failed: {}", exc)
+            logger.debug("inference generator failed: {!r}", exc)
             _close(job.gen)
             self._done()
             job.fut.set_exception(exc)
