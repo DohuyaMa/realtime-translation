@@ -86,8 +86,11 @@ class VadStream:
             self._process(out)
         return out
 
-    def flush(self) -> Segment | None:
-        """Process the zero-padded remainder, then flush the segmenter."""
+    def flush(self) -> list[Segment]:
+        """Process the zero-padded remainder, then flush the segmenter.
+
+        Returns every segment emitted on the way, in order, then the tail.
+        """
         out: list[Segment] = []
         # Samples after the ctx left-context are all unprocessed real input.
         windows = -(-(self._buf.size - self._ctx) // self._frame)
@@ -96,7 +99,9 @@ class VadStream:
         for _ in range(windows):
             self._process(out)
         tail = self._segmenter.flush()
-        return tail if tail is not None else (out[-1] if out else None)
+        if tail is not None:
+            out.append(tail)
+        return out
 
     def reconfigure(self, cfg: SegmenterConfig) -> None:
         self._segmenter.reconfigure(cfg)

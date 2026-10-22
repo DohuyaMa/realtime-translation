@@ -66,7 +66,7 @@ def test_flush_after_stop_returns_tail():
     for i in range(0, len(sig), 2048):
         stream.feed_block(sig[i : i + 2048])
     tail = stream.flush()
-    assert tail is not None and len(tail.audio) > 0
+    assert len(tail) == 1 and len(tail[0].audio) > 0
 
 
 def test_reconfigure_switches_mode():
@@ -79,7 +79,7 @@ def test_reconfigure_switches_mode():
     # translate mode would have ended the phrase after 0.7 s of silence;
     # transcribe mode keeps accumulating until flush.
     assert out == []
-    assert stream.flush() is not None
+    assert len(stream.flush()) == 1
 
 
 def test_last_level_is_block_rms():
@@ -100,3 +100,24 @@ def test_energy_fallback_when_silero_missing(monkeypatch):
     vad = make_vad()
     assert vad(np.zeros(512, dtype=np.int16)) == 0.0
     assert vad(np.full(512, 10000, dtype=np.int16)) == 1.0
+
+
+def test_flush_keeps_all_segments_from_padded_remainder():
+    cfg = SegmenterConfig(
+        min_speech_ms=64,
+        soft_max_ms=160,
+        soft_silence_ms=64,
+        hard_max_ms=192,
+        lookback_ms=96,
+        preroll_ms=64,
+    )
+    stream = VadStream(lambda w: 1.0, cfg, RATE)
+    n = 1536 * 20 + 700  # constant speech; remainder is a partial frame
+    emitted = stream.feed_block(np.full(n, 0.3, dtype=np.float32))
+    flushed = stream.flush()
+    allsegs = emitted + flushed
+    assert flushed
+    ends = [s.end_s for s in allsegs]
+    assert ends == sorted(ends)
+    total = sum(len(s.audio) for s in allsegs)
+    assert total >= 21 * 512  # 20 full windows plus the padded remainder
