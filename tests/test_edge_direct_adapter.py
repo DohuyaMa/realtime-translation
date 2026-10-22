@@ -4,6 +4,7 @@ import pytest
 
 from src.adapters import direct_adapter as da
 from src.adapters.direct_adapter import DirectAdapter
+from src.clients import LeaseKeeper
 from src.core.runtime import EdgeSettings, LlmSettings
 
 VALID = EdgeSettings(
@@ -19,11 +20,13 @@ class FakeTS:
     def __init__(self, settings, **kw):
         self.settings = settings
         self.started = False
+        self.is_running = False
         self.cleaned = False
         self.applied = []
         self.stops = 0
         self.last_error = None
         self.start_ok = True
+        self.rebuild = False
         self.pools = object()
         self.llm = object()
         self.llm_target = None
@@ -32,18 +35,22 @@ class FakeTS:
         FakeTS.instances.append(self)
 
     def start(self):
-        self.started = self.start_ok
+        self.started = self.is_running = self.start_ok
         if not self.start_ok:
             self.last_error = "llm: lease denied"
         return self.start_ok
 
     def stop(self):
         self.stops += 1
-        self.started = False
+        self.started = self.is_running = False
 
     def apply_settings(self, settings):
         self.applied.append(settings)
         self.settings = settings
+        if self.rebuild:
+            self.pools = object()
+            if self.started:
+                self.start()
 
     def get_stats(self):
         return {"running": self.started, "lease": {"state": "held"}}
@@ -205,3 +212,49 @@ def test_preflight_failure_mentions_home_manager(monkeypatch):
     monkeypatch.setattr(da.PipeWirePreflight, "check", staticmethod(lambda: False))
     with pytest.raises(RuntimeError, match="virtualSinks"):
         DirectAdapter(settings=VALID, translation_system_factory=FakeTS)
+
+
+def test_monitor_started_and_stopped_with_pipeline():
+    a = adapter(VALID)
+    a.start_pipeline()
+    assert a._monitor.running is True
+    a.stop_pipeline()
+    assert a._monitor.running is False
+
+
+def test_monitor_stops_even_if_stop_raises():
+    a = adapter(VALID)
+    a.start_pipeline()
+    a.translation_system.stop = lambda: 1 / 0
+    assert a.stop_pipeline() is False
+    assert a._monitor.running is False
+
+
+def test_lease_keeper_target_passed_to_monitor():
+    a = adapter(VALID)
+    ts = FakeTS.instances[-1]
+    ts.llm_target = object.__new__(LeaseKeeper)
+    a.refresh_services()
+    assert a._monitor.args[2] is ts.llm_target
+
+
+def test_monitor_follows_rebuild_while_running():
+    a = adapter(VALID)
+    a.start_pipeline()
+    ts = FakeTS.instances[-1]
+    old = a._monitor
+    ts.rebuild = True
+    assert a.reconfigure_services(VALID) is True
+    assert a._monitor is not old and old.running is False
+    assert a._monitor.running is True and a._monitor.args[0] is ts.pools
+
+
+def test_reconfigure_failed_restart_reports_error():
+    a = adapter(VALID)
+    a.start_pipeline()
+    ts = FakeTS.instances[-1]
+    ts.rebuild = True
+    ts.start_ok = False
+    assert a.reconfigure_services(VALID) is False
+    assert a.last_error == "llm: lease denied"
+    assert a._monitor.running is False

@@ -66,8 +66,11 @@ class DirectAdapter:
     def _health(self):
         """Health monitor bound to the system's current backends."""
         ts = self.translation_system
-        key = (id(ts.pools), id(ts.llm), id(ts.llm_target))
-        if self._monitor is None or key != self._monitor_key:
+        key = (ts.pools, ts.llm, ts.llm_target)
+        stale = self._monitor_key is None or any(
+            a is not b for a, b in zip(key, self._monitor_key)
+        )
+        if self._monitor is None or stale:
             was_running = bool(self._monitor and self._monitor_running)
             if self._monitor is not None:
                 self._monitor.stop()
@@ -113,11 +116,12 @@ class DirectAdapter:
     def stop_pipeline(self) -> bool:
         try:
             self.translation_system.stop()
-            self._stop_health()
             return True
         except Exception as e:
             logger.exception("Failed to stop pipeline: {}", e)
             return False
+        finally:
+            self._stop_health()
 
     def reconfigure_services(self, settings: EdgeSettings) -> bool:
         errors = settings.validate()
@@ -131,7 +135,15 @@ class DirectAdapter:
             self.last_error = str(e)
             logger.exception("Failed to apply settings: {}", e)
             return False
+        was_running = self._monitor_running
         self.settings = settings
+        ts = self.translation_system
+        if was_running and not ts.is_running:
+            self.last_error = ts.last_error or "restart failed"
+            self._stop_health()
+            return False
+        if was_running:
+            self._health()
         self.last_error = None
         logger.info("Speech services reconfigured: mode={}", settings.mode)
         return True
