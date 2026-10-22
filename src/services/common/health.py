@@ -18,6 +18,8 @@ class VersionedConfig(Protocol):
 
     def effective(self) -> Mapping[str, Any]: ...
 
+    def current(self) -> BaseSettings: ...
+
 
 def build_health_router(
     runtime: ServiceRuntime,
@@ -34,13 +36,14 @@ def build_health_router(
     @router.get("/status")
     async def status() -> dict:
         ready = runtime.state is ModelState.READY
+        live = config.current() if config is not None else settings
         return {
             "service": settings.service,
             "version": SERVICE_VERSION,
-            "device": settings.device,
-            "backend": settings.backend,
+            "device": live.device,
+            "backend": live.backend,
             "model": {
-                "id": settings.model,
+                "id": live.model,
                 "loaded": runtime.backend is not None,
                 "state": runtime.state.value,
                 "load_seconds": runtime.load_seconds,

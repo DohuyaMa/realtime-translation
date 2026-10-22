@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
-from typing import Callable, Optional, Sequence
+from typing import Any, Callable, Optional, Sequence
 
 from fastapi import APIRouter, Depends, FastAPI
 
@@ -11,6 +11,7 @@ from .auth import make_bearer_dependency
 from .errors import install_error_handlers
 from .gpu import VramProbe
 from .health import VersionedConfig, build_health_router
+from .runtime_config import build_config_router
 from .runtime import ServiceRuntime
 from .settings import BaseSettings
 from .version import SERVICE_VERSION
@@ -29,6 +30,7 @@ def create_service_app(
     lifespan_hooks: Sequence[LifespanHook] = (),
     vram: Optional[VramProbe] = None,
     config: Optional[VersionedConfig] = None,
+    on_reload: Optional[Callable[[Any], None]] = None,
 ) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -52,7 +54,15 @@ def create_service_app(
         )
     )
 
-    v1 = APIRouter(prefix="/v1", dependencies=[Depends(make_bearer_dependency(token))])
+    auth = [Depends(make_bearer_dependency(token))]
+    if config is not None:
+        reload_cb = on_reload or (lambda _: None)
+        app.include_router(
+            build_config_router(config, reload_cb),  # type: ignore[arg-type]
+            dependencies=auth,
+        )
+
+    v1 = APIRouter(prefix="/v1", dependencies=auth)
     for router in routers:
         v1.include_router(router)
     app.include_router(v1)

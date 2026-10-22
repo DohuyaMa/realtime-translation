@@ -190,6 +190,9 @@ def test_full_queue_returns_503_server_busy():
 
 
 class StubConfig:
+    def current(self):
+        return _settings(backend="reloaded", device="cuda", model="new-model")
+
     def effective(self):
         return {"values": {}, "version": 7}
 
@@ -207,7 +210,11 @@ def test_status_has_pending_and_config_version():
     app, runtime = _app(GatedBackend(), config=config)
     with TestClient(app) as client:
         assert runtime.wait_ready(5)
-        assert client.get("/status").json()["config_version"] == 7
+        status = client.get("/status").json()
+        assert status["config_version"] == 7
+        assert status["backend"] == "reloaded"
+        assert status["device"] == "cuda"
+        assert status["model"]["id"] == "new-model"
         assert app.state.config is config
 
 
