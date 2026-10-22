@@ -75,7 +75,7 @@ def test_soft_cut_in_middle_of_pause_and_tail_carried():
     assert [s.reason for s in segs] == ["soft"]
     assert segs[0].end_s == pytest.approx(264 * W)
     assert window_ids(segs[0]) == list(range(264))
-    # the silent tail (264..268) becomes the next segment's pre-roll
+    # the silent tail stays pending as a continuation of the soft segment
     rest = seg.flush()
     assert rest.start_s == segs[0].end_s
     assert window_ids(rest) == list(range(264, 309))
@@ -116,6 +116,67 @@ def test_hard_cut_samples_identity():
     segs = feed_indexed(seg, [0.9] * 700 + [0.0] * 30)
     ids = [i for s in segs for i in window_ids(s)]
     assert ids == list(range(709))
+
+
+def ids_of(segs):
+    return [i for s in segs for i in window_ids(s)]
+
+
+def test_short_word_after_hard_cut_is_kept():
+    # all probs tie -> cut before window 624; the speaker stops 384 ms later
+    seg = PauseSegmenter(SegmenterConfig.translate())
+    segs = feed_indexed(seg, [0.9] * 636 + [0.0] * 30)
+    assert [s.reason for s in segs] == ["hard", "end"]
+    assert segs[1].start_s == segs[0].end_s
+    assert ids_of(segs) == list(range(636 + 9))
+
+
+def test_flush_right_after_hard_cut_keeps_short_tail():
+    seg = PauseSegmenter(SegmenterConfig.translate())
+    segs = feed_indexed(seg, [0.9] * 636)
+    out = seg.flush()
+    assert out.reason == "flush" and out.start_s == segs[0].end_s
+    assert ids_of(segs + [out]) == list(range(636))
+
+
+def test_short_word_after_soft_cut_is_kept():
+    seg = PauseSegmenter(SegmenterConfig.translate())
+    segs = feed_indexed(seg, [0.9] * 260 + [0.0] * 9 + [0.9] * 9 + [0.0] * 25)
+    assert [s.reason for s in segs] == ["soft", "end"]
+    assert segs[1].start_s == segs[0].end_s
+    # 288 ms continuation word (269..277) plus 9 trailing silent windows
+    assert ids_of(segs) == list(range(278 + 9))
+
+
+def test_soft_tail_continues_exactly_across_a_long_pause():
+    seg = PauseSegmenter(SegmenterConfig.translate())
+    segs = feed_indexed(seg, [0.9] * 260 + [0.0] * 20 + [0.9] * 20)  # 640 ms pause
+    out = seg.flush()
+    assert out.start_s == segs[0].end_s
+    assert ids_of(segs + [out]) == list(range(300))
+
+
+def test_silent_soft_tail_dropped_after_end_silence():
+    seg = PauseSegmenter(SegmenterConfig.translate())
+    segs = feed_indexed(seg, [0.9] * 260 + [0.0] * 40 + [0.9] * 20)
+    assert [s.reason for s in segs] == ["soft"]
+    out = seg.flush()
+    # the pause passed 700 ms: the tail was dropped, the next segment
+    # starts from the 9-window pre-roll (291..299)
+    assert out.start_s == pytest.approx(291 * W)
+    assert window_ids(out) == list(range(291, 320))
+
+
+def test_transcribe_soft_tail_keeps_silence_up_to_keep_silence():
+    cfg = SegmenterConfig.transcribe(chunk_min_s=10, chunk_max_s=20)
+    seg = PauseSegmenter(cfg)
+    segs = feed_indexed(seg, [0.9] * 320 + [0.0] * 200 + [0.9] * 20)
+    assert [s.reason for s in segs] == ["soft"]
+    assert segs[0].end_s == pytest.approx(328 * W)  # middle of pause 320..335
+    out = seg.flush()
+    assert out.start_s == segs[0].end_s
+    # 62 silent windows (2000 ms) of the pause are kept in total
+    assert ids_of(segs + [out]) == list(range(382)) + list(range(520, 540))
 
 
 def test_transcribe_ignores_pauses_before_chunk_min():
@@ -202,6 +263,7 @@ def test_validate_rejects_bad_config():
         SegmenterConfig(soft_silence_ms=-1),
         SegmenterConfig(keep_silence_ms=0),
         SegmenterConfig(preroll_ms=0),
+        SegmenterConfig(preroll_ms=31),  # would give an empty pre-roll
         SegmenterConfig(threshold=0.0),
     ):
         with pytest.raises(ValueError):

@@ -9,26 +9,30 @@ Rules chosen where the spec leaves details open:
 * Time is measured in windows of the real stream: window ``i`` covers
   ``[i * 0.032, (i + 1) * 0.032)`` seconds. ``start_s``/``end_s`` follow the
   real stream even when silence was dropped from the audio
-  (``keep_silence_ms``).
-* Pre-roll: while idle the segmenter keeps the last ``preroll_ms // 32``
-  windows that were not emitted. A speech window starts a segment made of
-  all of them plus itself.
+  (``keep_silence_ms``; dropped windows hold no audio).
+* Pre-roll: the segmenter remembers the last ``preroll_ms // 32`` windows of
+  the stream. A speech window arriving while idle starts a segment made of
+  those of them that were not emitted yet, plus itself.
 * ``end``: the first ``min(silence_run_ms, 300) // 32`` windows of the
-  trailing pause are kept, the rest goes back to the pre-roll ring.
+  trailing pause are kept; the rest is dropped (it may become pre-roll).
 * ``soft``: the current pause has ``n`` windows; the cut is placed before
-  its window ``n // 2``. The tail is silence by construction, so (as the
-  spec says) no new segment starts; the tail seeds the pre-roll ring. The
-  next segment therefore starts exactly at ``prev.end_s`` when speech
-  resumes within ``preroll_ms``; a longer pause is cut-out silence.
-* ``hard``: among the last ``lookback_ms // 32`` windows (never the first
-  window of the segment, so the head is non-empty) the one with the lowest
-  probability is chosen, ties going to the latest; the cut is placed before
-  it and the tail continues as the new segment.
-* A segment (any reason) is emitted only if it holds at least
-  ``min_speech_ms`` of speech; otherwise it is discarded.
+  its window ``n // 2``. ``hard``: among the last ``lookback_ms // 32``
+  windows (never the first window of the segment, so the head is never
+  empty) the one with the lowest probability is chosen, ties going to the
+  latest; the cut is placed before it.
+* After a ``soft``/``hard`` cut the tail stays pending as a *continuation*
+  of the emitted segment, so ``next.start_s == prev.end_s`` exactly. The
+  silence run is a property of the stream and is not reset by a cut, so a
+  silent soft tail is dropped once ``end_silence_ms`` of pause has passed
+  (translate) and keeps at most ``keep_silence_ms`` of silence otherwise
+  (transcribe).
+* Emission gate (all reasons): a segment needs at least one speech window;
+  a segment that started from idle also needs ``min_speech_ms`` of speech,
+  a continuation does not (otherwise the rest of a word cut by a ``hard``
+  cut would be lost). A segment without speech is discarded whole.
 * ``flush()`` does not trim trailing silence (only ``keep_silence_ms``
-  applies) and leaves the segmenter idle with an empty pre-roll ring; the
-  stream clock keeps running. ``reset()`` also restarts the clock at 0.
+  applies) and leaves the segmenter idle with an empty pre-roll; the stream
+  clock keeps running. ``reset()`` also restarts the clock at 0.
 """
 
 from __future__ import annotations
@@ -62,6 +66,10 @@ class SegmenterConfig:
 
     def validate(self) -> None:
         """Raise ValueError unless the configuration is usable."""
+        if self.preroll_ms < WINDOW_MS:
+            raise ValueError(
+                f"preroll_ms must be >= {WINDOW_MS}, got {self.preroll_ms}"
+            )
         if not 0 < self.threshold <= 1:
             raise ValueError(f"threshold must be in (0, 1], got {self.threshold}")
         positive = {
@@ -113,10 +121,9 @@ class Segment:
 @dataclass(frozen=True)
 class _Win:
     idx: int  # stream window index
-    audio: np.ndarray
+    audio: np.ndarray | None  # None: silence dropped by keep_silence_ms
     prob: float
     speech: bool
-    kept: bool  # False: silence dropped by keep_silence_ms
 
 
 def _time(idx: int) -> float:
@@ -130,10 +137,14 @@ class PauseSegmenter:
         cfg.validate()
         self._cfg = cfg
         self._pos = 0
+        # last preroll windows of the stream, raw; only those at or after
+        # ``_emitted_end`` may become pre-roll (no duplicated samples)
         self._ring: deque[_Win] = deque(maxlen=self._preroll_windows())
+        self._emitted_end = 0
         self._seg: list[_Win] = []
+        self._cont = False  # current segment continues a soft/hard cut
         self._speech = 0  # speech windows in the current segment
-        self._silence_run = 0  # trailing silent windows in the segment
+        self._silence_run = 0  # silent windows since the last speech
 
     def feed(self, window: np.ndarray, prob: float) -> list[Segment]:
         """Consume one window; return the segments completed by it."""
@@ -150,30 +161,29 @@ class PauseSegmenter:
 
         if not self._seg:
             if not speech:
-                self._ring.append(_Win(idx, window, prob, False, True))
+                self._ring.append(_Win(idx, window, prob, False))
                 return []
-            self._seg = list(self._ring)
-            self._ring.clear()
-            self._speech = 0
-            self._silence_run = 0
+            self._seg = [w for w in self._ring if w.idx >= self._emitted_end]
+            self._cont = False
+            self._speech = self._silence_run = 0
+        self._ring.append(_Win(idx, window, prob, speech))
 
         if speech:
             self._speech += 1
             self._silence_run = 0
-            kept = True
+            audio: np.ndarray | None = window
         else:
             self._silence_run += 1
-            kept = (
-                cfg.keep_silence_ms is None
-                or self._silence_run * WINDOW_MS <= cfg.keep_silence_ms
-            )
-        self._seg.append(_Win(idx, window, prob, speech, kept))
+            keep = cfg.keep_silence_ms
+            dropped = keep is not None and self._silence_run * WINDOW_MS > keep
+            audio = None if dropped else window
+        self._seg.append(_Win(idx, audio, prob, speech))
 
         silence_ms = self._silence_run * WINDOW_MS
         len_ms = len(self._seg) * WINDOW_MS
         if cfg.end_silence_ms is not None and silence_ms >= cfg.end_silence_ms:
-            keep = min(silence_ms, END_TAIL_MS) // WINDOW_MS
-            return self._cut(len(self._seg) - self._silence_run + keep, "end")
+            keep_tail = min(silence_ms, END_TAIL_MS) // WINDOW_MS
+            return self._cut(len(self._seg) - self._silence_run + keep_tail, "end")
         if len_ms >= cfg.soft_max_ms and silence_ms >= cfg.soft_silence_ms:
             run = self._silence_run
             return self._cut(len(self._seg) - run + run // 2, "soft")
@@ -182,9 +192,9 @@ class PauseSegmenter:
         return []
 
     def flush(self) -> Segment | None:
-        """Return the pending segment if it holds enough speech; go idle."""
+        """Return the pending segment if it may be emitted; go idle."""
         out = None
-        if self._seg and self._speech * WINDOW_MS >= self._cfg.min_speech_ms:
+        if self._seg and self._emittable(self._seg):
             out = self._segment(self._seg, "flush")
         self._go_idle()
         self._ring.clear()
@@ -200,14 +210,21 @@ class PauseSegmenter:
         """Drop all state, including the stream clock."""
         self._go_idle()
         self._ring.clear()
-        self._pos = 0
+        self._pos = self._emitted_end = 0
 
     def _go_idle(self) -> None:
         self._seg = []
+        self._cont = False
         self._speech = self._silence_run = 0
 
     def _preroll_windows(self) -> int:
         return self._cfg.preroll_ms // WINDOW_MS
+
+    def _emittable(self, wins: list[_Win]) -> bool:
+        speech = sum(w.speech for w in wins)
+        if speech == 0:
+            return False
+        return self._cont or speech * WINDOW_MS >= self._cfg.min_speech_ms
 
     def _hard_cut_index(self) -> int:
         n = max(1, self._cfg.lookback_ms // WINDOW_MS)
@@ -219,30 +236,31 @@ class PauseSegmenter:
         return best
 
     def _cut(self, at: int, reason: Reason) -> list[Segment]:
-        """Emit ``self._seg[:at]`` and route the rest of it.
+        """Emit ``self._seg[:at]`` if allowed and route the rest of it.
 
-        ``hard``: the rest continues as the current segment. Otherwise the
-        segmenter goes idle and the rest (silence) seeds the pre-roll ring.
+        ``end``: the rest is dropped and the segmenter goes idle. ``soft`` /
+        ``hard``: the rest continues as the current segment, marked as a
+        continuation once a head was emitted. A segment without any speech
+        is discarded whole and the segmenter goes idle.
         """
+        if self._speech == 0:
+            self._go_idle()
+            return []
         head, tail = self._seg[:at], self._seg[at:]
-        enough = sum(w.speech for w in head) * WINDOW_MS >= self._cfg.min_speech_ms
-        out = [self._segment(head, reason)] if enough else []
-        if reason == "hard":
+        out = []
+        if self._emittable(head):
+            out.append(self._segment(head, reason))
+            self._emitted_end = head[-1].idx + 1
+        if reason == "end":
+            self._go_idle()
+        else:
+            self._cont = self._cont or bool(out)
             self._seg = tail
             self._speech = sum(w.speech for w in tail)
-            run = 0
-            for w in reversed(tail):
-                if w.speech:
-                    break
-                run += 1
-            self._silence_run = run
-        else:
-            self._go_idle()
-            self._ring.extend(_Win(w.idx, w.audio, w.prob, False, True) for w in tail)
         return out
 
     @staticmethod
     def _segment(wins: list[_Win], reason: Reason) -> Segment:
-        kept = [w.audio for w in wins if w.kept]
+        kept = [w.audio for w in wins if w.audio is not None]
         audio = np.concatenate(kept) if kept else np.zeros(0, np.int16)
         return Segment(audio, _time(wins[0].idx), _time(wins[-1].idx + 1), reason)
