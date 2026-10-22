@@ -17,7 +17,12 @@ from src.core.runtime import EdgeSettings, LlmSettings
 def multipart_fields(req):
     from email import message_from_bytes
 
-    msg = message_from_bytes(b"Content-Type: " + req.headers["content-type"].encode() + b"\r\n\r\n" + req.content)
+    msg = message_from_bytes(
+        b"Content-Type: "
+        + req.headers["content-type"].encode()
+        + b"\r\n\r\n"
+        + req.content
+    )
     out = {}
     for part in msg.get_payload():
         name = part.get_param("name", header="content-disposition")
@@ -55,7 +60,9 @@ def ok(content):
 
 
 def llm(handler, target=None):
-    return LlmClient(target or FakeTarget(), LlmSettings(), transport=httpx.MockTransport(handler))
+    return LlmClient(
+        target or FakeTarget(), LlmSettings(), transport=httpx.MockTransport(handler)
+    )
 
 
 def test_llm_request_body():
@@ -73,10 +80,21 @@ def test_llm_request_body():
     assert seen["auth"] == "Bearer sha256:abc"
     assert seen["url"] == "http://llm1/v1/chat/completions"
     assert "Ukrainian" in b["messages"][0]["content"]
-    assert [m["role"] for m in b["messages"]] == ["system", "user", "assistant", "user", "assistant", "user"]
+    assert [m["role"] for m in b["messages"]] == [
+        "system",
+        "user",
+        "assistant",
+        "user",
+        "assistant",
+        "user",
+    ]
     assert b["messages"][-1]["content"] == "привіт світе"
     assert b["chat_template_kwargs"] == {"enable_thinking": False}
-    assert b["max_tokens"] == 32 + 3 * 2 and b["model"] == "local" and b["temperature"] == 0.1
+    assert (
+        b["max_tokens"] == 32 + 3 * 2
+        and b["model"] == "local"
+        and b["temperature"] == 0.1
+    )
 
 
 def test_llm_strips_think_block():
@@ -136,7 +154,10 @@ def test_llm_503_is_busy_and_unreachable_retries_on_new_target():
     "first,kind",
     [
         (lambda req: httpx.Response(503), "busy"),
-        (lambda req: (_ for _ in ()).throw(httpx.ReadTimeout("slow", request=req)), "timeout"),
+        (
+            lambda req: (_ for _ in ()).throw(httpx.ReadTimeout("slow", request=req)),
+            "timeout",
+        ),
     ],
 )
 def test_llm_transient_then_200_retries_once(first, kind):
@@ -162,7 +183,10 @@ def test_llm_english_passthrough_no_http():
 
 def test_llm_status_uses_bearer():
     def handler(req):
-        assert req.url.path == "/status" and req.headers["authorization"] == "Bearer sha256:abc"
+        assert (
+            req.url.path == "/status"
+            and req.headers["authorization"] == "Bearer sha256:abc"
+        )
         return httpx.Response(200, json={"model": {"loaded": True}})
 
     assert llm(handler).status() == {"model": {"loaded": True}}
@@ -185,7 +209,9 @@ def test_asr_client_sends_priority_and_chunk_seconds():
         return httpx.Response(200, json={"text": " hi ", "language": "en"})
 
     c = AsrClient("http://asr", transport=httpx.MockTransport(handler))
-    r = c.transcribe(np.ones(100, dtype=np.int16), priority="batch", chunk_seconds=30.0, timeout_s=5)
+    r = c.transcribe(
+        np.ones(100, dtype=np.int16), priority="batch", chunk_seconds=30.0, timeout_s=5
+    )
     assert r.text == "hi"
 
 
@@ -195,7 +221,9 @@ def test_asr_default_priority_realtime():
         assert "chunk_seconds" not in multipart_fields(req)
         return httpx.Response(200, json={"text": "x"})
 
-    AsrClient("http://asr", transport=httpx.MockTransport(handler)).transcribe(np.ones(10, dtype=np.int16))
+    AsrClient("http://asr", transport=httpx.MockTransport(handler)).transcribe(
+        np.ones(10, dtype=np.int16)
+    )
 
 
 def test_client_factories():
@@ -214,7 +242,12 @@ def test_tts_roundtrip_and_request_body():
 
     def handler(req):
         assert req.url.path == "/v1/audio/speech"
-        assert json.loads(req.content) == {"input": "hi", "response_format": "wav", "voice": "v", "speed": 1.25}
+        assert json.loads(req.content) == {
+            "input": "hi",
+            "response_format": "wav",
+            "voice": "v",
+            "speed": 1.25,
+        }
         return httpx.Response(200, content=wav_bytes(pcm))
 
     audio, rate = tts(handler).synthesize("hi", voice="v", speed=1.25)
@@ -223,7 +256,9 @@ def test_tts_roundtrip_and_request_body():
 
 
 def test_tts_x_sample_rate_header_overrides_wav_rate():
-    resp = httpx.Response(200, content=wav_bytes(b"\x00\x00" * 4), headers={"X-Sample-Rate": "22050"})
+    resp = httpx.Response(
+        200, content=wav_bytes(b"\x00\x00" * 4), headers={"X-Sample-Rate": "22050"}
+    )
     assert tts(lambda r: resp).synthesize("x")[1] == 22050
 
 
@@ -241,16 +276,23 @@ def test_tts_invalid_wav_is_service_error():
         tts(lambda r: httpx.Response(200, content=b"not a wav")).synthesize("x")
     assert (e.value.service, e.value.kind) == ("tts", "http")
     with pytest.raises(ServiceError) as e:
-        tts(lambda r: httpx.Response(200, content=wav_bytes(b"\x00" * 8, width=4))).synthesize("x")
+        tts(
+            lambda r: httpx.Response(200, content=wav_bytes(b"\x00" * 8, width=4))
+        ).synthesize("x")
     assert e.value.kind == "http"
 
 
 def test_service_client_health_status_and_error_mapping():
     ok_c = ServiceClient(
-        "http://s/prefix/", transport=httpx.MockTransport(lambda r: httpx.Response(200, json={"ready": True}))
+        "http://s/prefix/",
+        transport=httpx.MockTransport(
+            lambda r: httpx.Response(200, json={"ready": True})
+        ),
     )
     assert ok_c.health() is True and ok_c.status() == {"ready": True}
-    bad = ServiceClient("http://s", transport=httpx.MockTransport(lambda r: httpx.Response(500)))
+    bad = ServiceClient(
+        "http://s", transport=httpx.MockTransport(lambda r: httpx.Response(500))
+    )
     assert bad.health() is False and bad.status() is None
 
     def refuse(req):
@@ -265,7 +307,39 @@ def test_service_client_health_status_and_error_mapping():
             c._request("GET", "/x")
         assert e.value.kind == kind
         assert c.health() is False
-    auth = ServiceClient("http://s", transport=httpx.MockTransport(lambda r: httpx.Response(403)))
+    auth = ServiceClient(
+        "http://s", transport=httpx.MockTransport(lambda r: httpx.Response(403))
+    )
     with pytest.raises(ServiceError) as e:
         auth._request("GET", "/x")
     assert e.value.kind == "auth" and e.value.status_code == 403
+
+
+@pytest.mark.parametrize("status", [401, 503])
+def test_llm_status_failure_never_invalidates_or_retries(status):
+    hits = []
+
+    def handler(req):
+        hits.append(1)
+        return httpx.Response(status)
+
+    t = FakeTarget()
+    with pytest.raises(ServiceError):
+        llm(handler, t).status()
+    assert t.calls == []
+    assert len(hits) == 1
+
+
+def test_llm_status_unreachable_never_invalidates():
+    def handler(req):
+        raise httpx.ConnectError("down")
+
+    t = FakeTarget()
+    with pytest.raises(ServiceError) as e:
+        llm(handler, t).status()
+    assert e.value.kind == "unreachable"
+    assert t.calls == []
+
+
+def test_llm_base_url_property():
+    assert llm(lambda r: ok("x")).base_url == "http://llm1"

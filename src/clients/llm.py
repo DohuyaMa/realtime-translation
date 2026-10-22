@@ -41,11 +41,19 @@ class LlmClient:
     service = "llm"
 
     def __init__(
-        self, target: LlmTarget, settings: LlmSettings, *, transport: Optional[httpx.BaseTransport] = None
+        self,
+        target: LlmTarget,
+        settings: LlmSettings,
+        *,
+        transport: Optional[httpx.BaseTransport] = None,
     ) -> None:
         self._target = target
         self._settings = settings
         self._http = httpx.Client(timeout=settings.timeout_s, transport=transport)
+
+    @property
+    def base_url(self) -> str:
+        return self._target.current()[0]
 
     def close(self) -> None:
         self._http.close()
@@ -54,7 +62,9 @@ class LlmClient:
         base, token = self._target.current()
         headers = {"Authorization": f"Bearer {token}"} if token else {}
         try:
-            resp = self._http.request(method, base.rstrip("/") + path, headers=headers, **kwargs)
+            resp = self._http.request(
+                method, base.rstrip("/") + path, headers=headers, **kwargs
+            )
         except httpx.TimeoutException as e:
             raise ServiceError(self.service, "timeout", str(e)) from e
         except httpx.TransportError as e:
@@ -73,13 +83,20 @@ class LlmClient:
             self._target.invalidate(e.kind)
         return self._send(method, path, **kwargs)
 
-    def translate(self, text: str, source_lang: str, context: Sequence[tuple[str, str]] = ()) -> str:
+    def translate(
+        self, text: str, source_lang: str, context: Sequence[tuple[str, str]] = ()
+    ) -> str:
         if source_lang == "en":
             return text
         if source_lang not in LANGUAGE_NAMES:
             raise ValueError(f"unsupported source language {source_lang!r}")
         s = self._settings
-        messages = [{"role": "system", "content": SYSTEM_PROMPT.format(lang=LANGUAGE_NAMES[source_lang])}]
+        messages = [
+            {
+                "role": "system",
+                "content": SYSTEM_PROMPT.format(lang=LANGUAGE_NAMES[source_lang]),
+            }
+        ]
         for src, tr in context:
             messages.append({"role": "user", "content": src})
             messages.append({"role": "assistant", "content": tr})
@@ -91,15 +108,20 @@ class LlmClient:
             "max_tokens": min(s.max_tokens_cap, 32 + 3 * len(text.split())),
             "chat_template_kwargs": {"enable_thinking": False},
         }
-        payload = json_body(self.service, self._request("POST", "/v1/chat/completions", json=body))
+        payload = json_body(
+            self.service, self._request("POST", "/v1/chat/completions", json=body)
+        )
         try:
             content = payload["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError) as e:
-            raise ServiceError(self.service, "http", f"malformed response: {payload!r:.200}") from e
+            raise ServiceError(
+                self.service, "http", f"malformed response: {payload!r:.200}"
+            ) from e
         result = _THINK.sub("", content or "").strip()
         if not result:
             raise ServiceError(self.service, "http", "empty translation")
         return result
 
     def status(self) -> dict:
-        return json_body(self.service, self._request("GET", "/status"))
+        # Health probe: single attempt, never invalidates the lease target.
+        return json_body(self.service, self._send("GET", "/status"))

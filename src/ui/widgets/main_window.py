@@ -90,7 +90,9 @@ class MainWindow(QMainWindow):
         source_layout = QHBoxLayout()
         source_layout.addWidget(QLabel("Source Language:"))
         self.source_lang_combo = QComboBox()
-        self.source_lang_combo.addItems(["Auto", "Ukrainian (uk)", "Polish (pl)", "Russian (ru)", "English (en)"])
+        self.source_lang_combo.addItems(
+            ["Auto", "Ukrainian (uk)", "Polish (pl)", "Russian (ru)", "English (en)"]
+        )
         self.source_lang_combo.currentTextChanged.connect(self.on_language_changed)
         source_layout.addWidget(self.source_lang_combo)
         lang_layout.addLayout(source_layout)
@@ -310,7 +312,9 @@ class MainWindow(QMainWindow):
 
     def _on_toggle_done(self, result):
         self.translate_button.setEnabled(True)
-        ok, running = result if isinstance(result, tuple) else (False, self.is_translating)
+        ok, running = (
+            result if isinstance(result, tuple) else (False, self.is_translating)
+        )
         if not ok:
             err = self.ui_controller.last_error() or 'unknown error'
             self.status_manager.log_error(f'Pipeline toggle failed: {err}')

@@ -81,7 +81,9 @@ class EdgeSettings:
             errors.append("asr_urls must not be empty")
         if self.mode == "translate":
             if self.llm.source() == "none":
-                errors.append("translate mode requires llm.django_urls or llm.direct_url")
+                errors.append(
+                    "translate mode requires llm.django_urls or llm.direct_url"
+                )
             if not self.tts_urls:
                 errors.append("translate mode requires tts_urls")
         if self.llm.source() == "lease" and not self.llm.django_token_file:
@@ -119,12 +121,20 @@ def _urls(value: Any) -> tuple[str, ...]:
 
 def _seg_translate(cfg: Mapping) -> SegmenterConfig:
     names = {f.name for f in fields(SegmenterConfig)}
-    return replace(SegmenterConfig.translate(), **{k: v for k, v in cfg.items() if k in names})
+    return replace(
+        SegmenterConfig.translate(), **{k: v for k, v in cfg.items() if k in names}
+    )
 
 
 def _seg_transcribe(cfg: Mapping) -> SegmenterConfig:
-    base = SegmenterConfig.transcribe(float(cfg.get("chunk_min_s", 300)), float(cfg.get("chunk_max_s", 600)))
-    extra = {k: cfg[k] for k in ("soft_silence_ms", "lookback_ms", "keep_silence_ms") if k in cfg}
+    base = SegmenterConfig.transcribe(
+        float(cfg.get("chunk_min_s", 300)), float(cfg.get("chunk_max_s", 600))
+    )
+    extra = {
+        k: cfg[k]
+        for k in ("soft_silence_ms", "lookback_ms", "keep_silence_ms")
+        if k in cfg
+    }
     return replace(base, **extra)
 
 
@@ -143,23 +153,40 @@ def resolve_edge_settings(cfg: Mapping, environ: Mapping) -> EdgeSettings:
 
     ld = LlmSettings()
     llm = LlmSettings(
-        django_urls=_urls(pick("RT_EDGE_DJANGO_URLS", "llm.django_urls", llm_cfg.get("django_urls"))),
+        django_urls=_urls(
+            pick("RT_EDGE_DJANGO_URLS", "llm.django_urls", llm_cfg.get("django_urls"))
+        ),
         django_token_file=_clean(
-            pick("RT_EDGE_DJANGO_TOKEN_FILE", "llm.django_token_file", llm_cfg.get("django_token_file"))
+            pick(
+                "RT_EDGE_DJANGO_TOKEN_FILE",
+                "llm.django_token_file",
+                llm_cfg.get("django_token_file"),
+            )
         ),
-        service=_clean(pick("RT_EDGE_LLM_SERVICE", "llm.service", llm_cfg.get("service"))),
+        service=_clean(
+            pick("RT_EDGE_LLM_SERVICE", "llm.service", llm_cfg.get("service"))
+        ),
         lease_ttl_s=int(llm_cfg.get("lease_ttl_s", ld.lease_ttl_s)),
-        direct_url=_url(pick("RT_EDGE_LLM_DIRECT_URL", "llm.direct_url", llm_cfg.get("direct_url"))),
-        direct_token_file=_clean(
-            pick("RT_EDGE_LLM_DIRECT_TOKEN_FILE", "llm.direct_token_file", llm_cfg.get("direct_token_file"))
+        direct_url=_url(
+            pick("RT_EDGE_LLM_DIRECT_URL", "llm.direct_url", llm_cfg.get("direct_url"))
         ),
-        model=_clean(pick("RT_EDGE_LLM_MODEL", "llm.model", llm_cfg.get("model"))) or ld.model,
+        direct_token_file=_clean(
+            pick(
+                "RT_EDGE_LLM_DIRECT_TOKEN_FILE",
+                "llm.direct_token_file",
+                llm_cfg.get("direct_token_file"),
+            )
+        ),
+        model=_clean(pick("RT_EDGE_LLM_MODEL", "llm.model", llm_cfg.get("model")))
+        or ld.model,
         max_tokens_cap=int(llm_cfg.get("max_tokens_cap", ld.max_tokens_cap)),
         temperature=float(llm_cfg.get("temperature", ld.temperature)),
         context_pairs=int(llm_cfg.get("context_pairs", ld.context_pairs)),
         timeout_s=float(llm_cfg.get("timeout_s", ld.timeout_s)),
     )
-    asr_urls = _urls(pick("RT_EDGE_ASR_URLS", "asr_urls", svc.get("asr_urls"))) or (DEFAULT_ASR_URL,)
+    asr_urls = _urls(pick("RT_EDGE_ASR_URLS", "asr_urls", svc.get("asr_urls"))) or (
+        DEFAULT_ASR_URL,
+    )
     tcfg = svc.get("timeouts") or {}
     td = Timeouts()
     return EdgeSettings(
@@ -167,7 +194,9 @@ def resolve_edge_settings(cfg: Mapping, environ: Mapping) -> EdgeSettings:
         asr_urls=asr_urls,
         tts_urls=_urls(pick("RT_EDGE_TTS_URLS", "tts_urls", svc.get("tts_urls"))),
         llm=llm,
-        api_token_file=_clean(pick("RT_EDGE_API_TOKEN_FILE", "api_token_file", svc.get("api_token_file"))),
+        api_token_file=_clean(
+            pick("RT_EDGE_API_TOKEN_FILE", "api_token_file", svc.get("api_token_file"))
+        ),
         source_language=_clean(svc.get("source_language")) or "auto",
         timeouts=Timeouts(
             connect_s=float(tcfg.get("connect_s", td.connect_s)),
@@ -190,7 +219,9 @@ def get_runtime_config() -> EdgeSettings:
     if _runtime_config is None:
         from .config import get_config_manager
 
-        _runtime_config = resolve_edge_settings(get_config_manager().get_all(), os.environ)
+        _runtime_config = resolve_edge_settings(
+            get_config_manager().get_all(), os.environ
+        )
     return _runtime_config
 
 

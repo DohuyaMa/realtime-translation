@@ -50,9 +50,17 @@ class AsrClient(ServiceClient):
             data["prompt"] = prompt
         if chunk_seconds is not None:
             data["chunk_seconds"] = str(chunk_seconds)
-        files = {"file": ("chunk.wav", encode_wav(audio_int16, sample_rate), "audio/wav")}
+        files = {
+            "file": ("chunk.wav", encode_wav(audio_int16, sample_rate), "audio/wav")
+        }
         payload = self._json(
-            self._request("POST", "/v1/audio/transcriptions", data=data, files=files, timeout_s=timeout_s)
+            self._request(
+                "POST",
+                "/v1/audio/transcriptions",
+                data=data,
+                files=files,
+                timeout_s=timeout_s,
+            )
         )
         return AsrResult(
             text=str(payload.get("text") or "").strip(),

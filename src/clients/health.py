@@ -89,12 +89,14 @@ class ServiceHealthMonitor:
             entries.append(entry)
         return entries
 
-    def _llm_entry(self, status: Optional[dict]) -> Dict[str, Any]:
+    def _llm_entry(
+        self, status: Optional[dict], error: Optional[str] = None
+    ) -> Dict[str, Any]:
         lease = self._lease.snapshot() if self._lease is not None else None
         url = lease["base_url"] if lease else None
         if url is None and self._llm is not None:
             try:
-                url = self._llm._target.current()[0]
+                url = self._llm.base_url
             except Exception:
                 url = None
         entry = _entry("llm", url)
@@ -108,16 +110,20 @@ class ServiceHealthMonitor:
                 model=os.path.basename(path) if path else None,
                 error=None,
             )
+        elif error:
+            entry["error"] = error
         entry["lease"] = lease
         return entry
 
     def _probe_llm(self) -> List[Dict[str, Any]]:
         status: Optional[dict] = None
+        error: Optional[str] = None
         try:
             status = self._llm.status()  # type: ignore[union-attr]
         except Exception as e:
             logger.debug("llm status failed: {}", e)
-        return [self._llm_entry(status)]
+            error = getattr(e, "kind", None) or "unreachable"
+        return [self._llm_entry(status, error)]
 
     def poll_once(self) -> Dict[str, List[Dict[str, Any]]]:
         snap: Dict[str, List[Dict[str, Any]]] = {}

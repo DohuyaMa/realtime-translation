@@ -65,7 +65,10 @@ class AsrBackend(Protocol):
 
 
 class FakeAsrBackend:
-    """Deterministic backend for tests and GPU-less development (RT_ASR_BACKEND=fake)."""
+    """Deterministic backend for tests and GPU-less development.
+
+    Selected with RT_ASR_BACKEND=fake.
+    """
 
     name = "fake"
 

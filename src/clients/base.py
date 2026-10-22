@@ -12,7 +12,13 @@ from loguru import logger
 class ServiceError(Exception):
     """A request failed. kind: unreachable | timeout | auth | http | busy."""
 
-    def __init__(self, service: str, kind: str, message: str = "", status_code: Optional[int] = None):
+    def __init__(
+        self,
+        service: str,
+        kind: str,
+        message: str = "",
+        status_code: Optional[int] = None,
+    ):
         super().__init__(f"{service}: {kind}: {message}")
         self.service = service
         self.kind = kind
@@ -32,9 +38,16 @@ def read_token(token_file: Optional[str]) -> Optional[str]:
 
 def raise_for_response(service: str, resp: httpx.Response) -> None:
     if resp.status_code in (401, 403):
-        raise ServiceError(service, "auth", f"HTTP {resp.status_code}", resp.status_code)
+        raise ServiceError(
+            service, "auth", f"HTTP {resp.status_code}", resp.status_code
+        )
     if resp.status_code >= 400:
-        raise ServiceError(service, "http", f"HTTP {resp.status_code}: {resp.text[:200]}", resp.status_code)
+        raise ServiceError(
+            service,
+            "http",
+            f"HTTP {resp.status_code}: {resp.text[:200]}",
+            resp.status_code,
+        )
 
 
 def json_body(service: str, resp: httpx.Response) -> dict:
@@ -71,9 +84,18 @@ class ServiceClient:
             transport=transport,
         )
 
-    def _request(self, method: str, path: str, *, timeout_s: Optional[float] = None, **kwargs: Any) -> httpx.Response:
+    def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        timeout_s: Optional[float] = None,
+        **kwargs: Any,
+    ) -> httpx.Response:
         if timeout_s is not None:
-            kwargs["timeout"] = httpx.Timeout(timeout_s, connect=self._client.timeout.connect)
+            kwargs["timeout"] = httpx.Timeout(
+                timeout_s, connect=self._client.timeout.connect
+            )
         try:
             resp = self._client.request(method, path.lstrip("/"), **kwargs)
         except httpx.TimeoutException as e:

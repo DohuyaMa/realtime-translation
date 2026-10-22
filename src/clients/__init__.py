@@ -44,9 +44,15 @@ class ClientFactories:
     tts: Callable[[str], TtsClient]
 
 
-def client_factories(settings: EdgeSettings, transport: Optional[httpx.BaseTransport] = None) -> ClientFactories:
+def client_factories(
+    settings: EdgeSettings, transport: Optional[httpx.BaseTransport] = None
+) -> ClientFactories:
     t = settings.timeouts
-    common = dict(token_file=settings.api_token_file, connect_timeout_s=t.connect_s, transport=transport)
+    common = dict(
+        token_file=settings.api_token_file,
+        connect_timeout_s=t.connect_s,
+        transport=transport,
+    )
     return ClientFactories(
         asr=lambda url: AsrClient(url, timeout_s=t.asr_s, **common),
         tts=lambda url: TtsClient(url, timeout_s=t.tts_s, **common),
