@@ -1,140 +1,115 @@
-"""Service status panel widget for the real-time translation system."""
+"""Status panel for the remote services: ASR, LLM (lease) and TTS."""
+
+from typing import Dict, List, Optional
+
+from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
-    QWidget, QGroupBox, QGridLayout, QLabel,
-    QPushButton, QVBoxLayout, QHBoxLayout
+    QGridLayout,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QVBoxLayout,
 )
-from PySide6.QtCore import Signal as pyqtSignal
-from typing import Dict, List
+
+SERVICES = {
+    "asr": "ASR (rt-asr)",
+    "llm": "Переклад (LLM)",
+    "tts": "TTS (rt-tts)",
+}
+
+_DOT = "font-size: 16px; font-weight: bold; color: {};"
+
+
+def _aggregate(entries: List[Dict]) -> str:
+    if not entries:
+        return "не налаштовано"
+    ready = sum(1 for e in entries if e.get("ready"))
+    return f"{ready}/{len(entries)} готові"
+
+
+def format_llm_detail(entry: Optional[Dict], lease: Optional[Dict], source: str):
+    """Text for the LLM row: worker, model, expires_at and source."""
+    entry = entry or {}
+    lease = lease or entry.get("lease") or {}
+    parts = [f"джерело: {source}"]
+    if lease.get("service"):
+        parts.append(f"воркер: {lease['service']}")
+    model = lease.get("model") or entry.get("model")
+    if model:
+        parts.append(f"модель: {model}")
+    if lease.get("expires_at"):
+        parts.append(f"lease до: {lease['expires_at']}")
+    if lease.get("error"):
+        parts.append(f"помилка: {lease['error']}")
+    return ", ".join(parts)
 
 
 class ServiceStatusPanel(QGroupBox):
-    """Widget for displaying and controlling service status."""
+    """Displays aggregated status of asr/llm/tts (no process control)."""
 
-    service_control_requested = pyqtSignal(str, bool)   # service_name, should_start
-    service_restart_requested = pyqtSignal(str)          # service_name
-    service_settings_requested = pyqtSignal(str)         # service_name
-    restart_all_requested = pyqtSignal()
-    reconnect_ipc_requested = pyqtSignal()
+    refresh_requested = Signal()
+    endpoints_requested = Signal()
 
     def __init__(self, parent=None):
-        super().__init__("Service Status", parent)
+        super().__init__("Сервіси", parent)
+        self._dots: Dict[str, QLabel] = {}
+        self._texts: Dict[str, QLabel] = {}
+        self._details: Dict[str, QLabel] = {}
+        self.llm_source: Optional[str] = None  # lease | direct | none
+        self._build()
 
-        self._services = {}
-        self._status_labels = {}
-        self._control_buttons = {}
-        self._restart_buttons = {}
-
-        self.init_ui()
-
-    def init_ui(self):
+    def _build(self):
         outer = QVBoxLayout(self)
-
         grid = QGridLayout()
         outer.addLayout(grid)
-
-        self._services = {
-            "whisper":        "Whisper",
-            "translate":      "Translate",
-            "tts":            "TTS",
-            "wyoming":        "Wyoming STT",
-        }
-
-        for idx, (key, label) in enumerate(self._services.items()):
-            # status dot
+        for row, (key, label) in enumerate(SERVICES.items()):
             dot = QLabel("●")
-            dot.setStyleSheet("color: red; font-size: 16px; font-weight: bold;")
-            grid.addWidget(dot, idx, 0)
-            self._status_labels[f"{key}_status"] = dot
+            dot.setStyleSheet(_DOT.format("red"))
+            grid.addWidget(dot, row, 0)
+            grid.addWidget(QLabel(label), row, 1)
+            text = QLabel("Offline")
+            text.setStyleSheet("color: gray;")
+            grid.addWidget(text, row, 2)
+            detail = QLabel("")
+            detail.setWordWrap(True)
+            grid.addWidget(detail, row, 3)
+            self._dots[key], self._texts[key], self._details[key] = dot, text, detail
 
-            # service name
-            grid.addWidget(QLabel(label), idx, 1)
-
-            # status text
-            txt = QLabel("Offline")
-            txt.setStyleSheet("color: gray;")
-            grid.addWidget(txt, idx, 2)
-            self._status_labels[f"{key}_text"] = txt
-
-            # Start/Stop button
-            ctrl_btn = QPushButton("Start")
-            ctrl_btn.setFixedWidth(54)
-            ctrl_btn.clicked.connect(
-                lambda _, s=key: self._on_control_clicked(s)
-            )
-            grid.addWidget(ctrl_btn, idx, 3)
-            self._control_buttons[key] = ctrl_btn
-
-            # Restart button
-            rst_btn = QPushButton("Restart")
-            rst_btn.setFixedWidth(60)
-            rst_btn.clicked.connect(
-                lambda _, s=key: self.service_restart_requested.emit(s)
-            )
-            grid.addWidget(rst_btn, idx, 4)
-            self._restart_buttons[key] = rst_btn
-
-            # Settings button
-            set_btn = QPushButton("Settings")
-            set_btn.setFixedWidth(64)
-            set_btn.clicked.connect(
-                lambda _, s=key: self.service_settings_requested.emit(s)
-            )
-            grid.addWidget(set_btn, idx, 5)
-
-        # Bottom action bar
-        action_bar = QHBoxLayout()
-        outer.addLayout(action_bar)
-
-        restart_all_btn = QPushButton("Restart All Services")
-        restart_all_btn.setToolTip("Stop and restart every pipeline service")
-        restart_all_btn.clicked.connect(self.restart_all_requested.emit)
-        action_bar.addWidget(restart_all_btn)
-
-        reconnect_btn = QPushButton("Reconnect IPC")
-        reconnect_btn.setToolTip("Force-reconnect IPC clients (use after service restarts)")
-        reconnect_btn.clicked.connect(self.reconnect_ipc_requested.emit)
-        action_bar.addWidget(reconnect_btn)
-
-        action_bar.addStretch()
-
-    # ------------------------------------------------------------------
-
-    def _on_control_clicked(self, service_name: str):
-        btn = self._control_buttons[service_name]
-        self.service_control_requested.emit(service_name, btn.text() == "Start")
-
-    def update_service_status(self, service_name: str, connected: bool, can_control: bool = True):
-        if service_name not in self._services:
-            return
-        dot = self._status_labels[f"{service_name}_status"]
-        txt = self._status_labels[f"{service_name}_text"]
-        if connected:
-            dot.setStyleSheet("color: green; font-size: 16px; font-weight: bold;")
-            txt.setText("Running")
-            txt.setStyleSheet("color: green;")
-        else:
-            dot.setStyleSheet("color: red; font-size: 16px; font-weight: bold;")
-            txt.setText("Offline")
-            txt.setStyleSheet("color: gray;")
-
-    def update_service_control(self, service_name: str, is_running: bool):
-        if service_name not in self._services:
-            return
-        self._control_buttons[service_name].setText("Stop" if is_running else "Start")
-
-    def update_all_services(self, status_data: Dict):
-        for key in self._services:
-            connected = status_data.get(f'{key}_connected', False)
-            self.update_service_status(key, connected)
-            self.update_service_control(key, connected)
+        bar = QHBoxLayout()
+        outer.addLayout(bar)
+        refresh = QPushButton("Оновити")
+        refresh.clicked.connect(self.refresh_requested.emit)
+        bar.addWidget(refresh)
+        endpoints = QPushButton("Ендпоінти…")
+        endpoints.clicked.connect(self.endpoints_requested.emit)
+        bar.addWidget(endpoints)
+        bar.addStretch()
 
     def get_service_names(self) -> List[str]:
-        return list(self._services.keys())
+        return list(SERVICES)
 
+    def _set(self, key: str, ok: bool, text: str, detail: str = ""):
+        self._dots[key].setStyleSheet(_DOT.format("green" if ok else "red"))
+        self._texts[key].setText(text)
+        self._texts[key].setStyleSheet("color: green;" if ok else "color: gray;")
+        self._details[key].setText(detail)
 
-class ServiceStatusManager:
-    def __init__(self, panel: ServiceStatusPanel):
-        self.panel = panel
-
-    def update_status(self, status_data: Dict):
-        self.panel.update_all_services(status_data)
+    def update_status(self, status: Dict):
+        """Apply a status dict (get_status() plus optional ``health``)."""
+        health = status.get("health") or {}
+        pinned = status.get("pinned") or {}
+        for key in ("asr", "tts"):
+            entries = health.get(key) or []
+            ok = any(e.get("ready") for e in entries)
+            detail = f"закріплено: {pinned.get(key)}" if pinned.get(key) else ""
+            self._set(key, ok, _aggregate(entries), detail)
+        llm = (health.get("llm") or [None])[0]
+        lease = status.get("lease")
+        source = self.llm_source or (
+            "lease" if (lease or (llm or {}).get("lease")) else "direct"
+        )
+        ok = bool(llm and llm.get("ready"))
+        has_lease = bool(lease and lease.get("service"))
+        text = "готовий" if ok else ("lease" if has_lease else "Offline")
+        self._set("llm", ok or has_lease, text, format_llm_detail(llm, lease, source))

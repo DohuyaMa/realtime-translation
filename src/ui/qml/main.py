@@ -40,16 +40,12 @@ class KirigamiController(QObject):
         """Stop the translation pipeline."""
         return self._controller.stop_pipeline()
     
-    @Slot(str, result=bool)
-    def start_service(self, service_name):
-        """Start a specific service."""
-        return self._controller.start_service(service_name)
-    
-    @Slot(str, result=bool)
-    def stop_service(self, service_name):
-        """Stop a specific service."""
-        return self._controller.stop_service(service_name)
-    
+    @Slot(result=str)
+    def refresh_services(self):
+        """Force a health poll; returns JSON."""
+        import json
+        return json.dumps(self._controller.refresh_services())
+
     @Slot(str, str, result=bool)
     def set_languages(self, source_lang, target_lang="en"):
         """Set source and target languages."""

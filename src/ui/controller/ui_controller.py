@@ -7,6 +7,8 @@ import time
 from ...controller.translator_controller import ConcreteTranslatorController
 from ...controller.controller import Device
 
+HEALTH_INTERVAL_S = 5.0
+
 
 class UIController:
     """UI Controller for managing UI-specific logic and connecting to the backend controller."""
@@ -18,6 +20,8 @@ class UIController:
         self._update_callback: Optional[Callable] = None
         self._event_callbacks: Dict[str, Callable] = {}
         self._last_status = {}
+        self._last_health: Dict = {}
+        self._last_health_at = float('-inf')
         self._polling_thread = None
         self._polling_active = False
         # Store original adapter to allow reconfiguration
@@ -55,6 +59,11 @@ class UIController:
         while self._polling_active:
             try:
                 current_status = self._controller.get_status()
+                now = time.monotonic()
+                if now - self._last_health_at >= HEALTH_INTERVAL_S:
+                    self._last_health_at = now
+                    self._last_health = self.refresh_services()
+                current_status = {**current_status, "health": self._last_health}
                 # Always call the update callback so that:
                 # - audio levels refresh every tick
                 # - pending_recognized / pending_translated are never dropped
@@ -93,91 +102,30 @@ class UIController:
         else:
             return self.start_pipeline()
     
-    def start_service(self, service_name: str) -> bool:
-        """Start a specific service."""
-        result = self._controller.start_service(service_name)
-        if result and self._status_callback:
-            self._status_callback(f'{service_name.capitalize()} service started')
-        return result
-    
-    def stop_service(self, service_name: str) -> bool:
-        """Stop a specific service."""
-        result = self._controller.stop_service(service_name)
-        if result and self._status_callback:
-            self._status_callback(f'{service_name.capitalize()} service stopped')
-        return result
-    
-    def toggle_service(self, service_name: str) -> bool:
-        """Toggle a specific service on/off."""
-        status = self._controller.get_status()
-        is_connected = status.get(f'{service_name}_connected', False)
-        if is_connected:
-            return self.stop_service(service_name)
-        else:
-            return self.start_service(service_name)
+    def refresh_services(self) -> Dict:
+        """Force a health poll of the remote services."""
+        try:
+            return self._controller.refresh_services()
+        except Exception as e:
+            logger.error(f"Error refreshing services: {e}")
+            return {}
 
-    def restart_service(self, service_name: str) -> bool:
-        """Restart a specific service."""
-        adapter = getattr(self._controller, '_adapter', None)
-        if adapter and hasattr(adapter, 'restart_service'):
-            ok = adapter.restart_service(service_name)
-            if self._status_callback:
-                self._status_callback(
-                    f'{service_name.capitalize()} service restarted' if ok
-                    else f'Failed to restart {service_name} service'
-                )
-            return ok
-        return False
-
-    def restart_all_services(self) -> bool:
-        """Restart all pipeline services."""
-        adapter = getattr(self._controller, '_adapter', None)
-        if adapter and hasattr(adapter, 'restart_all_services'):
-            results = adapter.restart_all_services()
-            failed = [k for k, v in results.items() if not v]
-            if self._status_callback:
-                msg = 'All services restarted' if not failed else f'Restart failed: {", ".join(failed)}'
-                self._status_callback(msg)
-            return not failed
-        return False
-
-    def change_whisper_model(self, model_name: str, progress_cb=None, done_cb=None):
-        """Download (if needed) + restart whisper service with new model.
-
-        Runs in a background thread so the UI stays responsive.
-        progress_cb(pct: int, msg: str) — called from background thread.
-        done_cb(success: bool) — called from background thread when finished.
-        """
-        import threading
-
-        def _run():
-            adapter = getattr(self._controller, '_adapter', None)
-            if adapter and hasattr(adapter, 'change_whisper_model'):
-                ok = adapter.change_whisper_model(model_name, progress_cb=progress_cb)
+    def reconfigure_services(self, settings) -> bool:
+        """Apply new EdgeSettings; report the backend error on failure."""
+        ok = self._controller.reconfigure_services(settings)
+        if self._status_callback:
+            if ok:
+                self._status_callback('Service settings applied')
             else:
-                logger.error("change_whisper_model: adapter does not support this operation")
-                ok = False
-            if self._status_callback:
-                self._status_callback(
-                    f"Whisper model changed to '{model_name}'" if ok
-                    else f"Failed to change whisper model to '{model_name}'"
-                )
-            if done_cb:
-                done_cb(ok)
+                err = self.last_error() or 'unknown error'
+                self._status_callback(f'Settings rejected: {err}')
+        return ok
 
-        t = threading.Thread(target=_run, daemon=True, name="whisper-model-change")
-        t.start()
-
-    def reconnect_ipc(self) -> int:
-        """Force-reconnect all IPC clients."""
+    def last_error(self) -> Optional[str]:
+        """Last backend error (settings rejected / start failed)."""
         adapter = getattr(self._controller, '_adapter', None)
-        if adapter and hasattr(adapter, 'reconnect_ipc'):
-            n = adapter.reconnect_ipc()
-            if self._status_callback:
-                self._status_callback(f'IPC reconnected: {n} client(s)')
-            return n
-        return 0
-    
+        return getattr(adapter, 'last_error', None)
+
     def set_languages(self, source_lang: str, target_lang: str = "en") -> bool:
         """Set source and target languages."""
         result = self._controller.set_languages(source_lang, target_lang)
@@ -246,104 +194,6 @@ class UIController:
                 **audio_levels
             }
             self._update_callback(update_data)
-    
-    def reconfigure_controller(self, use_wyoming=False, wyoming_host="localhost", wyoming_port=10300):
-        """Reconfigure the controller with new Wyoming settings."""
-        try:
-            # Check if the current adapter supports reconfiguration
-            current_adapter = self._controller._adapter
-            
-            if hasattr(current_adapter, 'reconfigure_wyoming'):
-                # Use the reconfigure method if available
-                success = current_adapter.reconfigure_wyoming(
-                    use_wyoming=use_wyoming,
-                    wyoming_host=wyoming_host,
-                    wyoming_port=wyoming_port
-                )
-                return success
-            else:
-                # Fallback to creating a new controller (original behavior)
-                # Get current status before reconfiguring
-                current_status = self._controller.get_status()
-                was_running = current_status.get('running', False)
-                
-                # Stop the current pipeline if it's running
-                if was_running:
-                    self._controller.stop_pipeline()
-                
-                # Get the current languages
-                source_lang = current_status.get('source_language', 'auto')
-                target_lang = current_status.get('target_language', 'en')
-                
-                # Create a new adapter with the Wyoming settings
-                from ...adapters.direct_adapter import DirectAdapter
-                new_adapter = DirectAdapter(
-                    source_lang=source_lang,
-                    target_lang=target_lang,
-                    use_wyoming=use_wyoming,
-                    wyoming_host=wyoming_host,
-                    wyoming_port=wyoming_port
-                )
-                
-                # Create a new controller with the new adapter
-                from ...controller.translator_controller import ConcreteTranslatorController
-                new_controller = ConcreteTranslatorController(new_adapter)
-                
-                # Replace the current controller
-                old_controller = self._controller
-                self._controller = new_controller
-                
-                # If the pipeline was running, start it again with new settings
-                if was_running:
-                    self._controller.start_pipeline()
-                
-                # Clean up the old controller
-                old_controller.cleanup()
-                
-                return True
-        except Exception as e:
-            logger.error(f"Error reconfiguring controller: {e}")
-            return False
-    
-    def update_service_config(self, service_name: str, config: dict):
-        """Update configuration for a specific service."""
-        try:
-            if service_name == 'whisper':
-                # Handle whisper service configuration updates
-                use_wyoming = config.get('use_wyoming', False)
-                wyoming_host = config.get('wyoming_host', 'localhost')
-                wyoming_port = config.get('wyoming_port', 10300)
-                
-                # Reconfigure the controller with new Wyoming settings
-                return self.reconfigure_controller(
-                    use_wyoming=use_wyoming,
-                    wyoming_host=wyoming_host,
-                    wyoming_port=wyoming_port
-                )
-            elif service_name == 'translate':
-                # Update translation languages
-                source_lang = config.get('source_lang', 'auto')
-                target_lang = config.get('target_lang', 'en')
-                return self.set_languages(source_lang, target_lang)
-            elif service_name == 'tts':
-                # TTS configuration would be handled by the TTS service directly
-                # For now, just log the configuration change
-                logger.info(f"TTS service configuration updated: {config}")
-                return True
-            elif service_name == 'capture':
-                # Capture configuration would be handled by the capture service directly
-                logger.info(f"Capture service configuration updated: {config}")
-                return True
-            elif service_name == 'playback':
-                # Playback configuration would be handled by the playback service directly
-                logger.info(f"Playback service configuration updated: {config}")
-                return True
-            else:
-                logger.warning(f"Unknown service: {service_name}")
-                return False
-        except Exception as e:
-            logger.error(f"Error updating {service_name} configuration: {e}")
-            return False
     
     def cleanup(self):
         """Clean up resources."""

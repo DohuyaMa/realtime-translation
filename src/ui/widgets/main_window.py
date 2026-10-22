@@ -16,6 +16,7 @@ from ...controller.translator_controller import ConcreteTranslatorController
 from ...adapters import DirectAdapter
 from .status_logger import StatusLogger, StatusManager
 from .service_status_panel import ServiceStatusPanel
+from ...core.runtime import EdgeSettings
 from .settings_dialog import SettingsButton
 
 
@@ -40,18 +41,6 @@ class MainWindow(QMainWindow):
         self.is_translating = False
         self.update_timer: Optional[QTimer] = None
         
-        # Wyoming settings — read from config so Settings dialog shows actual state
-        try:
-            from ...core.config import get_config_manager
-            wy_cfg = get_config_manager().get_wyoming_config()
-            self._current_use_wyoming = wy_cfg.get("use_wyoming", False)
-            self._current_wyoming_host = wy_cfg.get("host", "localhost")
-            self._current_wyoming_port = wy_cfg.get("port", 10300)
-        except Exception:
-            self._current_use_wyoming = False
-            self._current_wyoming_host = "localhost"
-            self._current_wyoming_port = 10300
-        
         # Connect UI controller callbacks
         self._update_signal.connect(self._apply_ui_update)
         self.ui_controller.set_status_callback(self.handle_status_update)
@@ -61,11 +50,13 @@ class MainWindow(QMainWindow):
         self.setup_tray_icon()
         self.refresh_device_lists()
         
-        self.service_status_panel.service_control_requested.connect(self.on_service_control_requested)
-        self.service_status_panel.service_settings_requested.connect(self.on_service_settings_requested)
-        self.service_status_panel.service_restart_requested.connect(self.on_service_restart_requested)
-        self.service_status_panel.restart_all_requested.connect(self.on_restart_all_requested)
-        self.service_status_panel.reconnect_ipc_requested.connect(self.on_reconnect_ipc_requested)
+        self.service_status_panel.refresh_requested.connect(
+            self.on_refresh_requested
+        )
+        self.service_status_panel.endpoints_requested.connect(
+            self.settings_button.open_settings
+        )
+        self._sync_llm_source()
         self.ui_controller.start_event_polling(interval=0.5)
         
     def init_ui(self):
@@ -94,7 +85,7 @@ class MainWindow(QMainWindow):
         source_layout = QHBoxLayout()
         source_layout.addWidget(QLabel("Source Language:"))
         self.source_lang_combo = QComboBox()
-        self.source_lang_combo.addItems(["Auto", "Ukrainian (uk)", "Polish (pl)"])
+        self.source_lang_combo.addItems(["Auto", "Ukrainian (uk)", "Polish (pl)", "Russian (ru)", "English (en)"])
         self.source_lang_combo.currentTextChanged.connect(self.on_language_changed)
         source_layout.addWidget(self.source_lang_combo)
         lang_layout.addLayout(source_layout)
@@ -362,197 +353,40 @@ class MainWindow(QMainWindow):
             self.status_manager.log_translated(text)
 
         # Service status indicators
-        from .service_status_panel import ServiceStatusManager
-        ServiceStatusManager(self.service_status_panel).update_status(update_data)
+        self.service_status_panel.update_status(update_data)
+        err = update_data.get('last_error')
+        if err and err != getattr(self, '_last_shown_error', None):
+            self.status_manager.log_error(str(err))
+        self._last_shown_error = err
     
-    def on_service_control_requested(self, service_name: str, should_start: bool):
-        """Handle service control requests from the service status panel."""
-        if not self.ui_controller:
-            return
-        
+    def _sync_llm_source(self):
         try:
-            if should_start:
-                success = self.ui_controller.start_service(service_name)
-                if success:
-                    self.status_manager.log_info(f'{service_name.capitalize()} service started')
-                else:
-                    self.status_manager.log_error(f'Failed to start {service_name} service')
-            else:
-                success = self.ui_controller.stop_service(service_name)
-                if success:
-                    self.status_manager.log_info(f'{service_name.capitalize()} service stopped')
-                else:
-                    self.status_manager.log_error(f'Failed to stop {service_name} service')
-        except Exception as e:
-            logger.error(f"Failed to control {service_name} service: {e}")
-            self.status_manager.log_error(f"Error controlling {service_name} service: {e}")
+            from .settings_dialog import current_settings
 
-    def on_service_restart_requested(self, service_name: str):
-        """Restart a single service via systemctl."""
-        if not self.ui_controller:
-            return
-        try:
-            ok = self.ui_controller.restart_service(service_name)
-            if ok:
-                self.status_manager.log_info(f'{service_name.capitalize()} service restarted')
-            else:
-                self.status_manager.log_error(f'Failed to restart {service_name} service')
+            self.service_status_panel.llm_source = current_settings().llm.source()
         except Exception as e:
-            logger.error(f"Error restarting {service_name}: {e}")
-            self.status_manager.log_error(f"Error restarting {service_name}: {e}")
+            logger.error(f"Cannot resolve LLM source: {e}")
 
-    def on_restart_all_requested(self):
-        """Restart all pipeline services."""
-        if not self.ui_controller:
-            return
-        self.status_manager.log_info('Restarting all services...')
-        try:
-            ok = self.ui_controller.restart_all_services()
-            if ok:
-                self.status_manager.log_info('All services restarted successfully')
-            else:
-                self.status_manager.log_error('Some services failed to restart — check logs')
-        except Exception as e:
-            logger.error(f"Error restarting all services: {e}")
-            self.status_manager.log_error(f"Error restarting all services: {e}")
+    def on_refresh_requested(self):
+        """Force a health poll of the remote services."""
+        if self.ui_controller:
+            self.ui_controller.refresh_services()
+            self.status_manager.log_info('Service health refreshed')
 
-    def on_reconnect_ipc_requested(self):
-        """Force-reconnect IPC clients."""
-        if not self.ui_controller:
-            return
-        try:
-            n = self.ui_controller.reconnect_ipc()
-            self.status_manager.log_info(f'IPC reconnected: {n} client(s) connected')
-        except Exception as e:
-            logger.error(f"Error reconnecting IPC: {e}")
-            self.status_manager.log_error(f"Error reconnecting IPC: {e}")
-
-    def on_service_settings_requested(self, service_name: str):
-        """Handle service settings requests from the service status panel."""
-        logger.info(f"Service settings requested for: {service_name}")
-        
-        # Create service-specific settings dialog
-        from .service_settings_dialog import ServiceSettingsDialog
-        current_settings = {}
-        
-        if service_name == 'whisper':
-            current_settings = {
-                'use_wyoming': getattr(self, '_current_use_wyoming', False),
-                'wyoming_host': getattr(self, '_current_wyoming_host', 'localhost'),
-                'wyoming_port': getattr(self, '_current_wyoming_port', 10300)
-            }
-        elif service_name == 'translate':
-            current_settings = {
-                'source_lang': getattr(self, '_current_source_lang', 'auto'),
-                'target_lang': getattr(self, '_current_target_lang', 'en')
-            }
-        elif service_name == 'tts':
-            current_settings = {
-                'tts_voice': getattr(self, '_current_tts_voice', 'Default'),
-                'speech_speed': getattr(self, '_current_speech_speed', 100)
-            }
-        elif service_name == 'capture':
-            current_settings = {
-                'sample_rate': getattr(self, '_current_sample_rate', 16000),
-                'input_device': getattr(self, '_current_input_device', 'Default')
-            }
-        elif service_name == 'playback':
-            current_settings = {
-                'output_device': getattr(self, '_current_output_device', 'Default'),
-                'volume': getattr(self, '_current_volume', 80)
-            }
-        
-        dialog = ServiceSettingsDialog(service_name, current_settings, self)
-        dialog.settings_changed.connect(self.on_service_specific_settings_changed)
-        dialog.exec()
-    
-    def on_service_specific_settings_changed(self, service_name: str, settings: dict):
-        """Handle service-specific settings changes."""
-        logger.info(f"Service settings changed for {service_name}: {settings}")
-        
-        # Store the settings for future reference
-        for key, value in settings.items():
-            setattr(self, f'_current_{service_name}_{key}', value)
-        
-        # Apply settings using the UI controller
-        success = self.ui_controller.update_service_config(service_name, settings)
-        
-        if success:
-            self.status_manager.log_info(f"Settings applied for {service_name} service")
-            
-            # Store the settings for future reference
-            for key, value in settings.items():
-                setattr(self, f'_current_{service_name}_{key}', value)
-                
-            # Special handling for certain settings
-            if service_name == 'translate':
-                # Update language combo boxes
-                source_lang = settings.get('source_lang', 'auto')
-                self._update_language_combo(self.source_lang_combo, source_lang)
-        else:
-            self.status_manager.log_error(f"Failed to apply settings for {service_name} service")
-        
     def on_general_settings_changed(self, settings):
-        """Handle general settings changes from the settings dialog."""
-        logger.info(f"General settings changed: {settings}")
-        
-        # Store current settings for future reference
-        self.current_settings = settings
-        
-        # Check if Wyoming settings have changed
-        use_wyoming = settings.get('use_wyoming', False)
-        wyoming_host = settings.get('wyoming_host', 'localhost')
-        wyoming_port = settings.get('wyoming_port', 10300)
-        
-        wyoming_changed = (
-            hasattr(self, '_current_use_wyoming') and
-            (self._current_use_wyoming != use_wyoming or
-             self._current_wyoming_host != wyoming_host or
-             self._current_wyoming_port != wyoming_port)
-        )
-        
-        # Store current Wyoming settings
-        self._current_use_wyoming = use_wyoming
-        self._current_wyoming_host = wyoming_host
-        self._current_wyoming_port = wyoming_port
-        
-        # If Wyoming settings have changed, we need to reconfigure the controller
-        if wyoming_changed:
-            # Stop the current pipeline if it's running
-            if self.is_translating:
-                self.ui_controller.stop_pipeline()
-                self.translate_button.setText("Start Translation")
-                self.is_translating = False
-            
-            # Reconfigure the controller with new Wyoming settings
-            success = self.ui_controller.reconfigure_controller(
-                use_wyoming=use_wyoming,
-                wyoming_host=wyoming_host,
-                wyoming_port=wyoming_port
+        """Apply EdgeSettings saved from the endpoints dialog."""
+        if not self.ui_controller or not isinstance(settings, EdgeSettings):
+            return
+        self.service_status_panel.llm_source = settings.llm.source()
+        if self.ui_controller.reconfigure_services(settings):
+            self.status_manager.log_info("Settings applied successfully")
+            self._update_language_combo(
+                self.source_lang_combo, settings.source_language
             )
-            
-            if success:
-                self.status_manager.log_info("Wyoming configuration updated successfully")
-                
-                # If we were translating before, start the pipeline again with new settings
-                if self.is_translating:
-                    self.ui_controller.start_pipeline()
-            else:
-                self.status_manager.log_error("Failed to update Wyoming configuration")
-                return
         else:
-            # Apply language settings only if Wyoming settings didn't change
-            source_lang = settings.get('source_lang', 'auto')
-            target_lang = settings.get('target_lang', 'en')
-            self.ui_controller.set_languages(source_lang, target_lang)
-            
-            # Update language combo boxes
-            self._update_language_combo(self.source_lang_combo, source_lang)
-        
-        # Update UI elements to reflect new settings
-        # Update UI elements to reflect new settings
-        self.status_manager.log_info("Settings applied successfully")
-    
+            err = self.ui_controller.last_error() or "unknown error"
+            self.status_manager.log_error(f"Settings rejected: {err}")
+
     def on_settings_changed(self, settings):
         """Handle settings changes from the settings dialog - legacy method."""
         # This is now an alias to the new method
@@ -565,6 +399,7 @@ class MainWindow(QMainWindow):
             'uk': 'Ukrainian (uk)',
             'pl': 'Polish (pl)',
             'en': 'English (en)',
+            'ru': 'Russian (ru)',
             'de': 'German (de)',
             'fr': 'French (fr)',
             'es': 'Spanish (es)'
