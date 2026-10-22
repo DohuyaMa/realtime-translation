@@ -1,34 +1,50 @@
 {
-  description = "Real-time speech translation system";
+  description = "Real-time speech translation: edge UI + ASR/TTS services";
+
+  # HINT only: CUDA variants (rt-*-gpu) are substitutable from cache.nixos-cuda.org.
+  # Untrusted users' flake nixConfig is ignored — CUDA hosts get it via system
+  # nix.settings in the infra. Never relied upon for correctness.
+  nixConfig = {
+    extra-substituters = [ "https://cache.nixos-cuda.org" ];
+    extra-trusted-public-keys = [ "cache.nixos-cuda.org:74DUi4Ye579gUqzH4ziL9IyiJBlDpMRn9MBN8oNan9M=" ];
+  };
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
-    flake-utils.url = "github:numtide/flake-utils";
     home-manager = {
       url = "github:nix-community/home-manager";
       inputs.nixpkgs.follows = "nixpkgs";
     };
   };
 
-  outputs = { self, nixpkgs, flake-utils, home-manager, ... }:
-    flake-utils.lib.eachSystem [ "x86_64-linux" "aarch64-linux" "aarch64-darwin" "x86_64-darwin" ] (system:
-      let
-        pkgs = import nixpkgs {
-          inherit system;
-          config.allowUnfree = true;
-        };
-        lib = nixpkgs.lib;
-        packages = (import ./flake-global/prod/packages.nix { inherit pkgs lib; }).packages;
-      in {
-        inherit packages;
-        devShells = (import ./flake-global/dev/devshell.nix { inherit pkgs; }).devShells;
-        apps.default = {
+  outputs = { self, nixpkgs, home-manager, ... }:
+    let
+      lib = nixpkgs.lib;
+      systems = [ "x86_64-linux" ];
+      pkgsFor = system: import nixpkgs { inherit system; config.allowUnfree = true; };
+      forAllSystems = f: lib.genAttrs systems (system: f (pkgsFor system));
+      rtLib = import ./nix/lib { inherit lib; };
+    in
+    {
+      lib.rtSpeech = rtLib;
+
+      # LEGACY — deleted in Task 2b.
+      packages = forAllSystems (pkgs: (import ./flake-global/prod/packages.nix { inherit pkgs lib; }).packages);
+      apps = forAllSystems (pkgs: {
+        default = {
           type = "app";
-          program = "${packages.default}/bin/translator-ui";
+          program = "${self.packages.${pkgs.stdenv.hostPlatform.system}.default}/bin/translator-ui";
         };
-      }
-    ) // {
+      });
       homeManagerModules.rt-translator = import ./flake-global/home-manager-module.nix;
-      nixosModules.virtual-sinks = import ./nixosModules/virtual-sinks.nix;
+
+      nixosModules.virtual-sinks = import ./nix/nixos/virtual-sinks.nix;
+
+      devShells = forAllSystems (pkgs: { default = import ./nix/devshell.nix { inherit pkgs; }; });
+
+      checks = forAllSystems (pkgs: {
+        flake-purity = import ./nix/checks/flake-purity.nix { inherit pkgs; src = self; };
+        env-lines = import ./nix/checks/env-lines.nix { inherit pkgs rtLib; };
+      });
     };
 }
