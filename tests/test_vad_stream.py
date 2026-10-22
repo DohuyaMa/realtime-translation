@@ -27,9 +27,7 @@ def _run(block: int, flush: bool = False):
     for i in range(0, len(sig), block):
         out += stream.feed_block(sig[i : i + block])
     if flush:
-        tail = stream.flush()
-        if tail is not None:
-            out.append(tail)
+        out += stream.flush()
     return out
 
 
@@ -116,8 +114,10 @@ def test_flush_keeps_all_segments_from_padded_remainder():
     emitted = stream.feed_block(np.full(n, 0.3, dtype=np.float32))
     flushed = stream.flush()
     allsegs = emitted + flushed
-    assert flushed
+    assert len(flushed) >= 2
     ends = [s.end_s for s in allsegs]
     assert ends == sorted(ends)
     total = sum(len(s.audio) for s in allsegs)
-    assert total >= 21 * 512  # 20 full windows plus the padded remainder
+    assert total == 21 * 512  # 20 full windows plus the padded remainder
+    for prev, cur in zip(allsegs, allsegs[1:]):
+        assert cur.start_s == prev.end_s
