@@ -1,4 +1,4 @@
-"""Lease an existing llama worker through Django (see llm-worker-lease-design §2.3, §5)."""
+"""Lease an existing llama worker through Django (lease design spec 2.3, 5)."""
 
 from __future__ import annotations
 
@@ -57,7 +57,9 @@ class DjangoLeaseApi:
         if token:
             headers["Authorization"] = f"Token {token}"
         try:
-            return self._http.request(method, self.django_url + path, headers=headers, **kwargs)
+            return self._http.request(
+                method, self.django_url + path, headers=headers, **kwargs
+            )
         except httpx.TimeoutException as e:
             raise ServiceError(SERVICE, "timeout", str(e)) from e
         except httpx.TransportError as e:
@@ -86,21 +88,29 @@ class DjangoLeaseApi:
                 worker_token=d["worker_token"],
                 ttl_s=int(d["ttl_s"]),
                 heartbeat_interval_s=int(d["heartbeat_interval_s"]),
-                expires_at=datetime.fromisoformat(d["expires_at"].replace("Z", "+00:00")),
+                expires_at=datetime.fromisoformat(
+                    d["expires_at"].replace("Z", "+00:00")
+                ),
             )
         except (ValueError, KeyError, TypeError, AttributeError) as e:
             raise ServiceError(SERVICE, "http", f"bad lease payload: {e}") from e
 
     def acquire(self, client_name: str, service: Optional[str], ttl_s: int) -> Lease:
         resp = self._call(
-            "POST", "/api/llm/leases/", json={"client_name": client_name, "service": service, "ttl_s": ttl_s}
+            "POST",
+            "/api/llm/leases/",
+            json={"client_name": client_name, "service": service, "ttl_s": ttl_s},
         )
         if resp.status_code != 201:
             raise LeaseError(resp.status_code, self._detail(resp))
         return self._parse(resp)
 
     def heartbeat(self, lease: Lease, ttl_s: Optional[int] = None) -> Lease:
-        resp = self._call("POST", f"/api/llm/leases/{lease.id}/heartbeat/", json={"ttl_s": ttl_s})
+        resp = self._call(
+            "POST",
+            f"/api/llm/leases/{lease.id}/heartbeat/",
+            json={} if ttl_s is None else {"ttl_s": ttl_s},
+        )
         if resp.status_code != 200:
             raise LeaseError(resp.status_code, self._detail(resp))
         return self._parse(resp)
@@ -125,7 +135,9 @@ class LeaseKeeper:
     ) -> None:
         self._settings = settings
         self._client_name = client_name or f"rt-edge@{socket.gethostname()}"
-        self._api_factory = api_factory or (lambda url: DjangoLeaseApi(url, settings.django_token_file))
+        self._api_factory = api_factory or (
+            lambda url: DjangoLeaseApi(url, settings.django_token_file)
+        )
         self._apis: dict[str, DjangoLeaseApi] = {}
         self._clock = clock
         self._sleep = sleep
@@ -151,7 +163,9 @@ class LeaseKeeper:
         primary: Optional[Lease] = None
         for url in self._settings.django_urls:
             try:
-                primary = self._api(url).acquire(self._client_name, service, self._settings.lease_ttl_s)
+                primary = self._api(url).acquire(
+                    self._client_name, service, self._settings.lease_ttl_s
+                )
                 break
             except (LeaseError, ServiceError) as e:
                 logger.warning("lease acquire on {} failed: {}", url, e)
@@ -180,7 +194,9 @@ class LeaseKeeper:
 
     def _release_all(self) -> None:
         with self._lock:
-            leases = ([self._primary] if self._primary else []) + list(self._mirrors.values())
+            leases = ([self._primary] if self._primary else []) + list(
+                self._mirrors.values()
+            )
             self._primary = None
             self._mirrors = {}
         for lease in leases:
@@ -196,8 +212,13 @@ class LeaseKeeper:
             lease = self._acquire_all(self._settings.service)
             self._started = True
             if self._thread is None:
-                self._stop.clear()
-                self._thread = threading.Thread(target=self._run, name="lease-heartbeat", daemon=True)
+                self._stop = threading.Event()
+                self._thread = threading.Thread(
+                    target=self._run,
+                    args=(self._stop,),
+                    name="lease-heartbeat",
+                    daemon=True,
+                )
                 self._thread.start()
             return lease
 
@@ -214,7 +235,9 @@ class LeaseKeeper:
     def current(self) -> tuple[str, str]:
         with self._lock:
             if self._primary is None:
-                raise ServiceError(SERVICE, "unreachable", self._error or "lease not started")
+                raise ServiceError(
+                    SERVICE, "unreachable", self._error or "lease not started"
+                )
             return self._primary.base_url, self._primary.worker_token
 
     def invalidate(self, kind: str) -> None:
@@ -242,18 +265,21 @@ class LeaseKeeper:
                 "model": p.current_model if p else None,
                 "expires_at": p.expires_at.isoformat() if p else None,
                 "django": p.django_url if p else None,
-                "mirrors": [{"django": m.django_url, "service": m.service_name} for m in self._mirrors.values()],
+                "mirrors": [
+                    {"django": m.django_url, "service": m.service_name}
+                    for m in self._mirrors.values()
+                ],
                 "error": self._error,
             }
 
     # -- heartbeat ---------------------------------------------------------
 
-    def _run(self) -> None:
-        while not self._stop.is_set():
+    def _run(self, stop: threading.Event) -> None:
+        while not stop.is_set():
             with self._lock:
                 interval = self._primary.heartbeat_interval_s if self._primary else 10
             self._sleep(interval)
-            if self._stop.is_set():
+            if stop.is_set():
                 break
             try:
                 self.tick()
@@ -276,15 +302,22 @@ class LeaseKeeper:
                 self._reacquire()
             else:
                 logger.warning("primary heartbeat failed: {}", e)
+                with self._lock:
+                    self._error = str(e)
+                if self._clock() >= self._deadline:
+                    self._reacquire()
             return
         except ServiceError as e:
             logger.warning("primary heartbeat network error: {}", e)
+            with self._lock:
+                self._error = str(e)
             if self._clock() >= self._deadline:
                 self._reacquire()
             return
         with self._lock:
             self._primary = fresh
             self._deadline = self._clock() + fresh.ttl_s
+            self._error = None
 
     def tick(self) -> None:
         """One heartbeat round for the primary lease and mirrors."""
@@ -311,7 +344,9 @@ class LeaseKeeper:
                     if e.status_code in (404, 410):
                         try:
                             new = self._api(url).acquire(
-                                self._client_name, primary.service_name, self._settings.lease_ttl_s
+                                self._client_name,
+                                primary.service_name,
+                                self._settings.lease_ttl_s,
                             )
                             with self._lock:
                                 self._mirrors[url] = new

@@ -14,7 +14,11 @@ EXP = "2030-01-01T00:00:00Z"
 def lease_json(lid, name, token="sha256:t1"):
     return {
         "id": lid,
-        "service": {"name": name, "base_url": f"http://{name}:8080", "current_model": "m.gguf"},
+        "service": {
+            "name": name,
+            "base_url": f"http://{name}:8080",
+            "current_model": "m.gguf",
+        },
         "worker_token": token,
         "ttl_s": 60,
         "heartbeat_interval_s": 20,
@@ -30,7 +34,9 @@ class FakeDjango:
     def __call__(self, request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content) if request.content else None
         host = request.url.host
-        self.calls.append((host, request.method, request.url.path, body, dict(request.headers)))
+        self.calls.append(
+            (host, request.method, request.url.path, body, dict(request.headers))
+        )
         h = self.handlers.get(host)
         if h is None:
             raise httpx.ConnectError("down")
@@ -123,6 +129,7 @@ def test_heartbeat_refreshes_worker_token(env):
     k.tick()
     assert k.current()[1] == "sha256:t2"
     assert fake.calls[-1][2] == "/api/llm/leases/a1/heartbeat/"
+    assert fake.calls[-1][3] == {}
     finish(k)
 
 
@@ -176,6 +183,8 @@ def test_invalidate_unreachable_releases_and_reacquires(env, kind):
     k.start()
     k.invalidate(kind)
     assert fake.of("a", "DELETE")[0][2] == "/api/llm/leases/a1/"
+    methods = [c[1] for c in fake.calls]
+    assert methods.index("DELETE") < len(methods) - 1 - methods[::-1].index("POST")
     assert fake.of("a", "POST")[1][3]["service"] is None
     assert k.current()[0] == "http://w2:8080"
     finish(k)
@@ -187,7 +196,9 @@ def test_stop_releases_all_and_is_idempotent(env):
     fake.handlers["b"] = ok_acquire("b1", "w1")
     for h in ("a", "b"):
         base = fake.handlers[h]
-        fake.handlers[h] = lambda r, b, base=base: httpx.Response(204) if r.method == "DELETE" else base(r, b)
+        fake.handlers[h] = lambda r, b, base=base: (
+            httpx.Response(204) if r.method == "DELETE" else base(r, b)
+        )
     k = make(("http://a", "http://b"))
     k.start()
     finish(k)
@@ -207,4 +218,30 @@ def test_request_bodies_match_spec(env):
     assert (method, path) == ("POST", "/api/llm/leases/")
     assert body == {"client_name": "rt-edge@test", "service": None, "ttl_s": 60}
     assert headers["authorization"] == "Token usertoken"
+    finish(k)
+
+
+def test_heartbeat_server_error_after_deadline_reacquires(env):
+    fake, make = env
+    now = [0.0]
+    leases = iter([lease_json("a1", "w1"), lease_json("a2", "w2")])
+
+    def h(r, b):
+        if r.url.path.endswith("heartbeat/"):
+            return httpx.Response(500, json={"detail": "boom"})
+        if r.method == "DELETE":
+            return httpx.Response(204)
+        return httpx.Response(201, json=next(leases))
+
+    fake.handlers["a"] = h
+    k = make(("http://a",))
+    k._clock = lambda: now[0]
+    k.start()
+    k.tick()  # before deadline: kept, error recorded
+    assert k.current()[0] == "http://w1:8080"
+    assert "500" in k.snapshot()["error"]
+    now[0] = 61.0
+    k.tick()
+    assert k.current()[0] == "http://w2:8080"
+    assert k.snapshot()["error"] is None
     finish(k)
