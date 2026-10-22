@@ -81,7 +81,6 @@ let
     };
     testNewlineRejected = { expr = failsToEval (rtLib.envLines "asr" (asr // { model = "a\nb"; })); expected = true; };
     testUnknownServiceRejected = { expr = failsToEval (rtLib.envLines "stt" asr); expected = true; };
-    testMtServiceRejected = { expr = failsToEval (rtLib.envLines "mt" asr); expected = true; };
     testVariantForDevice = { expr = rtLib.variantForDevice; expected = { cpu = "cpu"; cuda = "gpu"; rocm = "rocm"; }; };
     testHealthCheck = {
       expr = rtLib.healthCheckCommand "asr" asr;

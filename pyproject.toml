@@ -15,10 +15,4 @@ where = ["."]
 include = ["src*"]
 
 [project.scripts]
-translator-capture          = "src.capture.capture_service:main"
-translator-playback         = "src.playback.playback_service:main"
-translator-whisper          = "src.whisper.whisper_service:main"
-translator-hybrid-whisper   = "src.whisper.hybrid_whisper_service:main"
-translator-translate        = "src.translate.translate_service:main"
-translator-tts              = "src.tts.tts_service:main"
 translator-ui               = "src.main:main"

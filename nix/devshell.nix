@@ -10,9 +10,8 @@ pkgs.mkShell {
       ++ (with ps; [
         # speech services (cpu) — service code runs from here in dev
         fastapi uvicorn pydantic python-multipart httpx
-        faster-whisper ctranslate2 sentencepiece huggingface-hub
+        faster-whisper ctranslate2 huggingface-hub
         kokoro onnxruntime soundfile enCoreWebSm
-        transformers   # legacy; removed in Task 2b
         # tests / tooling
         pytest pytest-asyncio pytest-timeout black flake8 mypy
       ])))

@@ -28,16 +28,6 @@
     {
       lib.rtSpeech = rtLib;
 
-      # LEGACY — deleted in Task 2b.
-      packages = forAllSystems (pkgs: (import ./flake-global/prod/packages.nix { inherit pkgs lib; }).packages);
-      apps = forAllSystems (pkgs: {
-        default = {
-          type = "app";
-          program = "${self.packages.${pkgs.stdenv.hostPlatform.system}.default}/bin/translator-ui";
-        };
-      });
-      homeManagerModules.rt-translator = import ./flake-global/home-manager-module.nix;
-
       nixosModules.virtual-sinks = import ./nix/nixos/virtual-sinks.nix;
 
       devShells = forAllSystems (pkgs: { default = import ./nix/devshell.nix { inherit pkgs; }; });
