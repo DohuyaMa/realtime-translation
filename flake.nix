@@ -38,6 +38,7 @@
         flake-purity = import ./nix/checks/flake-purity.nix { inherit pkgs; src = self; };
         nixos-eval-gpu = import ./nix/checks/nixos-eval-gpu.nix { inherit pkgs self nixpkgs; };
         env-lines = import ./nix/checks/env-lines.nix { inherit pkgs rtLib; };
+        nixos-rt-speech = import ./nix/checks/nixos-rt-speech.nix { inherit pkgs self; };
       });
     };
 }
