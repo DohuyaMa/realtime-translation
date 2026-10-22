@@ -137,6 +137,7 @@ class TranslationSystem:
         self._mode = settings.effective_mode()
         self._chunk_queue = self._new_chunk_queue()
         self._lease_held = False
+        self._stream: Any = None
         self._playback_queue: queue.Queue = queue.Queue(maxsize=PLAYBACK_QUEUE_MAX)
         self._audio_q: queue.Queue = queue.Queue()
         self._capturing = False
@@ -258,6 +259,17 @@ class TranslationSystem:
         self._chunk_queue = self._new_chunk_queue()
         self._audio_q = queue.Queue()
         self._playback_queue = queue.Queue(maxsize=PLAYBACK_QUEUE_MAX)
+        self._recognized.clear()
+        self._translation_context.clear()
+        try:  # open the mic synchronously so a failure aborts the start
+            self._stream = self._capture_factory(self._on_block)
+            self._stream.start()
+        except Exception as e:
+            logger.exception("cannot open microphone: {}", e)
+            self._stream = None
+            self._release_lease()
+            self._fail("capture", str(e))
+            return False
         self.is_running = True
         self._capturing = True
         self._threads = {
@@ -297,17 +309,21 @@ class TranslationSystem:
                 t.join(timeout=5.0)
         self._threads = {}
         # 4. release the lease
-        if self._lease_held:
-            self._lease_held = False
-            try:
-                self._llm_target.stop()
-            except Exception as e:
-                logger.warning("lease release failed: {}", e)
+        self._release_lease()
         logger.info(
             "translation system stopped: {} segments, {} errors",
             self._segments_processed,
             self._pipeline_errors,
         )
+
+    def _release_lease(self) -> None:
+        if not self._lease_held:
+            return
+        self._lease_held = False
+        try:
+            self._llm_target.stop()
+        except Exception as e:
+            logger.warning("lease release failed: {}", e)
 
     def cleanup(self) -> None:
         self.stop()
@@ -382,14 +398,7 @@ class TranslationSystem:
         self._audio_q.put(block)
 
     def _pipeline_loop(self) -> None:
-        try:
-            stream = self._capture_factory(self._on_block)
-            stream.start()
-        except Exception as e:
-            logger.exception("cannot open microphone: {}", e)
-            self._fail("capture", str(e))
-            self._capturing = False
-            return
+        stream, self._stream = self._stream, None
         try:
             while self._capturing:
                 try:
@@ -540,7 +549,9 @@ class TranslationSystem:
             return
         except ValueError as e:  # unsupported source language
             self._llm_errors += 1
+            self._pipeline_errors += 1
             logger.warning("translation skipped: {}", e)
+            self._fail("llm", "language")
             return
         finally:
             self._llm_time += time.monotonic() - t0

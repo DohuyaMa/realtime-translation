@@ -134,9 +134,14 @@ class FakeCapture:
     def __init__(self):
         self.on_block = None
         self.closed = False
+        self.error = None
+        self.log = []
 
     def __call__(self, on_block):
+        if self.error:
+            raise self.error
         self.on_block = on_block
+        self.log.append("capture")
         return self
 
     def start(self):
@@ -236,16 +241,17 @@ def test_translate_flow_calls_asr_llm_tts_and_playback():
 
 def test_translate_start_acquires_lease_and_stop_releases():
     keeper = FakeKeeper()
-    ts, _, _, _, _, _, events = make(translate_settings(), target=keeper)
+    ts, _, _, _, capture, _, events = make(translate_settings(), target=keeper)
+    capture.log = keeper.events
     assert ts.start() is True
-    assert keeper.events == ["start"]
+    assert keeper.events == ["start", "capture"]  # lease before the mic opens
     assert {
         "status": "llm_lease",
         "lease": {"service": "llm-a", "base_url": "http://gpu"},
     } in events
     assert ts.get_stats()["lease"] == {"service": "llm-a", "base_url": "http://gpu"}
     ts.stop()
-    assert keeper.events == ["start", "stop"]
+    assert keeper.events == ["start", "capture", "stop"]
 
 
 def test_translate_start_fails_cleanly_without_lease():
@@ -405,3 +411,65 @@ def test_translate_queue_drops_oldest_segments():
         ts._enqueue_segment(seg(i + 1))
     assert ts._chunk_queue.qsize() == 5
     assert len(ts._chunk_queue.queue[0].audio) == 3 * 16000
+
+
+def test_capture_failure_aborts_start_and_releases_lease():
+    keeper = FakeKeeper()
+    ts, _, _, _, capture, _, events = make(translate_settings(), target=keeper)
+    capture.error = OSError("no mic")
+    assert ts.start() is False
+    assert keeper.events == ["start", "stop"]
+    assert ts.is_running is False
+    assert ts.last_error == "capture: no mic"
+    assert events[-1]["status"] == "error"
+    ts.stop()  # no-op
+    assert keeper.events == ["start", "stop"]
+
+
+def test_llm_context_evicts_beyond_context_pairs():
+    texts = ["a", "b", "c", "d", "e"]
+    ts, _, llm, vads, capture, sink, _ = make(
+        translate_settings(source_language="uk"),
+        [AsrResult(t, "uk") for t in texts],
+    )
+    ts.start()
+    try:
+        feed(ts, vads, capture, *[seg() for _ in texts])
+        assert wait_for(lambda: len(sink.played) == 5)
+    finally:
+        ts.stop()
+    pairs = [(t, f"EN({t})") for t in texts]
+    assert llm.calls[3][2] == pairs[:3]
+    assert llm.calls[4][2] == pairs[1:4]
+
+
+def test_start_clears_prompt_and_translation_context():
+    ts, pools, llm, vads, capture, sink, _ = make(
+        translate_settings(source_language="uk"),
+        [AsrResult("один", "uk"), AsrResult("два", "uk")],
+    )
+    for _ in range(2):
+        ts.start()
+        try:
+            feed(ts, vads, capture, seg())
+            assert wait_for(lambda: len(sink.played) == 1)
+        finally:
+            ts.stop()
+        sink.played.clear()
+    assert llm.calls[1] == ("два", "uk", [])
+    assert pools.asr.client.calls[1]["prompt"] is None
+
+
+def test_unsupported_language_sets_llm_language_error():
+    llm = FakeLlm(errors=[ValueError("unsupported source language 'de'")])
+    ts, _, _, vads, capture, sink, events = make(
+        translate_settings(), [AsrResult("hallo", "de")], llm=llm
+    )
+    ts.start()
+    try:
+        feed(ts, vads, capture, seg())
+        assert wait_for(lambda: ts.last_error is not None)
+    finally:
+        ts.stop()
+    assert ts.last_error == "llm: language"
+    assert events[-1]["status"] == "error" and sink.played == []
