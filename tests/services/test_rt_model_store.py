@@ -2,6 +2,7 @@
 import hashlib
 import json
 import os
+import sys
 import threading
 import time
 from pathlib import Path
@@ -262,3 +263,37 @@ def test_prepare_model_stays_offline_when_download_disabled(tmp_path, monkeypatc
     )
     ms.prepare_model("m", settings)
     assert seen == ["1"]
+
+
+def _hub_constants(monkeypatch):
+    import types
+
+    fake = types.SimpleNamespace(HF_HUB_OFFLINE=True)
+    monkeypatch.setitem(sys.modules, "huggingface_hub.constants", fake)
+    return fake
+
+
+def test_prepare_model_download_online_then_offline_even_on_failure(
+    tmp_path, monkeypatch
+):
+    constants = _hub_constants(monkeypatch)
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    seen = []
+
+    def downloader(spec, target, token):
+        seen.append((os.environ.get("HF_HUB_OFFLINE"), constants.HF_HUB_OFFLINE))
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr(
+        ms.ModelSettings,
+        "store",
+        lambda self: ms.ModelStore(self.model_dir, downloader=downloader),
+    )
+    settings = ms.ModelSettings(
+        model_dir=tmp_path, download=True, full_verify=False, token_file=None
+    )
+    with pytest.raises(ms.ModelNotProvisioned):
+        ms.prepare_model("whisper-small", settings)
+    assert seen == [(None, False)]
+    assert os.environ["HF_HUB_OFFLINE"] == "1"
+    assert constants.HF_HUB_OFFLINE is True

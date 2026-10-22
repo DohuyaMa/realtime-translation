@@ -32,7 +32,6 @@ def real_model_dir(tmp_path_factory):
         mp.setenv(key, os.environ.get(key, ""))  # restored on undo
     mp.setenv("RT_MODEL_DIR", str(path))
     mp.setenv("RT_MODEL_DOWNLOAD", "true")
-    set_online()
     yield path
     mp.undo()
     set_online()

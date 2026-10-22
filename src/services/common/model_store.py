@@ -246,12 +246,13 @@ def prepare_model(value: str, settings: ModelSettings) -> Path:
     configure_hf_home(settings.model_dir)
     if settings.download:
         set_online()  # an earlier load left the process offline
-    path = resolve_model(
-        value,
-        settings.store(),
-        download=settings.download,
-        token=settings.token(),
-        full_verify=settings.full_verify,
-    )
-    set_offline()
-    return path
+    try:
+        return resolve_model(
+            value,
+            settings.store(),
+            download=settings.download,
+            token=settings.token(),
+            full_verify=settings.full_verify,
+        )
+    finally:
+        set_offline()  # also after a failed download
