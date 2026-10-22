@@ -10,6 +10,7 @@ import httpx
 from ..core.runtime import EdgeSettings
 from .asr import AsrClient, AsrResult
 from .base import ServiceClient, ServiceError
+from .lease import DjangoLeaseApi, Lease, LeaseError, LeaseKeeper
 from .llm import LlmClient, LlmTarget, StaticTarget
 from .tts import TtsClient
 
@@ -20,6 +21,10 @@ __all__ = [
     "LlmClient",
     "LlmTarget",
     "StaticTarget",
+    "DjangoLeaseApi",
+    "Lease",
+    "LeaseError",
+    "LeaseKeeper",
     "ServiceClient",
     "ServiceError",
     "ClientFactories",
