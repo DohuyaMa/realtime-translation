@@ -6,6 +6,7 @@ in
 {
   asr = variants "asr" [ "cpu" "gpu" "rocm" ];
   tts = variants "tts" [ "cpu" "gpu" ]; # no rocm: ORT ROCm unverified
+  edge = pkgs.callPackage ./edge.nix { };
   inherit mkBundle;
   lib = import ../lib { inherit lib; };
 }

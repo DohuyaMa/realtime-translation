@@ -12,4 +12,12 @@ in
       (root + "/src/segmentation")
     ];
   };
+
+  # Edge app: everything under src/ except the speech services.
+  edgeSrc = lib.fileset.toSource {
+    inherit root;
+    fileset = lib.fileset.difference
+      (lib.fileset.unions [ (root + "/src") (root + "/pyproject.toml") ])
+      (root + "/src/services");
+  };
 }
