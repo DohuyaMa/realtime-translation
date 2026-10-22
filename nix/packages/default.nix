@@ -1,2 +1,11 @@
-# Temporary stub (Task 23 replaces it with the real asr/tts bundles).
-{ pkgs, lib ? pkgs.lib }: { asr = { }; tts = { }; }
+{ pkgs, lib ? pkgs.lib }:
+let
+  mkBundle = import ./speech-bundle.nix { inherit pkgs lib; };
+  variants = service: names: lib.genAttrs names (variant: mkBundle { inherit service variant; });
+in
+{
+  asr = variants "asr" [ "cpu" "gpu" "rocm" ];
+  tts = variants "tts" [ "cpu" "gpu" ]; # no rocm: ORT ROCm unverified
+  inherit mkBundle;
+  lib = import ../lib { inherit lib; };
+}

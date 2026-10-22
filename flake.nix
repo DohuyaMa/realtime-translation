@@ -24,9 +24,16 @@
       pkgsFor = system: import nixpkgs { inherit system; config.allowUnfree = true; };
       forAllSystems = f: lib.genAttrs systems (system: f (pkgsFor system));
       rtLib = import ./nix/lib { inherit lib; };
+      rtPackagesFor = pkgs: import ./nix/packages { inherit pkgs; };
+      flattenRt = rt: lib.filterAttrs (_: drv: !(drv.meta.broken or false)) (lib.listToAttrs (lib.concatMap
+        (service: lib.mapAttrsToList (variant: drv: lib.nameValuePair "rt-${service}-${variant}" drv) rt.${service})
+        [ "asr" "tts" ]));
     in
     {
       lib.rtSpeech = rtLib;
+
+      overlays.default = final: _prev: { rtSpeech = import ./nix/packages { pkgs = final; }; };
+      packages = forAllSystems (pkgs: flattenRt (rtPackagesFor pkgs));
 
       nixosModules.rt-speech = import ./nix/nixos/rt-speech.nix;
       nixosModules.default = self.nixosModules.rt-speech;
@@ -39,6 +46,9 @@
         nixos-eval-gpu = import ./nix/checks/nixos-eval-gpu.nix { inherit pkgs self nixpkgs; };
         env-lines = import ./nix/checks/env-lines.nix { inherit pkgs rtLib; };
         nixos-rt-speech = import ./nix/checks/nixos-rt-speech.nix { inherit pkgs self; };
+        overlay = import ./nix/checks/overlay.nix { inherit pkgs self; };
+        rt-asr-cpu = (rtPackagesFor pkgs).asr.cpu;
+        rt-tts-cpu = (rtPackagesFor pkgs).tts.cpu;
       });
     };
 }
