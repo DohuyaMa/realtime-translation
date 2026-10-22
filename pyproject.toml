@@ -18,3 +18,4 @@ include = ["src*"]
 translator-ui               = "src.main:main"
 rt-models                   = "src.services.common.models_cli:main"
 rt-asr                      = "src.services.asr.__main__:main"
+rt-tts                      = "src.services.tts.__main__:main"
