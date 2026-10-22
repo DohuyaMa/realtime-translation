@@ -1,0 +1,181 @@
+import numpy as np
+import pytest
+
+from src.services.asr import whisper_engine as we
+from src.services.asr.backend import (
+    DecodeOptions,
+    FakeAsrBackend,
+    make_backend,
+    normalize_language,
+)
+from src.services.asr.faster_whisper_backend import FasterWhisperBackend
+from src.services.asr.settings import AsrSettings
+from src.services.common.env import SettingsError
+
+SR = 16000
+
+
+def test_asr_settings_defaults():
+    s = AsrSettings.from_env({})
+    assert s.languages == ("pl", "uk", "ru", "en")
+    assert s.chunk_seconds == 600 and s.max_upload_mb == 100
+    assert s.model == "whisper-small" and s.beam_size == 1 and s.language is None
+
+
+def test_cuda_defaults():
+    s = AsrSettings.from_env({"RT_DEVICE": "cuda"})
+    assert s.model == "whisper-large-v3-turbo" and s.beam_size == 3
+    assert s.compute_type == "int8_float16"
+
+
+@pytest.mark.parametrize(
+    "key,value",
+    [
+        ("RT_ASR_CHUNK_SECONDS", "10"),
+        ("RT_ASR_CHUNK_SECONDS", "901"),
+        ("RT_ASR_CHUNK_LOOKBACK_SECONDS", "4"),
+        ("RT_ASR_REALTIME_MAX_SECONDS", "121"),
+        ("RT_ASR_MAX_UPLOAD_MB", "0"),
+        ("RT_ASR_MAX_UPLOAD_MB", "1001"),
+        ("RT_ASR_LANGUAGES", "pl,ua"),
+        ("RT_ASR_LANGUAGES", ","),
+        ("RT_ASR_LANGUAGE", "xx"),
+    ],
+)
+def test_invalid_values_rejected(key, value):
+    with pytest.raises(SettingsError):
+        AsrSettings.from_env({key: value})
+
+
+def test_languages_parsed_and_normalized():
+    s = AsrSettings.from_env({"RT_ASR_LANGUAGES": " PL, en ,pl"})
+    assert s.languages == ("pl", "en")
+
+
+def test_normalize_language():
+    assert normalize_language("auto") is None and normalize_language("") is None
+    assert normalize_language(None) is None and normalize_language(" UK ") == "uk"
+    with pytest.raises(SettingsError):
+        normalize_language("ua")
+
+
+def test_env_keys_cover_tunables_and_roundtrip():
+    keys = AsrSettings.env_keys()
+    assert AsrSettings.TUNABLE_FIELDS <= set(keys)
+    assert keys["backend"] == "RT_ASR_BACKEND"
+    assert "host" in AsrSettings.bootstrap_fields()
+    assert not AsrSettings.bootstrap_fields() & AsrSettings.TUNABLE_FIELDS
+
+
+def test_make_backend_selects_fake_and_faster_whisper():
+    fake = make_backend(AsrSettings.from_env({"RT_ASR_BACKEND": "fake"}))
+    assert isinstance(fake, FakeAsrBackend)
+    assert isinstance(make_backend(AsrSettings.from_env({})), FasterWhisperBackend)
+
+
+def test_fake_transcribe_iter_segments():
+    b = FakeAsrBackend(segment_seconds=10.0)
+    segs = list(
+        b.transcribe_iter(np.zeros(25 * SR, np.float32), DecodeOptions("en", None))
+    )
+    assert [(s.start, s.end) for s in segs] == [(0, 10), (10, 20), (20, 25)]
+    assert segs[2].text == "speech 5.00s"
+
+
+def test_fake_transcribe_iter_requires_language():
+    with pytest.raises(ValueError):
+        FakeAsrBackend().transcribe_iter(
+            np.zeros(SR, np.float32), DecodeOptions(None, None)
+        )
+
+
+def test_fake_detect_language_respects_allowed():
+    a = np.zeros(SR, np.float32)
+    assert FakeAsrBackend(detected="ru").detect_language(a, ["pl", "uk"]) == "pl"
+    assert FakeAsrBackend().detect_language(a, ["pl", "uk"]) == "uk"
+
+
+def test_fake_transcribe_defaults():
+    r = FakeAsrBackend().transcribe(np.zeros(SR, np.float32), DecodeOptions(None, None))
+    assert r.text == "speech 1.00s" and r.language == "uk" and r.duration == 1.0
+
+
+class _Engine:
+    created = None
+    last = {}
+
+    @classmethod
+    def from_settings(cls, path, device, compute_type, threads):
+        cls.created = (path, device, compute_type, threads)
+        return cls()
+
+    def transcribe(self, audio, **kw):
+        self.last = kw
+        return we.TranscriptionResult(
+            "hi there", "", [we.Segment(0.0, 1.0, "hi there")], 1.0
+        )
+
+    def iter_transcribe(self, audio, **kw):
+        self.last = kw
+        yield we.Segment(0.0, 1.0, "a")
+        yield we.Segment(1.0, 2.0, "b")
+
+    def detect_language(self, audio, allowed):
+        return allowed[-1], 0.9
+
+
+def _backend(env=None):
+    prepared = []
+
+    def prepare(value, _settings):
+        prepared.append(value)
+        return "/models/x"
+
+    b = FasterWhisperBackend(
+        AsrSettings.from_env(env or {}), engine_cls=_Engine, prepare=prepare
+    )
+    b.load()
+    return b, prepared
+
+
+def test_faster_whisper_load_prepares_model_and_builds_engine():
+    _, prepared = _backend()
+    assert prepared == ["whisper-small"]
+    assert _Engine.created[:3] == ("/models/x", "cpu", "int8")
+
+
+def test_faster_whisper_transcribe_maps_options():
+    b, _ = _backend()
+    r = b.transcribe(
+        np.zeros(SR, np.float32),
+        DecodeOptions(language="en", prompt="ctx", beam_size=2, vad_filter=True),
+    )
+    kw = b._engine.last
+    assert kw["vad"] is we.FILE_VAD and kw["initial_prompt"] == "ctx"
+    assert kw["beam_size"] == 2 and kw["partial"] is False
+    assert r.text == "hi there" and r.language == "en" and r.duration == 1.0
+    assert [(s.start, s.end, s.text) for s in r.segments] == [(0.0, 1.0, "hi there")]
+    b.transcribe(
+        np.zeros(SR, np.float32),
+        DecodeOptions(None, None, beam_size=1, without_timestamps=True),
+    )
+    assert b._engine.last["partial"] is True and b._engine.last["vad"] is None
+
+
+def test_faster_whisper_iter_and_detect_delegate():
+    b, _ = _backend()
+    audio = np.zeros(SR, np.float32)
+    it = b.transcribe_iter(audio, DecodeOptions("uk", "p", beam_size=3))
+    segs = list(it)
+    assert [(s.start, s.end, s.text) for s in segs] == [(0, 1, "a"), (1, 2, "b")]
+    assert all(type(s).__module__.endswith("asr.backend") for s in segs)
+    assert b._engine.last["language"] == "uk" and b._engine.last["vad"] is None
+    assert b.detect_language(audio, ["pl", "uk"]) == "uk"
+    with pytest.raises(ValueError):
+        b.transcribe_iter(audio, DecodeOptions(None, None))
+
+
+def test_fake_does_not_import_faster_whisper():
+    import sys
+
+    assert "faster_whisper" not in sys.modules
