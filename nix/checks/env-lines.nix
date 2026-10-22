@@ -14,7 +14,7 @@ let
     extraEnv = { };
   };
   # beamSize defaults to null: device-dependent defaults live in Python.
-  asr = base // { language = null; beamSize = null; vad = true; };
+  asr = base // { language = null; languages = [ "pl" "uk" "ru" "en" ]; beamSize = null; vad = true; chunkSeconds = null; };
   tts = (removeAttrs base [ "computeType" ]) // { port = 8093; modelDir = "/var/lib/rt-tts/models"; voice = "af_heart"; speed = 1.0; sampleRate = 24000; };
   common = port: dir: [
     "PYTHONUNBUFFERED=1"
@@ -29,16 +29,18 @@ let
   failures = lib.runTests {
     testAsrMinimal = {
       expr = rtLib.envLines "asr" asr;
-      expected = common 8091 "/var/lib/rt-asr/models" ++ [ "RT_ASR_VAD=true" ];
+      expected = common 8091 "/var/lib/rt-asr/models" ++ [ "RT_ASR_LANGUAGES=pl,uk,ru,en" "RT_ASR_VAD=true" ];
     };
     testAsrFull = {
-      expr = rtLib.envLines "asr" (asr // { model = "whisper-large-v3-turbo"; computeType = "int8_float16"; language = "uk"; beamSize = 5; vad = false; });
+      expr = rtLib.envLines "asr" (asr // { model = "whisper-large-v3-turbo"; computeType = "int8_float16"; language = "uk"; languages = [ "uk" "en" ]; beamSize = 5; vad = false; chunkSeconds = 30.0; });
       expected = common 8091 "/var/lib/rt-asr/models" ++ [
         "RT_MODEL=whisper-large-v3-turbo"
         "RT_COMPUTE_TYPE=int8_float16"
         "RT_ASR_LANGUAGE=uk"
+        "RT_ASR_LANGUAGES=uk,en"
         "RT_ASR_BEAM_SIZE=5"
         "RT_ASR_VAD=false"
+        "RT_ASR_CHUNK_SECONDS=30.000000"
       ];
     };
     testTtsHasNoComputeType = {

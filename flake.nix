@@ -28,12 +28,15 @@
     {
       lib.rtSpeech = rtLib;
 
+      nixosModules.rt-speech = import ./nix/nixos/rt-speech.nix;
+      nixosModules.default = self.nixosModules.rt-speech;
       nixosModules.virtual-sinks = import ./nix/nixos/virtual-sinks.nix;
 
       devShells = forAllSystems (pkgs: { default = import ./nix/devshell.nix { inherit pkgs; }; });
 
       checks = forAllSystems (pkgs: {
         flake-purity = import ./nix/checks/flake-purity.nix { inherit pkgs; src = self; };
+        nixos-eval-gpu = import ./nix/checks/nixos-eval-gpu.nix { inherit pkgs self nixpkgs; };
         env-lines = import ./nix/checks/env-lines.nix { inherit pkgs rtLib; };
       });
     };

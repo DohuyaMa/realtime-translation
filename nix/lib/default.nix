@@ -37,8 +37,10 @@ let
     ++ lib.optional (cfg.device == "rocm" && cfg.rocmGfxVersion != "") (kv "HSA_OVERRIDE_GFX_VERSION" cfg.rocmGfxVersion)
     ++ lib.optionals (service == "asr") (
       lib.optional (cfg.language != null) (kv "RT_ASR_LANGUAGE" cfg.language)
+      ++ [ (kv "RT_ASR_LANGUAGES" (lib.concatStringsSep "," cfg.languages)) ]
       ++ lib.optional (cfg.beamSize != null) (kv "RT_ASR_BEAM_SIZE" cfg.beamSize)
       ++ [ (kv "RT_ASR_VAD" (boolStr cfg.vad)) ]
+      ++ lib.optional (cfg.chunkSeconds != null) (kv "RT_ASR_CHUNK_SECONDS" cfg.chunkSeconds)
     )
     ++ lib.optionals (service == "tts") [
       (kv "RT_TTS_VOICE" cfg.voice)
