@@ -1,5 +1,7 @@
 # Підпроєкт 3 — Інтеграція speech-сервісів в інфру (swarm-nix, deploy-rs) — design
 
+> **Статус 2026-10-22:** частково замінено. Scope MVP (без `rt-mt`, переклад через llama, лише цей репо) — `docs/superpowers/specs/2026-10-22-realtime-mvp-design.md`; план виконання — `docs/superpowers/plans/2026-10-22-realtime-mvp.md` (§10 spec: що KEEP/DROP/DEFER). Цей документ лишається джерелом деталей для задач, на які посилається новий план.
+
 Дата: 2026-10-06
 Статус: draft, архітектурне рішення делеговане (напрямок A затверджено, без інтерактивного Q&A). Припущення і відкриті питання зібрано наприкінці. Узгоджено з іншими підпроєктами 2026-10-06 — overview §7 (C0: cluster-generic, розміщення — дані clusterops, §7; C4: CUDA substituter; C1/C2: пакування GPU/ROCm).
 Базовий документ: [`2026-10-06-distributed-speech-services-overview.md`](2026-10-06-distributed-speech-services-overview.md) (далі — **overview**). Контракт з §4 overview обов'язковий; відхилення — у розділі 11.

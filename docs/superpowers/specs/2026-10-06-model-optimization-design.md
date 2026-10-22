@@ -1,5 +1,7 @@
 # Підпроєкт 5 — Model optimization & VRAM budget (design)
 
+> **Статус 2026-10-22:** частково замінено. Scope MVP (без `rt-mt`, переклад через llama, лише цей репо) — `docs/superpowers/specs/2026-10-22-realtime-mvp-design.md`; план виконання — `docs/superpowers/plans/2026-10-22-realtime-mvp.md` (§10 spec: що KEEP/DROP/DEFER). Цей документ лишається джерелом деталей для задач, на які посилається новий план.
+
 Дата: 2026-10-06
 Статус: **draft, делеговано** (architectural path; партнер делегував рішення, без інтерактивних питань — припущення і відкриті питання в §9). Узгоджено з іншими підпроєктами 2026-10-06 — overview §7 (C0: cluster-generic — моделі за класом заліза, admission check per host, жодного фіксованого розміщення; C1–C2: ROCm через nixpkgs `rocmSupport`, GPU-пакування за цим spec).
 Базовий документ: [`2026-10-06-distributed-speech-services-overview.md`](2026-10-06-distributed-speech-services-overview.md) (напрямок A, спільний контракт §4). Відхилення — §8.

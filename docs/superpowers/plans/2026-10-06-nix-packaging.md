@@ -1,5 +1,7 @@
 # Nix packaging + NixOS module + edge — Implementation Plan
 
+> **Статус 2026-10-22:** частково замінено. Scope MVP (без `rt-mt`, переклад через llama, лише цей репо) — `docs/superpowers/specs/2026-10-22-realtime-mvp-design.md`; план виконання — `docs/superpowers/plans/2026-10-22-realtime-mvp.md` (§10 spec: що KEEP/DROP/DEFER). Цей документ лишається джерелом деталей для задач, на які посилається новий план.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Перетворити цей репо на git-flake, що віддає deploy-rs-сумісні bundle `rt-{asr,mt,tts}-{cpu,gpu,rocm}`, overlay `pkgs.rtSpeech`, NixOS-модуль `services.rtSpeech.*`, `lib.rtSpeech.envLines` і edge-only Home Manager модуль, а edge-клієнт перевести з AF_UNIX IPC на HTTP/WS.

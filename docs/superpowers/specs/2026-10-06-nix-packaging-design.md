@@ -1,5 +1,7 @@
 # Підпроєкт 2 — Nix packaging + NixOS module + edge (design)
 
+> **Статус 2026-10-22:** частково замінено. Scope MVP (без `rt-mt`, переклад через llama, лише цей репо) — `docs/superpowers/specs/2026-10-22-realtime-mvp-design.md`; план виконання — `docs/superpowers/plans/2026-10-22-realtime-mvp.md` (§10 spec: що KEEP/DROP/DEFER). Цей документ лишається джерелом деталей для задач, на які посилається новий план.
+
 Дата: 2026-10-06
 Статус: draft, класифікація **ARCHITECTURAL** (делеговано; напрямок A затверджено; інтерактивних питань не було — припущення і відкриті питання записано явно). Узгоджено з іншими підпроєктами 2026-10-06 — overview §6–§7 (C1: nixpkgs bump + `ctranslate2.rocmSupport`; C2: scoped `cudaSupport`-інстанс замість torch-bin; C4: `nixConfig` лише підказка; C5: `httpx` у deps, MT `context` знято).
 Базовий документ: `docs/superpowers/specs/2026-10-06-distributed-speech-services-overview.md` (далі — **overview**). Цей spec дотримується контракту overview §4; відхилення — у розділі 12.

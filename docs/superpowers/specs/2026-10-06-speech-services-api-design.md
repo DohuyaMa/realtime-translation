@@ -1,5 +1,7 @@
 # Speech services API (ASR / MT / TTS) — design
 
+> **Статус 2026-10-22:** частково замінено. Scope MVP (без `rt-mt`, переклад через llama, лише цей репо) — `docs/superpowers/specs/2026-10-22-realtime-mvp-design.md`; план виконання — `docs/superpowers/plans/2026-10-22-realtime-mvp.md` (§10 spec: що KEEP/DROP/DEFER). Цей документ лишається джерелом деталей для задач, на які посилається новий план.
+
 Дата: 2026-10-06
 Підпроєкт: **1 з 5** (див. `docs/superpowers/specs/2026-10-06-distributed-speech-services-overview.md`, далі — *overview*).
 Класифікація: **architectural**. Напрямок **A** затверджено. Інтерактивного Q&A не було — рішення прийняті

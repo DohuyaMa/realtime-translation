@@ -1,5 +1,7 @@
 # Model optimization & VRAM budget — Implementation Plan
 
+> **Статус 2026-10-22:** частково замінено. Scope MVP (без `rt-mt`, переклад через llama, лише цей репо) — `docs/superpowers/specs/2026-10-22-realtime-mvp-design.md`; план виконання — `docs/superpowers/plans/2026-10-22-realtime-mvp.md` (§10 spec: що KEEP/DROP/DEFER). Цей документ лишається джерелом деталей для задач, на які посилається новий план.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Дати сервісам `rt-asr`/`rt-mt`/`rt-tts` оптимізовані рушії моделей (faster-whisper int8, NLLB на CTranslate2 int8 без transformers/torch, Kokoro через onnxruntime), керований реєстр моделей із pin'ом ревізії/sha256 і провізіонуванням у `<RT_MODEL_DIR>`, та benchmark harness, який вимірює RTF/латентність/VRAM і перевіряє пороги, щоб VRAM-бюджет хостів було підтверджено цифрами.

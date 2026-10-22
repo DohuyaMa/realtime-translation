@@ -1,5 +1,7 @@
 # Speech services API (ASR / MT / TTS) Implementation Plan
 
+> **Статус 2026-10-22:** частково замінено. Scope MVP (без `rt-mt`, переклад через llama, лише цей репо) — `docs/superpowers/specs/2026-10-22-realtime-mvp-design.md`; план виконання — `docs/superpowers/plans/2026-10-22-realtime-mvp.md` (§10 spec: що KEEP/DROP/DEFER). Цей документ лишається джерелом деталей для задач, на які посилається новий план.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Три незалежні stateless FastAPI-сервіси `rt-asr` / `rt-mt` / `rt-tts` у `src/services/` зі спільним `src/services/common/`, фоновим завантаженням моделей, `/health`+`/status`, опційним bearer-токеном і fake-backend-ами для тестів.

@@ -1,5 +1,7 @@
 # Підпроєкт 4 — Django/engine integration для rt-asr / rt-mt / rt-tts
 
+> **Статус 2026-10-22:** частково замінено. Scope MVP (без `rt-mt`, переклад через llama, лише цей репо) — `docs/superpowers/specs/2026-10-22-realtime-mvp-design.md`; план виконання — `docs/superpowers/plans/2026-10-22-realtime-mvp.md` (§10 spec: що KEEP/DROP/DEFER). Цей документ лишається джерелом деталей для задач, на які посилається новий план.
+
 Дата: 2026-10-06
 Статус: draft (архітектурний шлях; рішення делеговано агенту, напрямок **A** затверджено — див. overview). Узгоджено 2026-10-06 (overview §7 C5/C7): `httpx` у bundle — SP2; env воркера на хостах — `extraEnv` модуля SP2.
 Базовий документ: [`2026-10-06-distributed-speech-services-overview.md`](2026-10-06-distributed-speech-services-overview.md) (§4.2 env, §4.3 HTTP API, §4.6 Django).
