@@ -1,819 +1,601 @@
-"""Main coordinator for the real-time translation system using modular architecture."""
+"""Edge coordinator: mic -> VadStream -> rt-asr -> LLM -> rt-tts -> playback.
 
-import base64
-import json
-import os
-import socket
-import struct
+Capture and pause segmentation run locally; ASR/TTS go through endpoint pools
+and translation through an LLM target (Django lease or a static URL). In
+transcribe mode long chunks are sent to rt-asr with batch priority and no lease
+is taken.
+"""
+
+from __future__ import annotations
+
+import queue
 import threading
 import time
 from collections import deque
-from typing import Optional, Dict, List
-from loguru import logger
+from typing import Any, Callable, Dict, List, Optional
+
 import numpy as np
+from loguru import logger
 
-from .audio.routing import AudioRouter
-from .common.ipc import IPCClient
-from .core.runtime import get_runtime_config
+from .audio.vad_stream import VadStream, make_vad
+from .clients import (
+    LeaseKeeper,
+    LlmClient,
+    LlmTarget,
+    ServiceError,
+    SpeechPools,
+    StaticTarget,
+    build_pools,
+)
+from .core.runtime import EdgeSettings, LlmSettings
+from .segmentation import Segment, SegmenterConfig
 
-_log_timing = time.monotonic
+CAPTURE_RATE = 48000
+BLOCKSIZE = 1024
+ASR_RATE = 16000
+TRANSLATE_QUEUE_MAX = 5
+PLAYBACK_QUEUE_MAX = 8
+PROMPT_HISTORY = 3
 
+# LlmSettings fields that only shape the prompt/request; everything else
+# changes where/how the LLM is reached and requires a restart.
+_LLM_LIVE_FIELDS = ("model", "max_tokens_cap", "temperature", "context_pairs")
 
-class WhisperSocketClient:
-    """Client for whisper/hybrid-whisper using their native little-endian length-prefixed protocol.
-
-    Protocol: each frame = 4-byte little-endian length + payload.
-    Control frames are JSON; audio frames are raw int16 PCM bytes.
-    Results arrive as newline-delimited JSON on the same connection after "stop".
-    """
-
-    def __init__(self, socket_path: str):
-        self.socket_path = socket_path
-
-    def _send_frame(self, sock: socket.socket, data: bytes) -> None:
-        sock.sendall(struct.pack("<I", len(data)) + data)
-
-    def transcribe(self, audio_int16: np.ndarray, language: Optional[str] = None) -> List[str]:
-        """Send audio and return list of transcribed text segments.
-
-        Opens a fresh connection per call (required by whisper's session model).
-        """
-        if not os.path.exists(self.socket_path):
-            logger.debug(f"Whisper socket not found: {self.socket_path}")
-            return []
-
-        try:
-            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            sock.settimeout(5.0)
-            sock.connect(self.socket_path)
-            sock.settimeout(15.0)
-        except socket.timeout:
-            logger.error(f"Connection timeout to whisper at {self.socket_path}")
-            return []
-        except OSError as e:
-            logger.error(f"Cannot connect to whisper at {self.socket_path}: {e}")
-            return []
-
-        audio_size_bytes = len(audio_int16) * audio_int16.itemsize
-        texts: List[str] = []
-        try:
-            start_cmd: Dict = {"cmd": "start"}
-            if language and language != "auto":
-                start_cmd["language"] = language
-            self._send_frame(sock, json.dumps(start_cmd).encode())
-
-            raw = audio_int16.tobytes()
-            for i in range(0, len(raw), 4096):
-                self._send_frame(sock, raw[i:i + 4096])
-
-            self._send_frame(sock, json.dumps({"cmd": "stop"}).encode())
-
-            buf = b""
-            try:
-                while True:
-                    chunk = sock.recv(4096)
-                    if not chunk:
-                        break
-                    buf += chunk
-                    while b"\n" in buf:
-                        line, buf = buf.split(b"\n", 1)
-                        line = line.strip()
-                        if line:
-                            try:
-                                msg = json.loads(line)
-                                if msg.get("type") == "segment":
-                                    text = msg.get("text", "").strip()
-                                    if text:
-                                        texts.append(text)
-                            except json.JSONDecodeError:
-                                logger.debug(f"Whisper non-JSON response line (ignored): {line[:100]}")
-                            except Exception:
-                                pass
-            except socket.timeout:
-                if not texts:
-                    logger.warning(f"Whisper transcription timed out ({audio_size_bytes}B audio)")
-            except Exception as e:
-                logger.error(f"Whisper response read error: {e}")
-        except Exception as e:
-            logger.error(f"Whisper transcription error ({audio_size_bytes}B audio): {e}")
-        finally:
-            try:
-                sock.close()
-            except Exception:
-                pass
-
-        return texts
+_STOP = object()
 
 
-def _try_connect(client: IPCClient) -> bool:
-    try:
-        client.connect()
-        return True
-    except Exception:
-        return False
+def default_llm_target(llm: LlmSettings) -> Optional[LlmTarget]:
+    source = llm.source()
+    if source == "lease":
+        return LeaseKeeper(llm, None)
+    if source == "direct":
+        return StaticTarget(llm.direct_url or "", llm.direct_token_file)
+    return None
 
 
-class TranslationSystem:
-    """Main coordinator for the real-time translation system."""
+def _default_vad_stream(cfg: SegmenterConfig) -> VadStream:
+    return VadStream(make_vad(), cfg)
 
-    def __init__(
-        self,
-        source_lang: str = "auto",
-        target_lang: str = "en",
-        sample_rate: int = 16000,
-        use_wyoming: bool = False,
-        wyoming_host: str = "localhost",
-        wyoming_port: int = 10300,
-    ):
-        self.source_lang = source_lang
-        self.target_lang = target_lang
-        self.sample_rate = sample_rate
-        self.use_wyoming = use_wyoming
-        self.wyoming_host = wyoming_host
-        self.wyoming_port = wyoming_port
 
-        self.audio_router: Optional[AudioRouter] = None
+class _SoundDeviceCapture:
+    """48 kHz mono float32 microphone stream (sounddevice)."""
 
-        # IPC clients — whisper has its own protocol, tracked separately
-        self.capture_client: Optional[IPCClient] = None
-        self.whisper_client: Optional[IPCClient] = None   # kept for API compat
-        self.translate_client: Optional[IPCClient] = None
-        self.tts_client: Optional[IPCClient] = None
-        self.playback_client: Optional[IPCClient] = None
-
-        self.is_running = False
-        self.translation_enabled = True
-        self.status_callback: Optional[callable] = None
-
-        self._capture_thread: Optional[threading.Thread] = None
-        self._chunk_worker_thread: Optional[threading.Thread] = None
-
-        # User's preferred input/output device names (set via UI), None = system default
-        self._preferred_input_device_name: Optional[str] = None
-        self._preferred_output_device_name: Optional[str] = None
-
-        # Audio level (updated every ~20 ms from capture callback)
-        self._audio_level_input: float = 0.0
-
-        # Pending recognized/translated text — consumed by get_stats() poll
-        self._pending_recognized: List[str] = []
-        self._pending_translated: List[str] = []
-        self._pipeline_lock = threading.Lock()
-
-        # Serialized chunk processing queue (prevents parallel whisper connections)
-        import queue as _q
-        self._chunk_queue: _q.Queue = _q.Queue(maxsize=5)
-
-        # Rolling STT / translation context — fed back to whisper (initial_prompt)
-        # and passed to the translate service for context-aware translation.
-        self._stt_context: deque = deque(maxlen=5)
-        self._translation_context: deque = deque(maxlen=5)
-
-        # Async playback queue — keeps the pipeline worker free while audio plays.
-        import queue as _q
-        self._playback_queue: _q.Queue = _q.Queue(maxsize=4)
-        self._playback_thread: Optional[threading.Thread] = None
-
-        # Pipeline diagnostics
-        self._pipeline_cycles = 0
-        self._pipeline_errors = 0
-        self._total_whisper_time = 0.0
-        self._total_translate_time = 0.0
-        self._total_tts_time = 0.0
-        self._total_chunks_processed = 0
-
-        self._initialize_components()
-        logger.info(f"Translation system initialized: {source_lang}->{target_lang} "
-                     f"mode={'wyoming' if use_wyoming else 'local'}")
-
-    # ------------------------------------------------------------------
-    # Initialisation / reconnection
-    # ------------------------------------------------------------------
-
-    def _initialize_components(self):
-        try:
-            self.audio_router = AudioRouter()
-            input_device, output_device = self.audio_router.get_virtual_devices()
-            logger.info(f"Using virtual audio devices: {input_device}, {output_device}")
-        except Exception as e:
-            logger.error(f"Failed to initialize AudioRouter: {e}")
-            raise
-
-        self._connect_ipc_clients()
-
-    def _ipc_service_map(self):
-        cfg = get_runtime_config()
-        return [
-            ("capture",   "capture_client",   cfg.get_capture_socket_path()),
-            ("translate", "translate_client", cfg.get_translate_socket_path()),
-            ("tts",       "tts_client",       cfg.get_tts_socket_path()),
-            ("playback",  "playback_client",  cfg.get_playback_socket_path()),
-        ]
-
-    def _connect_ipc_clients(self):
-        """Try to connect to each service; leave as None if socket unavailable."""
-        for name, attr, path in self._ipc_service_map():
-            if getattr(self, attr) is None and os.path.exists(path):
-                client = IPCClient(path)
-                if _try_connect(client):
-                    setattr(self, attr, client)
-                    logger.info(f"Connected to {name} service at {path}")
-                else:
-                    logger.warning(f"{name} socket exists at {path} but connection refused "
-                                   f"— is the service running?")
-            elif not os.path.exists(path):
-                logger.debug(f"{name} socket not found: {path} "
-                             f"(service will be unavailable until started)")
-
-    def _whisper_socket_path(self) -> str:
-        cfg = get_runtime_config()
-        return (cfg.get_hybrid_whisper_socket_path()
-                if self.use_wyoming else cfg.get_whisper_socket_path())
-
-    # ------------------------------------------------------------------
-    # Start / Stop
-    # ------------------------------------------------------------------
-
-    def start(self):
-        if self.is_running:
-            logger.warning("Translation system already running")
-            return
-
-        # Drop any stale IPC connections (services may have restarted since last run)
-        for name, attr, path in self._ipc_service_map():
-            client = getattr(self, attr)
-            if client is not None:
-                try:
-                    client.disconnect()
-                except Exception:
-                    pass
-                setattr(self, attr, None)
-                logger.debug(f"Dropped stale {name} IPC client before reconnect")
-
-        # Reconnect to any services that are up
-        self._connect_ipc_clients()
-        whisper_path = self._whisper_socket_path()
-        connected = {
-            "capture": self.capture_client is not None,
-            "whisper_socket": os.path.exists(whisper_path),
-            "translate": self.translate_client is not None,
-            "tts": self.tts_client is not None,
-            "playback": self.playback_client is not None,
-        }
-        logger.info(f"Service connectivity: {connected}")
-        whisper_path_exists = os.path.exists(whisper_path)
-        if not whisper_path_exists and not self.translate_client and not self.tts_client:
-            logger.warning(
-                "Pipeline started but NO speech services connected "
-                "(whisper, translate, TTS all offline) — "
-                "start services manually: "
-                "python -m src.whisper.whisper_service & "
-                "python -m src.translate.translate_service & "
-                "python -m src.tts.tts_service"
-            )
-
-        self.is_running = True
-        self._capture_thread = threading.Thread(
-            target=self._pipeline_loop, daemon=True, name="rt-pipeline"
-        )
-        self._chunk_worker_thread = threading.Thread(
-            target=self._chunk_worker_loop, daemon=True, name="rt-chunk-worker"
-        )
-        self._playback_thread = threading.Thread(
-            target=self._playback_worker, daemon=True, name="rt-playback"
-        )
-        self._capture_thread.start()
-        self._chunk_worker_thread.start()
-        self._playback_thread.start()
-        logger.info("Translation system started")
-
-    def stop(self):
-        if not self.is_running:
-            return
-        self.is_running = False
-        if self._capture_thread:
-            self._capture_thread.join(timeout=6.0)
-            self._capture_thread = None
-        if self._chunk_worker_thread:
-            self._chunk_worker_thread.join(timeout=6.0)
-            self._chunk_worker_thread = None
-        if self._playback_thread:
-            self._playback_thread.join(timeout=6.0)
-            self._playback_thread = None
-        total_pipeline_time = (
-            self._total_whisper_time + self._total_translate_time + self._total_tts_time
-        )
-        logger.info(
-            f"Translation system stopped: "
-            f"{self._pipeline_cycles} pipeline cycles, "
-            f"{self._total_chunks_processed} text chunks, "
-            f"{self._pipeline_errors} errors, "
-            f"whisper={self._total_whisper_time:.1f}s "
-            f"translate={self._total_translate_time:.1f}s "
-            f"tts={self._total_tts_time:.1f}s"
-        )
-
-    # ------------------------------------------------------------------
-    # Device selection helpers
-    # ------------------------------------------------------------------
-
-    def _resolve_preferred_device(self) -> Optional[int]:
-        """Resolve user-preferred device name to a sounddevice index, or None."""
-        if not self._preferred_input_device_name:
-            return None
+    def __init__(self, on_block: Callable[[np.ndarray], None], device=None) -> None:
         import sounddevice as sd
-        for d in sd.query_devices():
-            if d["max_input_channels"] > 0 and d["name"] == self._preferred_input_device_name:
-                logger.info(f"Using preferred input device [{d['index']}]: {d['name']}")
-                return d["index"]
-        logger.warning("Preferred input device '{}' not found via sounddevice",
-                       self._preferred_input_device_name)
-        return None
-
-    def _resolve_preferred_output_device(self) -> Optional[int]:
-        if not self._preferred_output_device_name:
-            return None
-        import sounddevice as sd
-        for d in sd.query_devices():
-            if d["max_output_channels"] > 0 and d["name"] == self._preferred_output_device_name:
-                logger.info(f"Using preferred output device [{d['index']}]: {d['name']}")
-                return d["index"]
-        logger.warning("Preferred output device '{}' not found via sounddevice",
-                       self._preferred_output_device_name)
-        return None
-
-    # ------------------------------------------------------------------
-    # Pipeline loop
-    # ------------------------------------------------------------------
-
-    def _pipeline_loop(self):
-        """Capture at 48 kHz → Silero VAD (energy fallback) → whisper queue.
-
-        Silero VAD segments audio at natural speech boundaries instead of fixed
-        time windows. A short overlap (OVERLAP_SEC) is prepended to each chunk
-        so words at boundaries are not lost.
-        """
-        import queue as _queue
-        import sounddevice as sd
-        from scipy.signal import resample_poly
-
-        CAPTURE_RATE = 48000
-        WHISPER_RATE = self.sample_rate  # 16000
-        BLOCKSIZE = 1024                 # ~21 ms per block at 48 kHz
-
-        SILENCE_SEC    = 0.7   # consecutive silence before flushing
-        MIN_SPEECH_SEC = 0.4   # minimum speech before flush is considered
-        MAX_CHUNK_SEC  = 8.0   # hard ceiling
-        OVERLAP_SEC    = 0.35  # overlap kept from previous chunk
-        SPEECH_PROB    = 0.5   # Silero threshold
-        ENERGY_THR     = 0.008 # energy fallback threshold (RMS)
-
-        silence_thresh_16k = int(SILENCE_SEC    * WHISPER_RATE)
-        min_speech_16k     = int(MIN_SPEECH_SEC * WHISPER_RATE)
-        max_chunk_48k      = int(MAX_CHUNK_SEC  * CAPTURE_RATE)
-        overlap_48k        = int(OVERLAP_SEC    * CAPTURE_RATE)
-        VAD_CHUNK_BYTES    = 1024  # 512 samples × 2 bytes at 16 kHz (32 ms)
-
-        # Silero VAD (with energy-based fallback if package unavailable)
-        try:
-            from pysilero_vad import SileroVoiceActivityDetector
-            _vad = SileroVoiceActivityDetector()
-            use_silero = True
-            logger.info("Silero VAD initialized")
-        except Exception as e:
-            _vad = None
-            use_silero = False
-            logger.warning(f"pysilero-vad unavailable ({e}) — using energy-based VAD fallback")
-
-        audio_q: _queue.Queue = _queue.Queue()
 
         def _cb(indata, frames, cb_time, status):
             if status:
-                logger.debug(f"Sounddevice input status: {status}")
-            mono = indata[:, 0]
-            self._audio_level_input = min(float(np.sqrt(np.mean(mono ** 2))) * 5.0, 1.0)
-            audio_q.put(mono.copy())
+                logger.debug("sounddevice input status: {}", status)
+            on_block(indata[:, 0].copy())
 
-        input_device = self._resolve_preferred_device()
-        try:
-            stream = sd.InputStream(
-                samplerate=CAPTURE_RATE, channels=1, dtype="float32",
-                blocksize=BLOCKSIZE, callback=_cb, device=input_device,
-            )
-            stream.start()
-            logger.info(
-                f"Capture opened: device={input_device} {CAPTURE_RATE}Hz "
-                f"({'Silero' if use_silero else 'energy'} VAD)"
-            )
-        except Exception as e:
-            logger.exception(f"Cannot open microphone (device={input_device}): {e}")
-            self.is_running = False
-            return
+        self._stream = sd.InputStream(
+            samplerate=CAPTURE_RATE,
+            channels=1,
+            dtype="float32",
+            blocksize=BLOCKSIZE,
+            callback=_cb,
+            device=device,
+        )
 
-        buf_48k        = np.empty(0, dtype=np.float32)
-        overlap_buf    = np.empty(0, dtype=np.float32)
-        vad_byte_buf   = bytearray()
-        speech_16k     = 0   # accumulated speech samples at 16 kHz
-        silence_16k    = 0   # accumulated silence samples at 16 kHz
-        chunk_counter  = 0
+    def start(self) -> None:
+        self._stream.start()
 
-        def _flush_segment():
-            nonlocal buf_48k, overlap_buf, vad_byte_buf
-            nonlocal speech_16k, silence_16k, chunk_counter
+    def stop(self) -> None:
+        self._stream.stop()
 
-            if speech_16k < min_speech_16k:
-                buf_48k      = np.empty(0, dtype=np.float32)
-                vad_byte_buf = bytearray()
-                speech_16k   = 0
-                silence_16k  = 0
-                if _vad:
-                    _vad.reset()
-                return
+    def close(self) -> None:
+        self._stream.close()
 
-            segment     = (np.concatenate([overlap_buf, buf_48k])
-                           if len(overlap_buf) > 0 else buf_48k.copy())
-            overlap_buf = (buf_48k[-overlap_48k:].copy()
-                           if len(buf_48k) >= overlap_48k else buf_48k.copy())
-            buf_48k      = np.empty(0, dtype=np.float32)
-            vad_byte_buf = bytearray()
-            speech_16k   = 0
-            silence_16k  = 0
-            if _vad:
-                _vad.reset()
 
-            if not self.translation_enabled:
-                return
+def _find_device(name: Optional[str], kind: str) -> Optional[int]:
+    if not name:
+        return None
+    import sounddevice as sd
 
-            chunk_counter += 1
-            seg_sec       = len(segment) / CAPTURE_RATE
-            resampled     = resample_poly(segment, 1, 3).astype(np.float32)
-            audio_int16   = np.clip(resampled * 32767, -32768, 32767).astype(np.int16)
+    for d in sd.query_devices():
+        if d[f"max_{kind}_channels"] > 0 and d["name"] == name:
+            return d["index"]
+    logger.warning("preferred {} device {!r} not found", kind, name)
+    return None
 
-            self._pipeline_cycles += 1
-            logger.debug(
-                f"VAD chunk #{chunk_counter}: {seg_sec:.1f}s "
-                f"→ {len(audio_int16)} samples @ {WHISPER_RATE}Hz"
-            )
-            try:
-                self._chunk_queue.put_nowait(audio_int16)
-            except Exception:
-                logger.warning("Chunk queue full — dropping VAD segment (whisper busy)")
 
-        try:
-            while self.is_running:
+class TranslationSystem:
+    def __init__(
+        self,
+        settings: EdgeSettings,
+        *,
+        pools_factory: Callable[[EdgeSettings], SpeechPools] = build_pools,
+        llm_target_factory: Callable[
+            [LlmSettings], Optional[LlmTarget]
+        ] = default_llm_target,
+        vad_stream_factory: Callable[
+            [SegmenterConfig], VadStream
+        ] = _default_vad_stream,
+        llm_factory: Callable[[LlmTarget, LlmSettings], Any] = LlmClient,
+        capture_factory: Optional[Callable[[Callable[[np.ndarray], None]], Any]] = None,
+        playback_sink: Optional[Callable[[np.ndarray, int], None]] = None,
+    ) -> None:
+        self.settings = settings
+        self._pools_factory = pools_factory
+        self._llm_target_factory = llm_target_factory
+        self._vad_stream_factory = vad_stream_factory
+        self._llm_factory = llm_factory
+        self._capture_factory = capture_factory or self._default_capture
+        self._playback_sink = playback_sink or self._default_sink
+
+        self.tts_voice: Optional[str] = None
+        self.tts_speed: Optional[float] = None
+        self.input_device_name: Optional[str] = None
+        self.output_device_name: Optional[str] = None
+        self.status_callback: Optional[Callable[[Dict], None]] = None
+        self.last_error: Optional[str] = None
+        self.is_running = False
+
+        self._lock = threading.Lock()
+        self._vad_lock = threading.Lock()
+        self._vad: Optional[VadStream] = None
+        self._mode = settings.effective_mode()
+        self._chunk_queue = self._new_chunk_queue()
+        self._lease_held = False
+        self._playback_queue: queue.Queue = queue.Queue(maxsize=PLAYBACK_QUEUE_MAX)
+        self._audio_q: queue.Queue = queue.Queue()
+        self._capturing = False
+        self._threads: Dict[str, threading.Thread] = {}
+
+        self._recognized: deque = deque(maxlen=PROMPT_HISTORY)
+        self._translation_context: deque = deque(maxlen=settings.llm.context_pairs)
+        self._pending_recognized: List[str] = []
+        self._pending_translated: List[str] = []
+        self._audio_level_input = 0.0
+        self._segments_processed = 0
+        self._pipeline_errors = 0
+        self._llm_requests = 0
+        self._llm_errors = 0
+        self._llm_time = 0.0
+
+        self._build_backends()
+
+    # -- wiring -------------------------------------------------------------
+
+    def _build_backends(self) -> None:
+        self._pools = self._pools_factory(self.settings)
+        self._llm_target = self._llm_target_factory(self.settings.llm)
+        self._llm = (
+            self._llm_factory(self._llm_target, self.settings.llm)
+            if self._llm_target is not None
+            else None
+        )
+
+    def _close_backends(self) -> None:
+        for obj in (self._llm, self._pools):
+            close = getattr(obj, "close", None)
+            if close:
                 try:
-                    block = audio_q.get(timeout=0.5)
-                except _queue.Empty:
-                    # Timeout counts as ~32 ms of silence
-                    if speech_16k >= min_speech_16k:
-                        silence_16k += 512
-                        if silence_16k >= silence_thresh_16k:
-                            _flush_segment()
-                    continue
+                    close()
+                except Exception as e:  # pragma: no cover - best effort
+                    logger.debug("close failed: {}", e)
 
-                buf_48k = np.append(buf_48k, block)
+    @property
+    def pools(self) -> SpeechPools:
+        return self._pools
 
-                # Downsample block → 16 kHz int16 for VAD
-                block_16k     = resample_poly(block, 1, 3).astype(np.float32)
-                block_16k_i16 = np.clip(block_16k * 32767, -32768, 32767).astype(np.int16)
-                vad_byte_buf.extend(block_16k_i16.tobytes())
+    @property
+    def llm(self) -> Optional[LlmClient]:
+        return self._llm
 
-                # Process all complete 512-sample VAD windows
-                while len(vad_byte_buf) >= VAD_CHUNK_BYTES:
-                    chunk_bytes = bytes(vad_byte_buf[:VAD_CHUNK_BYTES])
-                    del vad_byte_buf[:VAD_CHUNK_BYTES]
+    @property
+    def llm_target(self) -> Optional[LlmTarget]:
+        return self._llm_target
 
-                    if use_silero:
-                        is_speech = _vad.process_chunk(chunk_bytes) >= SPEECH_PROB
-                    else:
-                        rms = float(np.sqrt(np.mean(block ** 2)))
-                        is_speech = rms >= ENERGY_THR
+    @property
+    def mode(self) -> str:
+        return self._mode
 
-                    if is_speech:
-                        speech_16k  += 512
-                        silence_16k  = 0
-                    else:
-                        silence_16k += 512
+    def _segmenter_config(self, settings: EdgeSettings) -> SegmenterConfig:
+        return getattr(settings.segmentation, settings.effective_mode())
 
-                if (speech_16k >= min_speech_16k
-                        and silence_16k >= silence_thresh_16k):
-                    _flush_segment()
-                elif len(buf_48k) >= max_chunk_48k:
-                    _flush_segment()
+    def _default_capture(self, on_block):
+        return _SoundDeviceCapture(
+            on_block, _find_device(self.input_device_name, "input")
+        )
 
-        finally:
-            stream.stop()
-            stream.close()
-            logger.info(
-                f"Capture stopped after {chunk_counter} VAD chunks "
-                f"({self._pipeline_cycles} pipeline cycles)"
-            )
-
-    def _chunk_worker_loop(self):
-        """Single worker that drains the chunk queue sequentially.
-
-        Serialises all whisper/translate/TTS calls so the whisper socket is
-        never hit by more than one connection at a time.
-        """
-        import queue as _q
-        while self.is_running:
-            try:
-                audio_int16 = self._chunk_queue.get(timeout=0.5)
-            except _q.Empty:
-                continue
-            try:
-                self._process_chunk(audio_int16)
-            except Exception as e:
-                logger.exception(f"Unhandled error in chunk worker: {e}")
-
-    def _process_chunk(self, audio_int16: np.ndarray):
-        """whisper → translate → TTS → sounddevice playback."""
-        cycle_start = _log_timing()
-        audio_len_sec = len(audio_int16) / self.sample_rate
-
-        whisper_path = self._whisper_socket_path()
-        whisper = WhisperSocketClient(whisper_path)
-        lang = None if self.source_lang == "auto" else self.source_lang
-        t0 = _log_timing()
-        texts = whisper.transcribe(audio_int16, language=lang)
-        whisper_time = _log_timing() - t0
-        self._total_whisper_time += whisper_time
-
-        if not texts:
-            if not os.path.exists(whisper_path):
-                self._pipeline_errors += 1
-                logger.warning(
-                    f"Pipeline cycle #{self._pipeline_cycles}: "
-                    f"whisper socket not found at {whisper_path} — "
-                    f"no speech processing possible"
-                )
-            else:
-                logger.debug(f"Pipeline cycle: no speech detected in {audio_len_sec:.1f}s "
-                             f"(whisper took {whisper_time*1000:.0f}ms)")
-
-        for text in texts:
-            text = text.strip()
-            if not text:
-                continue
-
-            # Skip near-duplicates caused by overlap between consecutive VAD chunks
-            if self._is_duplicate_stt(text):
-                logger.debug(f"STT duplicate skipped: {text[:60]}")
-                continue
-
-            logger.info(f"Recognized: {text}")
-            self._total_chunks_processed += 1
-            with self._pipeline_lock:
-                self._pending_recognized.append(text)
-                self._stt_context.append(text)
-                stt_ctx_snapshot = list(self._stt_context)[:-1]  # all but current
-
-            t0 = _log_timing()
-            translated = self._translate(text, context=stt_ctx_snapshot)
-            translate_time = _log_timing() - t0
-            self._total_translate_time += translate_time
-            if not translated:
-                self._pipeline_errors += 1
-                logger.warning(f"Translation returned None for: {text[:80]}")
-                continue
-            logger.info(f"Translated: {translated}")
-            with self._pipeline_lock:
-                self._pending_translated.append(translated)
-                self._translation_context.append(translated)
-
-            t0 = _log_timing()
-            self._speak(translated)
-            tts_time = _log_timing() - t0
-            self._total_tts_time += tts_time
-
-            cycle_time = _log_timing() - cycle_start
-            logger.debug(
-                f"Pipeline cycle complete: "
-                f"whisper={whisper_time*1000:.0f}ms "
-                f"translate={translate_time*1000:.0f}ms "
-                f"tts={tts_time*1000:.0f}ms "
-                f"total={cycle_time*1000:.0f}ms"
-            )
-
-            if self.status_callback:
-                self.status_callback({
-                    "status": "translation_complete",
-                    "original_text": text,
-                    "translated_text": translated,
-                })
-
-    def _is_duplicate_stt(self, text: str) -> bool:
-        """Return True if text is a near-duplicate of a recently recognised segment."""
-        text_l = text.lower().strip()
-        if len(text_l) < 5:
-            return False
-        for prev in self._stt_context:
-            prev_l = prev.lower().strip()
-            if text_l == prev_l:
-                return True
-            # Substring containment catches boundary-overlap double-transcriptions
-            if len(text_l) > 15 and (text_l in prev_l or prev_l in text_l):
-                return True
-        return False
-
-    def reconnect_ipc_clients(self) -> int:
-        """Try to reconnect any disconnected IPC clients. Returns number reconnected."""
-        before = sum(1 for _, attr, _ in self._ipc_service_map() if getattr(self, attr) is not None)
-        for name, attr, path in self._ipc_service_map():
-            if getattr(self, attr) is None and os.path.exists(path):
-                client = IPCClient(path)
-                if _try_connect(client):
-                    setattr(self, attr, client)
-                    logger.info(f"Reconnected to {name} service at {path}")
-        after = sum(1 for _, attr, _ in self._ipc_service_map() if getattr(self, attr) is not None)
-        return after - before
-
-    def _translate(self, text: str, context: List[str] = None) -> Optional[str]:
-        if not self.translate_client:
-            self._connect_ipc_clients()
-        if not self.translate_client:
-            logger.debug("Translate skipped: no translate_client (IPC not connected)")
-            return None
-        try:
-            payload = {"text": text, "context": context or []}
-            result = self.translate_client.send_message("translate_text", payload)
-            if result and result.get("status") == "success":
-                return result["data"]["translated_text"]
-            logger.warning(f"Translate service returned error: {result} (text: {text[:80]})")
-        except (BrokenPipeError, ConnectionRefusedError) as e:
-            logger.error(f"Translate IPC connection lost: {e}")
-            self.translate_client = None   # force reconnect next cycle
-        except Exception as e:
-            logger.exception(f"Translate error for text '{text[:80]}': {e}")
-            self.translate_client = None   # force reconnect next cycle
-        return None
-
-    def _playback_worker(self):
-        """Drain the playback queue and play audio without blocking the pipeline."""
-        import queue as _q
+    def _default_sink(self, audio: np.ndarray, sample_rate: int) -> None:
         import sounddevice as sd
-        while self.is_running:
-            try:
-                item = self._playback_queue.get(timeout=0.5)
-            except _q.Empty:
-                continue
-            audio_arr, samplerate, duration = item
-            try:
-                out_dev = self._resolve_preferred_output_device()
-                logger.debug(f"Playback worker: playing {duration:.1f}s on device={out_dev}")
-                sd.play(audio_arr, samplerate=samplerate, device=out_dev, blocking=True)
-            except Exception as e:
-                logger.exception(f"Sounddevice playback error: {e}")
 
-    def _speak(self, text: str):
-        """Synthesize text and enqueue audio for async playback."""
-        if not self.tts_client:
-            self._connect_ipc_clients()
-        if not self.tts_client:
-            logger.debug("TTS skipped: no tts_client (IPC not connected)")
+        device = _find_device(self.output_device_name, "output")
+        sd.play(audio, samplerate=sample_rate, device=device, blocking=True)
+
+    # -- public controls ----------------------------------------------------
+
+    def set_status_callback(self, cb: Optional[Callable[[Dict], None]]) -> None:
+        self.status_callback = cb
+
+    def set_tts(self, voice: Optional[str], speed: Optional[float]) -> None:
+        self.tts_voice = voice
+        self.tts_speed = speed
+
+    def set_devices(self, input_name: Optional[str], output_name: Optional[str]):
+        self.input_device_name = input_name
+        self.output_device_name = output_name
+
+    def _emit(self, event: Dict) -> None:
+        if self.status_callback:
+            try:
+                self.status_callback(event)
+            except Exception as e:
+                logger.exception("status callback failed: {}", e)
+
+    def _fail(self, service: str, detail: str) -> None:
+        self.last_error = f"{service}: {detail}"
+        self._emit({"status": "error", "service": service, "error": self.last_error})
+
+    def start(self) -> bool:
+        if self.is_running:
+            return True
+        self.last_error = None
+        self._mode = self.settings.effective_mode()
+        if self._mode == "translate":
+            if self._llm is None:
+                self._fail("llm", "not configured")
+                return False
+            if self._pools.tts is None:
+                self._fail("tts", "not configured")
+                return False
+            if isinstance(self._llm_target, LeaseKeeper):
+                try:
+                    self._llm_target.start()
+                except ServiceError as e:
+                    detail = str(e)
+                    prefix = f"{e.service}: "
+                    if detail.startswith(prefix):
+                        detail = detail[len(prefix) :]
+                    self._fail("llm", detail)
+                    return False
+                self._lease_held = True
+                self._emit({"status": "llm_lease", "lease": self._lease_snapshot()})
+
+        self._vad = self._vad_stream_factory(self._segmenter_config(self.settings))
+        self._chunk_queue = self._new_chunk_queue()
+        self._audio_q = queue.Queue()
+        self._playback_queue = queue.Queue(maxsize=PLAYBACK_QUEUE_MAX)
+        self.is_running = True
+        self._capturing = True
+        self._threads = {
+            name: threading.Thread(target=fn, daemon=True, name=f"rt-{name}")
+            for name, fn in (
+                ("worker", self._chunk_worker_loop),
+                ("playback", self._playback_worker),
+                ("capture", self._pipeline_loop),
+            )
+        }
+        for t in self._threads.values():
+            t.start()
+        logger.info("translation system started: mode={}", self._mode)
+        return True
+
+    def stop(self) -> None:
+        if not self.is_running:
+            return
+        # 1. stop capture, feed what is buffered, flush pending segments
+        self._capturing = False
+        capture = self._threads.get("capture")
+        if capture:
+            capture.join(timeout=5.0)
+        with self._vad_lock:
+            segments = self._vad.flush() if self._vad else []
+        for segment in segments:
+            self._enqueue_segment(segment)
+        # 2. drain the segment queue
+        cfg = self._segmenter_config(self.settings)
+        self._wait_drained(max(60.0, cfg.hard_max_ms / 1000.0))
+        # 3. stop the workers
+        self.is_running = False
+        self._enqueue_segment(_STOP)
+        for name in ("worker", "playback"):
+            t = self._threads.get(name)
+            if t:
+                t.join(timeout=5.0)
+        self._threads = {}
+        # 4. release the lease
+        if self._lease_held:
+            self._lease_held = False
+            try:
+                self._llm_target.stop()
+            except Exception as e:
+                logger.warning("lease release failed: {}", e)
+        logger.info(
+            "translation system stopped: {} segments, {} errors",
+            self._segments_processed,
+            self._pipeline_errors,
+        )
+
+    def cleanup(self) -> None:
+        self.stop()
+        self._close_backends()
+
+    def _new_chunk_queue(self) -> queue.Queue:
+        # transcribe never drops chunks; translate keeps only the freshest
+        maxsize = TRANSLATE_QUEUE_MAX if self._mode == "translate" else 0
+        return queue.Queue(maxsize=maxsize)
+
+    def _wait_drained(self, timeout_s: float) -> None:
+        q = self._chunk_queue
+        with q.all_tasks_done:
+            if not q.all_tasks_done.wait_for(
+                lambda: q.unfinished_tasks == 0, timeout=timeout_s
+            ):
+                logger.warning("segment queue not drained after {:.0f}s", timeout_s)
+
+    def apply_settings(self, settings: EdgeSettings) -> None:
+        old = self.settings
+        if self._needs_restart(old, settings):
+            was_running = self.is_running
+            self.stop()
+            self._close_backends()
+            self.settings = settings
+            self._translation_context = deque(maxlen=settings.llm.context_pairs)
+            self._build_backends()
+            self._mode = settings.effective_mode()
+            if was_running:
+                self.start()
+            return
+        self.settings = settings
+        if settings.llm != old.llm:
+            if settings.llm.context_pairs != old.llm.context_pairs:
+                self._translation_context = deque(
+                    self._translation_context, maxlen=settings.llm.context_pairs
+                )
+            if self._llm_target is not None:
+                close = getattr(self._llm, "close", None)
+                self._llm = self._llm_factory(self._llm_target, settings.llm)
+                if close:
+                    close()
+        new_cfg = self._segmenter_config(settings)
+        if new_cfg != self._segmenter_config(old):
+            with self._vad_lock:
+                if self._vad is not None:
+                    self._vad.reconfigure(new_cfg)
+
+    @staticmethod
+    def _needs_restart(old: EdgeSettings, new: EdgeSettings) -> bool:
+        if old.effective_mode() != new.effective_mode():
+            return True
+        for name in ("asr_urls", "tts_urls", "api_token_file", "timeouts"):
+            if getattr(old, name) != getattr(new, name):
+                return True
+        o, n = old.llm, new.llm
+        return any(
+            getattr(o, f) != getattr(n, f)
+            for f in o.__dataclass_fields__
+            if f not in _LLM_LIVE_FIELDS
+        )
+
+    def enqueue_playback(self, audio: np.ndarray, sample_rate: int) -> None:
+        try:
+            self._playback_queue.put_nowait((audio, int(sample_rate)))
+        except queue.Full:
+            logger.warning("playback queue full - dropping audio")
+
+    # -- threads ------------------------------------------------------------
+
+    def _on_block(self, block: np.ndarray) -> None:
+        self._audio_q.put(block)
+
+    def _pipeline_loop(self) -> None:
+        try:
+            stream = self._capture_factory(self._on_block)
+            stream.start()
+        except Exception as e:
+            logger.exception("cannot open microphone: {}", e)
+            self._fail("capture", str(e))
+            self._capturing = False
             return
         try:
-            result = self.tts_client.send_message("synthesize_text", {"text": text})
-            if not (result and result.get("status") == "success"):
-                logger.warning(f"TTS service returned error: {result} (text: {text[:80]})")
+            while self._capturing:
+                try:
+                    self._feed(self._audio_q.get(timeout=0.05))
+                except queue.Empty:
+                    continue
+        finally:
+            for op in ("stop", "close"):
+                try:
+                    getattr(stream, op)()
+                except Exception as e:
+                    logger.debug("capture {} failed: {}", op, e)
+        while True:  # feed what was captured before the stream closed
+            try:
+                self._feed(self._audio_q.get_nowait())
+            except queue.Empty:
+                break
+
+    def _feed(self, block: np.ndarray) -> None:
+        with self._vad_lock:
+            segments = self._vad.feed_block(block)
+            self._audio_level_input = min(self._vad.last_level() * 5.0, 1.0)
+        for segment in segments:
+            self._enqueue_segment(segment)
+
+    def _enqueue_segment(self, item) -> None:
+        q = self._chunk_queue
+        while True:
+            try:
+                q.put_nowait(item)
                 return
-            audio_b64 = result["data"]["audio_data"]
-            audio_arr = np.frombuffer(base64.b64decode(audio_b64), dtype=np.float32)
-            samplerate = result["data"].get("sample_rate", 24000)
-            duration = result["data"].get("duration", 0)
+            except queue.Full:
+                try:
+                    q.get_nowait()
+                    q.task_done()
+                    logger.warning("segment queue full - dropped oldest segment")
+                except queue.Empty:
+                    pass
+
+    def _chunk_worker_loop(self) -> None:
+        q = self._chunk_queue
+        while True:
+            item = q.get()
             try:
-                self._playback_queue.put_nowait((audio_arr, samplerate, duration))
-            except Exception:
-                logger.warning("Playback queue full — dropping TTS audio (playback is behind)")
-        except (BrokenPipeError, ConnectionRefusedError) as e:
-            logger.error(f"TTS IPC connection lost: {e}")
-            self.tts_client = None
-        except Exception as e:
-            logger.exception(f"TTS error for text '{text[:80]}': {e}")
-            self.tts_client = None
-
-    # ------------------------------------------------------------------
-    # Service control (IPC, forwarded)
-    # ------------------------------------------------------------------
-
-    def start_service(self, service_name: str) -> bool:
-        try:
-            if service_name == "capture" and self.capture_client:
-                self.capture_client.send_message("start_capture", {})
-            return True
-        except Exception as e:
-            logger.error(f"Failed to start {service_name}: {e}")
-            return False
-
-    def stop_service(self, service_name: str) -> bool:
-        try:
-            if service_name == "capture" and self.capture_client:
-                self.capture_client.send_message("stop_capture", {})
-            return True
-        except Exception as e:
-            logger.error(f"Failed to stop {service_name}: {e}")
-            return False
-
-    def set_languages(self, source_lang: str, target_lang: str = "en"):
-        self.source_lang = source_lang
-        self.target_lang = target_lang
-        if self.translate_client and source_lang != "auto":
-            try:
-                self.translate_client.send_message("set_languages", {
-                    "data": {"source_lang": source_lang, "target_lang": target_lang}
-                })
+                if item is _STOP:
+                    return
+                self._process_segment(item)
             except Exception as e:
-                logger.error(f"Failed to update translate languages: {e}")
-        logger.info(f"Languages updated: {source_lang}->{target_lang}")
+                logger.exception("pipeline error: {}", e)
+                self._pipeline_errors += 1
+                self._fail("pipeline", type(e).__name__)
+            finally:
+                q.task_done()
 
-    def toggle_translation(self, enabled: bool):
-        self.translation_enabled = enabled
-        logger.info(f"Translation {'enabled' if enabled else 'disabled'}")
-
-    def set_status_callback(self, callback: callable):
-        self.status_callback = callback
-
-    # ------------------------------------------------------------------
-    # Audio devices
-    # ------------------------------------------------------------------
-
-    def get_audio_devices(self) -> Dict:
-        if self.audio_router:
-            return self.audio_router.list_devices()
-        return {"inputs": {}, "outputs": {}}
-
-    def set_input_device(self, device_name: str):
-        if self.capture_client:
+    def _playback_worker(self) -> None:
+        while self.is_running:
             try:
-                return self.capture_client.send_message(
-                    "set_input_device", {"device_name": device_name}
+                audio, sr = self._playback_queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            try:
+                self._playback_sink(audio, sr)
+            except Exception as e:
+                logger.exception("playback error: {}", e)
+
+    # -- processing ---------------------------------------------------------
+
+    def _service_error(self, e: ServiceError) -> None:
+        self._pipeline_errors += 1
+        logger.warning("{} (phrase skipped)", e)
+        self.last_error = f"{e.service}: {e.kind}"
+        self._emit(
+            {
+                "status": "error",
+                "service": e.service,
+                "kind": e.kind,
+                "error": self.last_error,
+            }
+        )
+
+    def _process_segment(self, segment: Segment) -> None:
+        if len(segment.audio) == 0:
+            return
+        if self._mode == "translate":
+            self._translate_segment(segment)
+        else:
+            self._transcribe_segment(segment)
+        self._segments_processed += 1
+
+    def _language(self) -> Optional[str]:
+        lang = self.settings.source_language
+        return None if lang == "auto" else lang
+
+    def _transcribe_segment(self, segment: Segment) -> None:
+        audio = segment.audio
+        timeout_s = max(60.0, len(audio) / ASR_RATE)
+        try:
+            result = self._pools.asr.call(
+                lambda c: c.transcribe(
+                    audio,
+                    language=self._language(),
+                    priority="batch",
+                    timeout_s=timeout_s,
                 )
-            except Exception as e:
-                logger.error(f"Failed to set input device: {e}")
-        return None
+            )
+        except ServiceError as e:
+            self._service_error(e)
+            return
+        text = (result.text or "").strip()
+        if not text:
+            return
+        with self._lock:
+            self._pending_recognized.append(text)
+        self._emit({"status": "transcription_complete", "original_text": text})
 
-    # ------------------------------------------------------------------
-    # Status
-    # ------------------------------------------------------------------
+    def _translate_segment(self, segment: Segment) -> None:
+        lang = self._language()
+        prompt = " ".join(self._recognized) or None
+        try:
+            result = self._pools.asr.call(
+                lambda c: c.transcribe(
+                    segment.audio, language=lang, prompt=prompt, priority="realtime"
+                )
+            )
+        except ServiceError as e:
+            self._service_error(e)
+            return
+        text = (result.text or "").strip()
+        if not text:
+            return
+        self._recognized.append(text)
+        with self._lock:
+            self._pending_recognized.append(text)
+        src = lang or result.language
+        if not src:
+            logger.warning("source language unknown - skipping translation")
+            return
+
+        t0 = time.monotonic()
+        self._llm_requests += 1
+        try:
+            translation = self._llm.translate(
+                text, src, context=list(self._translation_context)
+            )
+        except ServiceError as e:
+            self._llm_errors += 1
+            self._service_error(e)
+            return
+        except ValueError as e:  # unsupported source language
+            self._llm_errors += 1
+            logger.warning("translation skipped: {}", e)
+            return
+        finally:
+            self._llm_time += time.monotonic() - t0
+        self._translation_context.append((text, translation))
+        with self._lock:
+            self._pending_translated.append(translation)
+
+        try:
+            audio, sr = self._pools.tts.call(
+                lambda c: c.synthesize(translation, self.tts_voice, self.tts_speed)
+            )
+        except ServiceError as e:
+            self._service_error(e)
+        else:
+            self.enqueue_playback(audio, sr)
+        self._emit(
+            {
+                "status": "translation_complete",
+                "original_text": text,
+                "translated_text": translation,
+            }
+        )
+
+    # -- stats --------------------------------------------------------------
+
+    def _lease_snapshot(self) -> Optional[dict]:
+        snapshot = getattr(self._llm_target, "snapshot", None)
+        return snapshot() if callable(snapshot) else None
 
     def get_stats(self) -> Dict:
-        cfg = get_runtime_config()
-        whisper_path = self._whisper_socket_path()
-        total_pipeline_time = (
-            self._total_whisper_time + self._total_translate_time + self._total_tts_time
-        )
-        stats: Dict = {
+        tts = self._pools.tts
+        stats: Dict[str, Any] = {
             "running": self.is_running,
-            "translation_enabled": self.translation_enabled,
-            "source_language": self.source_lang,
-            "target_language": self.target_lang,
-            "whisper_connected": os.path.exists(whisper_path),
+            "mode": self._mode,
+            "source_language": self.settings.source_language,
             "audio_level_input": self._audio_level_input,
-            "pipeline_cycles": self._pipeline_cycles,
+            "segments_processed": self._segments_processed,
             "pipeline_errors": self._pipeline_errors,
-            "chunks_processed": self._total_chunks_processed,
-            "total_pipeline_time_s": round(total_pipeline_time, 2),
+            "last_error": self.last_error,
+            "llm_requests": self._llm_requests,
+            "llm_errors": self._llm_errors,
+            "llm_avg_latency_s": (
+                round(self._llm_time / self._llm_requests, 3)
+                if self._llm_requests
+                else 0.0
+            ),
+            "pinned": {
+                "asr": self._pools.asr.pinned_url,
+                "tts": tts.pinned_url if tts is not None else None,
+            },
+            "lease": self._lease_snapshot(),
         }
-        for name, attr, path in self._ipc_service_map():
-            stats[f"{name}_connected"] = getattr(self, attr) is not None
-
-        # Drain pending text lists (thread-safe swap)
-        with self._pipeline_lock:
-            stats["pending_recognized"] = list(self._pending_recognized)
-            stats["pending_translated"] = list(self._pending_translated)
-            self._pending_recognized.clear()
-            self._pending_translated.clear()
-
+        with self._lock:
+            stats["pending_recognized"] = self._pending_recognized
+            stats["pending_translated"] = self._pending_translated
+            self._pending_recognized = []
+            self._pending_translated = []
         return stats
-
-    def all_services_connected(self) -> bool:
-        return all([
-            self.translate_client is not None,
-            self.tts_client is not None,
-        ])
-
-    # ------------------------------------------------------------------
-    # Cleanup
-    # ------------------------------------------------------------------
-
-    def cleanup(self):
-        self.stop()
-        if self.audio_router:
-            try:
-                self.audio_router.cleanup()
-            except Exception as e:
-                logger.exception(f"AudioRouter cleanup error: {e}")
-        for name in ["capture", "whisper", "translate", "tts", "playback"]:
-            client = getattr(self, f"{name}_client", None)
-            if client:
-                try:
-                    client.disconnect()
-                except Exception as e:
-                    logger.debug(f"Error disconnecting {name} client: {e}")
-        logger.info("Translation system cleaned up")
-
-    def __del__(self):
-        try:
-            self.cleanup()
-        except Exception:
-            pass
