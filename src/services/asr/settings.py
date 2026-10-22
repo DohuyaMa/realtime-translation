@@ -19,8 +19,7 @@ from ..common.settings import DEVICES, BaseSettings, base_from_env
 
 ASR_BACKENDS = ("faster-whisper", "fake")
 
-# ISO 639-1 codes Whisper understands (plus its "jw"/"haw"-style aliases are
-# deliberately excluded: only two-letter codes are accepted).
+# Two-letter language codes Whisper understands (includes its legacy "jw").
 WHISPER_LANGUAGES = frozenset(
     "af am ar as az ba be bg bn bo br bs ca cs cy da de el en es et eu fa fi fo "
     "fr gl gu ha he hi hr ht hu hy id is it ja jw ka kk km kn ko la lb ln lo lt "

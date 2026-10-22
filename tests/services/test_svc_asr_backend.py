@@ -1,3 +1,7 @@
+import dataclasses
+import subprocess
+import sys
+
 import numpy as np
 import pytest
 
@@ -11,6 +15,7 @@ from src.services.asr.backend import (
 from src.services.asr.faster_whisper_backend import FasterWhisperBackend
 from src.services.asr.settings import AsrSettings
 from src.services.common.env import SettingsError
+from src.services.common.settings import render_env_value
 
 SR = 16000
 
@@ -65,6 +70,27 @@ def test_env_keys_cover_tunables_and_roundtrip():
     assert keys["backend"] == "RT_ASR_BACKEND"
     assert "host" in AsrSettings.bootstrap_fields()
     assert not AsrSettings.bootstrap_fields() & AsrSettings.TUNABLE_FIELDS
+
+
+@pytest.mark.parametrize("language", ["pl", None])
+def test_tunables_roundtrip_through_rendered_env(language):
+    s = dataclasses.replace(
+        AsrSettings.from_env({}),
+        language=language,
+        languages=("en", "uk"),
+        beam_size=4,
+        vad_filter=False,
+        max_upload_mb=50,
+        chunk_seconds=120.5,
+        chunk_lookback_seconds=12.5,
+        realtime_max_seconds=45.0,
+        log_level="debug",
+    )
+    keys = AsrSettings.env_keys()
+    env = {keys[f]: render_env_value(getattr(s, f)) for f in AsrSettings.TUNABLE_FIELDS}
+    back = AsrSettings.from_env(env)
+    for f in AsrSettings.TUNABLE_FIELDS:
+        assert getattr(back, f) == getattr(s, f), f
 
 
 def test_make_backend_selects_fake_and_faster_whisper():
@@ -176,6 +202,11 @@ def test_faster_whisper_iter_and_detect_delegate():
 
 
 def test_fake_does_not_import_faster_whisper():
-    import sys
-
-    assert "faster_whisper" not in sys.modules
+    code = (
+        "import sys\n"
+        "from src.services.asr.backend import make_backend\n"
+        "from src.services.asr.settings import AsrSettings\n"
+        "make_backend(AsrSettings.from_env({'RT_ASR_BACKEND': 'fake'}))\n"
+        "assert 'faster_whisper' not in sys.modules\n"
+    )
+    subprocess.run([sys.executable, "-c", code], check=True)
