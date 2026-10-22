@@ -14,7 +14,7 @@ python -m src.services.tts           # rt-tts (:8093); RT_TTS_BACKEND=kokoro|fak
 nix develop -c pytest tests/ -q      # tests
 nix build .#rt-asr-cpu               # also rt-asr-gpu, rt-tts-cpu, rt-tts-gpu
 black src/ tests/ && flake8 src/ tests/ && mypy src/
-python -m scripts.gen_env_table      # regenerate env tables for docs/USAGE.md
+python -m scripts.gen_env_table      # (inside nix develop) regenerate env tables for docs/USAGE.md
 ```
 
 User documentation (Ukrainian): `docs/USAGE.md`. Specs: `docs/superpowers/specs/2026-10-22-*.md`.
@@ -47,6 +47,8 @@ Modes (`services.mode`): `transcribe` (long chunks, ASR only), `translate` (phra
 ### Nix (`nix/`, `flake.nix`)
 
 - `nix/packages/` - `rtSpeech.{asr,tts}.<variant>` bundles (variants cpu/gpu, ROCm for ASR), exposed as `packages.rt-{asr,tts}-{cpu,gpu}` and `overlays.default`;
+- `rt-edge` package (default, `nix run .`) - the edge UI;
+- `nix/home-manager/rt-translator.nix` - `homeManagerModules.rt-translator` (`rt-translator.*` options: endpoints, llm, mode, apiTokenFile, autostart, virtualSinks -> `RT_EDGE_*` env);
 - `nix/nixos/rt-speech.nix` - `services.rtSpeech.{asr,tts}` NixOS module; `nix/nixos/virtual-sinks.nix` - PipeWire null sinks `rt_virtual_input` / `rt_virtual_output`;
 - `nix/lib/` - `lib.rtSpeech` (env rendering, health-check command); `nix/checks/` - flake checks; `nix/devshell.nix` - devShell.
 

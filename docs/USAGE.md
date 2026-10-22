@@ -23,7 +23,7 @@
 
 Сервіси доступні лише через HTTP (OpenAI-сумісний стиль): `POST /audio/transcriptions`, `POST /audio/speech`, `GET /audio/voices`, `GET /health`, `GET /status`, `GET|POST /config`. Опційний bearer-токен: `RT_API_TOKEN_FILE` (заголовок `Authorization: Bearer <token>`).
 
-Пакети flake: `rt-asr-{cpu,gpu}`, `rt-tts-{cpu,gpu}` (також ROCm-варіант ASR, якщо не `broken`), `nixosModules.rt-speech`, `nixosModules.virtual-sinks`, `overlays.default` (`pkgs.rtSpeech.{asr,tts}.<variant>`), `lib.rtSpeech`.
+Пакети flake: `rt-edge` (default package, `nix run .`), `rt-asr-{cpu,gpu}`, `rt-tts-{cpu,gpu}` (також ROCm-варіант ASR, якщо не `broken`), `nixosModules.rt-speech`, `nixosModules.virtual-sinks`, `overlays.default` (`pkgs.rtSpeech.{asr,tts}.<variant>`), `lib.rtSpeech`.
 
 ## 2. Локальний запуск у devShell
 
@@ -78,7 +78,7 @@ rt-models --model-dir /var/lib/rt-asr/models list
 ### 4.1 Env
 
 Класи: **BOOTSTRAP** - лише через env/рестарт; **TUNABLE** - змінюється через `/config` без перезавантаження моделі; **RELOAD** - змінюється через `/config`, але модель перезавантажується (при помилці - автоматичний rollback). Default-и нижче - для `RT_DEVICE=cpu` (на `cuda` default `RT_MODEL` для ASR - `whisper-large-v3-turbo`, beam 3, compute `int8_float16`).
-Таблиця згенерована: `python -m scripts.gen_env_table`.
+Таблиця згенерована (виконувати всередині `nix develop`): `python -m scripts.gen_env_table`.
 
 **rt-asr**
 
@@ -203,7 +203,7 @@ segmentation:
 
 Для віддаленого доступу сервіси слухають не `127.0.0.1`: `RT_HOST=0.0.0.0` (+ firewall, + `RT_API_TOKEN_FILE`).
 
-HM-модуль edge (`rt-translator`, Task 31; на момент написання модуля в репозиторії ще немає, опції - за специфікацією, перевірте після злиття): `endpoints.asr`, `endpoints.tts`, `llm.{djangoEndpoints,djangoTokenFile,service,directUrl,directTokenFile,model}`, `mode` (`null` = auto), `apiTokenFile`, `autostart`, `virtualSinks.enable`. Вони перетворюються на `RT_EDGE_*` env.
+HM-модуль edge: `homeManagerModules.rt-translator` (також `default`), опції з префіксом `rt-translator.*`: `endpoints.asr`, `endpoints.tts`, `llm.{djangoEndpoints,djangoTokenFile,service,directUrl,directTokenFile,model}`, `mode` (`null` = auto), `apiTokenFile`, `autostart`, `virtualSinks.enable`. Вони перетворюються на `RT_EDGE_*` env. Assertions: `mode = "translate"` потребує джерела LLM (`llm.djangoEndpoints` або `llm.directUrl`) і непорожнього `endpoints.tts`; `llm.djangoEndpoints` потребує `llm.djangoTokenFile`; токен-файли не можуть бути в `/nix/store`.
 
 Звук: потрібні PipeWire null-sink-и `rt_virtual_input` і `rt_virtual_output` (створює `nix develop`, `nixosModules.virtual-sinks` або HM `virtualSinks.enable`).
 
