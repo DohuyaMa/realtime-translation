@@ -1,0 +1,81 @@
+import builtins
+
+import numpy as np
+
+from src.audio import vad_stream
+from src.audio.vad_stream import VadStream, make_vad
+from src.segmentation import SegmenterConfig
+
+RATE = 48000
+
+
+def _energy(window: np.ndarray) -> float:
+    return 1.0 if np.sqrt(np.mean((window / 32768.0) ** 2)) >= 0.008 else 0.0
+
+
+def _signal() -> np.ndarray:
+    t = np.arange(RATE * 3) / RATE
+    tone = 0.3 * np.sin(2 * np.pi * 300 * t).astype(np.float32)
+    gate = np.zeros_like(tone)
+    gate[int(0.5 * RATE) : int(1.5 * RATE)] = 1.0
+    return tone * gate
+
+
+def _run(block: int, flush: bool = False):
+    stream = VadStream(_energy, SegmenterConfig.translate(), RATE)
+    sig = _signal()
+    out = []
+    for i in range(0, len(sig), block):
+        out += stream.feed_block(sig[i : i + block])
+    if flush:
+        tail = stream.flush()
+        if tail is not None:
+            out.append(tail)
+    return out
+
+
+def test_blocks_of_any_size_produce_same_segments():
+    a, b = _run(1024), _run(4000)
+    assert len(a) == len(b) >= 1
+    for x, y in zip(a, b):
+        assert abs(x.start_s - y.start_s) <= 0.032
+        assert abs(x.end_s - y.end_s) <= 0.032
+
+
+def test_flush_after_stop_returns_tail():
+    stream = VadStream(_energy, SegmenterConfig.translate(), RATE)
+    sig = _signal()[: int(1.0 * RATE)]  # speech still going
+    for i in range(0, len(sig), 2048):
+        stream.feed_block(sig[i : i + 2048])
+    tail = stream.flush()
+    assert tail is not None and len(tail.audio) > 0
+
+
+def test_reconfigure_switches_mode():
+    stream = VadStream(_energy, SegmenterConfig.translate(), RATE)
+    stream.reconfigure(SegmenterConfig.transcribe())
+    sig = _signal()
+    for i in range(0, len(sig), 4096):
+        stream.feed_block(sig[i : i + 4096])
+    assert stream.last_level() >= 0.0
+
+
+def test_last_level_is_block_rms():
+    stream = VadStream(_energy, SegmenterConfig.translate(), RATE)
+    stream.feed_block(np.full(480, 0.5, dtype=np.float32))
+    assert abs(stream.last_level() - 0.5) < 1e-4
+
+
+def test_energy_fallback_when_silero_missing(monkeypatch):
+    real_import = builtins.__import__
+
+    def fake(name, *a, **k):
+        if name.startswith("pysilero_vad"):
+            raise ImportError(name)
+        return real_import(name, *a, **k)
+
+    monkeypatch.setattr(builtins, "__import__", fake)
+    vad = make_vad()
+    assert vad(np.zeros(512, dtype=np.int16)) == 0.0
+    assert vad(np.full(512, 10000, dtype=np.int16)) == 1.0
+    assert vad_stream is not None
