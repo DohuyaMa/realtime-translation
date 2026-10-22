@@ -1,4 +1,6 @@
+import io
 import json
+import wave
 
 import httpx
 import numpy as np
@@ -6,9 +8,32 @@ import pytest
 
 from src.clients import ClientFactories, client_factories
 from src.clients.asr import AsrClient
-from src.clients.base import ServiceError
+from src.clients.base import ServiceClient, ServiceError
+from src.clients.tts import TtsClient, decode_wav
 from src.clients.llm import LlmClient, StaticTarget
 from src.core.runtime import EdgeSettings, LlmSettings
+
+
+def multipart_fields(req):
+    from email import message_from_bytes
+
+    msg = message_from_bytes(b"Content-Type: " + req.headers["content-type"].encode() + b"\r\n\r\n" + req.content)
+    out = {}
+    for part in msg.get_payload():
+        name = part.get_param("name", header="content-disposition")
+        if part.get_filename() is None:
+            out[name] = part.get_payload(decode=True).decode()
+    return out
+
+
+def wav_bytes(frames, rate=24000, width=2, channels=1):
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(channels)
+        w.setsampwidth(width)
+        w.setframerate(rate)
+        w.writeframes(frames)
+    return buf.getvalue()
 
 
 class FakeTarget:
@@ -75,9 +100,15 @@ def test_llm_401_invalidates_auth_and_retries_once():
     assert llm(handler, t).translate("a", "ru") == "Hi"
     assert t.calls == ["auth"]
     t2 = FakeTarget()
+    hits = []
+
+    def always_401(req):
+        hits.append(1)
+        return httpx.Response(401)
+
     with pytest.raises(ServiceError) as e:
-        llm(lambda r: httpx.Response(401), t2).translate("a", "ru")
-    assert e.value.kind == "auth" and t2.calls == ["auth"]
+        llm(always_401, t2).translate("a", "ru")
+    assert e.value.kind == "auth" and t2.calls == ["auth"] and len(hits) == 2
 
 
 def test_llm_503_is_busy_and_unreachable_retries_on_new_target():
@@ -90,9 +121,34 @@ def test_llm_503_is_busy_and_unreachable_retries_on_new_target():
     assert llm(handler, t).translate("a", "uk") == "Hi"
     assert t.calls == ["unreachable"]
     t2 = FakeTarget()
-    with pytest.raises(ServiceError):
-        llm(lambda r: httpx.Response(503), t2).translate("a", "uk")
-    assert t2.calls == ["busy"]
+    hits = []
+
+    def always_503(req):
+        hits.append(1)
+        return httpx.Response(503)
+
+    with pytest.raises(ServiceError) as e:
+        llm(always_503, t2).translate("a", "uk")
+    assert e.value.kind == "busy" and t2.calls == ["busy"] and len(hits) == 2
+
+
+@pytest.mark.parametrize(
+    "first,kind",
+    [
+        (lambda req: httpx.Response(503), "busy"),
+        (lambda req: (_ for _ in ()).throw(httpx.ReadTimeout("slow", request=req)), "timeout"),
+    ],
+)
+def test_llm_transient_then_200_retries_once(first, kind):
+    n = {"c": 0}
+
+    def handler(req):
+        n["c"] += 1
+        return first(req) if n["c"] == 1 else ok("Hi")
+
+    t = FakeTarget()
+    assert llm(handler, t).translate("a", "uk") == "Hi"
+    assert t.calls == [kind] and n["c"] == 2
 
 
 def test_llm_english_passthrough_no_http():
@@ -122,9 +178,10 @@ def test_static_target_reads_token_file(tmp_path):
 
 def test_asr_client_sends_priority_and_chunk_seconds():
     def handler(req):
-        body = req.content
-        assert b'name="priority"' in body and b"batch" in body
-        assert b'name="chunk_seconds"' in body and b"30.0" in body
+        fields = multipart_fields(req)
+        assert fields["priority"] == "batch"
+        assert fields["chunk_seconds"] == "30.0"
+        assert fields["response_format"] == "verbose_json"
         return httpx.Response(200, json={"text": " hi ", "language": "en"})
 
     c = AsrClient("http://asr", transport=httpx.MockTransport(handler))
@@ -134,7 +191,8 @@ def test_asr_client_sends_priority_and_chunk_seconds():
 
 def test_asr_default_priority_realtime():
     def handler(req):
-        assert b"realtime" in req.content
+        assert multipart_fields(req)["priority"] == "realtime"
+        assert "chunk_seconds" not in multipart_fields(req)
         return httpx.Response(200, json={"text": "x"})
 
     AsrClient("http://asr", transport=httpx.MockTransport(handler)).transcribe(np.ones(10, dtype=np.int16))
@@ -145,3 +203,69 @@ def test_client_factories():
     assert isinstance(f, ClientFactories)
     assert f.asr("http://a:1/").base_url == "http://a:1"
     assert f.tts("http://t:1").service == "tts"
+
+
+def tts(handler):
+    return TtsClient("http://tts", transport=httpx.MockTransport(handler))
+
+
+def test_tts_roundtrip_and_request_body():
+    pcm = np.array([0, 16384, -16384], dtype="<i2").tobytes()
+
+    def handler(req):
+        assert req.url.path == "/v1/audio/speech"
+        assert json.loads(req.content) == {"input": "hi", "response_format": "wav", "voice": "v", "speed": 1.25}
+        return httpx.Response(200, content=wav_bytes(pcm))
+
+    audio, rate = tts(handler).synthesize("hi", voice="v", speed=1.25)
+    assert rate == 24000 and audio.dtype == np.float32
+    np.testing.assert_allclose(audio, [0.0, 0.5, -0.5])
+
+
+def test_tts_x_sample_rate_header_overrides_wav_rate():
+    resp = httpx.Response(200, content=wav_bytes(b"\x00\x00" * 4), headers={"X-Sample-Rate": "22050"})
+    assert tts(lambda r: resp).synthesize("x")[1] == 22050
+
+
+def test_decode_wav_stereo_downmix_and_non_pcm16():
+    frames = np.array([16384, -16384, 16384, 16384], dtype="<i2").tobytes()
+    audio, rate = decode_wav(wav_bytes(frames, rate=16000, channels=2))
+    assert rate == 16000
+    np.testing.assert_allclose(audio, [0.0, 0.5])
+    with pytest.raises(ValueError):
+        decode_wav(wav_bytes(b"\x00" * 8, width=4))
+
+
+def test_tts_invalid_wav_is_service_error():
+    with pytest.raises(ServiceError) as e:
+        tts(lambda r: httpx.Response(200, content=b"not a wav")).synthesize("x")
+    assert (e.value.service, e.value.kind) == ("tts", "http")
+    with pytest.raises(ServiceError) as e:
+        tts(lambda r: httpx.Response(200, content=wav_bytes(b"\x00" * 8, width=4))).synthesize("x")
+    assert e.value.kind == "http"
+
+
+def test_service_client_health_status_and_error_mapping():
+    ok_c = ServiceClient(
+        "http://s/prefix/", transport=httpx.MockTransport(lambda r: httpx.Response(200, json={"ready": True}))
+    )
+    assert ok_c.health() is True and ok_c.status() == {"ready": True}
+    bad = ServiceClient("http://s", transport=httpx.MockTransport(lambda r: httpx.Response(500)))
+    assert bad.health() is False and bad.status() is None
+
+    def refuse(req):
+        raise httpx.ConnectError("refused", request=req)
+
+    def slow(req):
+        raise httpx.ReadTimeout("slow", request=req)
+
+    for handler, kind in ((refuse, "unreachable"), (slow, "timeout")):
+        c = ServiceClient("http://s", transport=httpx.MockTransport(handler))
+        with pytest.raises(ServiceError) as e:
+            c._request("GET", "/x")
+        assert e.value.kind == kind
+        assert c.health() is False
+    auth = ServiceClient("http://s", transport=httpx.MockTransport(lambda r: httpx.Response(403)))
+    with pytest.raises(ServiceError) as e:
+        auth._request("GET", "/x")
+    assert e.value.kind == "auth" and e.value.status_code == 403
