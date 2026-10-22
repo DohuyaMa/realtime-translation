@@ -242,12 +242,13 @@ class EndpointsDialog(QDialog):
         try:
             settings, to_save = build_settings(self.values())
             errors = settings.validate()
+            if not errors:
+                settings = save_values(to_save)
         except Exception as e:  # malformed value: keep dialog open
             errors = [str(e)]
         if errors:
             self.error_label.setText("; ".join(errors))
             return
-        settings = save_values(to_save)
         self.settings_changed.emit(settings)
         super().accept()
 

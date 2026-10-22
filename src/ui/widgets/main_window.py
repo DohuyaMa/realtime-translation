@@ -24,6 +24,7 @@ class MainWindow(QMainWindow):
     """Main window for the real-time translation application using controller pattern."""
     _update_signal = Signal(object)
     _task_done = Signal(object, object)  # callback, result
+    _status_signal = Signal(str)
 
     def __init__(self, controller: Optional[UIController] = None):
         super().__init__()
@@ -44,7 +45,9 @@ class MainWindow(QMainWindow):
         
         # Connect UI controller callbacks
         self._update_signal.connect(self._apply_ui_update)
-        self._task_done.connect(lambda cb, res: cb(res))
+        self._task_done.connect(self._finish_task)
+        self._status_signal.connect(self._apply_status)
+        self._busy = False
         self.ui_controller.set_status_callback(self.handle_status_update)
         self.ui_controller.set_update_callback(self.update_ui_from_controller)
         
@@ -260,9 +263,21 @@ class MainWindow(QMainWindow):
             logger.error(f"Error refreshing device lists: {e}")
             self.status_manager.log_error(f"Error refreshing device lists: {e}")
         
-    def _run_async(self, fn, done):
-        """Run blocking backend work off the GUI thread; done(result) runs on it."""
+    def _finish_task(self, done, result):
+        self._busy = False
+        done(result)
+
+    def _run_async(self, fn, done, exclusive=True):
+        """Run blocking backend work off the GUI thread; done(result) runs on it.
+
+        Only one exclusive task runs at a time; overlapping requests are dropped.
+        """
         import threading
+
+        if exclusive and self._busy:
+            self.status_manager.log_info('Busy, request ignored')
+            return False
+        self._busy = True
 
         def work():
             try:
@@ -273,6 +288,7 @@ class MainWindow(QMainWindow):
             self._task_done.emit(done, result)
 
         threading.Thread(target=work, daemon=True, name="ui-task").start()
+        return True
 
     def toggle_translation(self):
         """Toggle translation on/off without blocking the GUI thread."""
@@ -286,7 +302,11 @@ class MainWindow(QMainWindow):
             running = self.ui_controller.get_status().get('running', False)
             return ok, running
 
-        self._run_async(work, self._on_toggle_done)
+        if not self._run_async(work, self._on_toggle_done):
+            self.translate_button.setEnabled(True)
+            self.translate_button.setText(
+                "Stop Translation" if self.is_translating else "Start Translation"
+            )
 
     def _on_toggle_done(self, result):
         self.translate_button.setEnabled(True)
@@ -442,10 +462,13 @@ class MainWindow(QMainWindow):
             combo.setCurrentIndex(index)
         
     def handle_status_update(self, message: str):
-        """Handle status updates from UI controller."""
-        # Use the status manager to separate status display from logging
+        """Status updates may come from worker threads; marshal to the GUI."""
+        self._status_signal.emit(message)
+
+    def _apply_status(self, message: str):
         self.status_manager.set_status(message)
         self.status_manager.log_info(message)
+
     def closeEvent(self, event):
         """Handle window close event."""
         if self.minimize_to_tray.isChecked():

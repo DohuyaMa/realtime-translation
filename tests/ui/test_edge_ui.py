@@ -147,6 +147,11 @@ def test_main_window_constructs(app, cfg):
     assert win.service_status_panel.get_service_names() == ["asr", "llm", "tts"]
     win._apply_ui_update({"input": 0.5, "health": {}})
     win.on_general_settings_changed(resolve_edge_settings({}, {}))
+    for _ in range(100):
+        app.processEvents()
+        if not win._busy:
+            break
+        time.sleep(0.02)
     win.toggle_translation()
     assert not win.translate_button.isEnabled()
     for _ in range(100):
@@ -156,3 +161,51 @@ def test_main_window_constructs(app, cfg):
         time.sleep(0.02)
     assert win.translate_button.text() == "Stop Translation"
     ctl.reconfigure_services.assert_called_once()
+
+
+def test_status_callback_from_worker_runs_on_gui_thread(app, cfg):
+    import threading
+    import time
+    from unittest.mock import MagicMock
+
+    from src.ui.widgets.main_window import MainWindow
+
+    ctl = MagicMock()
+    ctl.get_input_devices.return_value = []
+    ctl.get_output_devices.return_value = []
+    ctl.get_status.return_value = {"running": True}
+    win = MainWindow(ctl)
+    seen = []
+    win.status_manager.set_status = lambda m: seen.append(
+        (m, threading.current_thread() is threading.main_thread())
+    )
+    win.status_manager.log_info = lambda m: None
+
+    def toggle():
+        win.handle_status_update("from worker")
+        return True
+
+    ctl.toggle_pipeline = toggle
+    win.ui_controller = MagicMock()
+    win.ui_controller.toggle_pipeline = toggle
+    win.ui_controller.get_status.return_value = {"running": True}
+    win.toggle_translation()
+    for _ in range(100):
+        app.processEvents()
+        if win.translate_button.isEnabled():
+            break
+        time.sleep(0.02)
+    assert ("from worker", True) in seen
+
+
+def test_overlapping_exclusive_tasks_dropped(app, cfg):
+    from unittest.mock import MagicMock
+
+    from src.ui.widgets.main_window import MainWindow
+
+    ctl = MagicMock()
+    ctl.get_input_devices.return_value = []
+    ctl.get_output_devices.return_value = []
+    win = MainWindow(ctl)
+    win._busy = True
+    assert win._run_async(lambda: None, lambda r: None) is False
