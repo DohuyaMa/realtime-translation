@@ -10,9 +10,9 @@ let
   csv = lib.concatStringsSep ",";
   edgeEnv =
     {
-      RT_EDGE_ASR_URLS = csv cfg.endpoints.asr;
       RT_EDGE_LLM_MODEL = cfg.llm.model;
     }
+    // lib.optionalAttrs (cfg.endpoints.asr != [ ]) { RT_EDGE_ASR_URLS = csv cfg.endpoints.asr; }
     // lib.optionalAttrs (cfg.mode != null) { RT_EDGE_MODE = cfg.mode; }
     // lib.optionalAttrs (cfg.endpoints.tts != [ ]) { RT_EDGE_TTS_URLS = csv cfg.endpoints.tts; }
     // lib.optionalAttrs (cfg.llm.djangoEndpoints != [ ]) { RT_EDGE_DJANGO_URLS = csv cfg.llm.djangoEndpoints; }

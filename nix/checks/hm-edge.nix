@@ -2,11 +2,30 @@
 let
   lib = pkgs.lib;
   fakeEdge = pkgs.writeShellScriptBin "translator-ui" "exit 0";
+  # Real Home Manager config (throws on failed assertions): used for positive configs.
   hm = extra: home-manager.lib.homeManagerConfiguration {
     inherit pkgs;
     modules = [
       self.homeManagerModules.rt-translator
       { home.username = "tester"; home.homeDirectory = "/srv/tester"; home.stateVersion = "25.11"; }
+      extra
+    ];
+  };
+  # Bare module-system eval of the same module with stub options, so failed assertions can be
+  # inspected (HM itself throws on `.config` access when any assertion fails).
+  stub = extra: lib.evalModules {
+    modules = [
+      self.homeManagerModules.rt-translator
+      ({ lib, ... }: {
+        config._module.args.pkgs = pkgs;
+        options = {
+          assertions = lib.mkOption { type = lib.types.listOf lib.types.raw; default = [ ]; };
+          home.packages = lib.mkOption { type = lib.types.listOf lib.types.raw; default = [ ]; };
+          home.sessionVariables = lib.mkOption { type = lib.types.attrsOf lib.types.raw; default = { }; };
+          systemd.user.services = lib.mkOption { type = lib.types.attrsOf lib.types.raw; default = { }; };
+          xdg.configFile = lib.mkOption { type = lib.types.attrsOf lib.types.raw; default = { }; };
+        };
+      })
       extra
     ];
   };
@@ -21,11 +40,15 @@ let
     };
   };
   transcribe = hm { rt-translator = { enable = true; package = fakeEdge; autostart = false; virtualSinks.enable = false; }; };
-  missingLlm = hm { rt-translator = { enable = true; package = fakeEdge; mode = "translate"; endpoints.tts = [ "http://gpu:8093" ]; }; };
-  missingTts = hm { rt-translator = { enable = true; package = fakeEdge; mode = "translate"; llm.directUrl = "http://llm:1"; }; };
-  noDjangoToken = hm { rt-translator = { enable = true; package = fakeEdge; llm.djangoEndpoints = [ "http://dj:8000" ]; }; };
-  storeToken = hm { rt-translator = { enable = true; package = fakeEdge; apiTokenFile = "${fakeEdge}/secret"; }; };
-  evalFails = cfg: !(builtins.tryEval (builtins.deepSeq cfg.activationPackage.drvPath true)).success;
+  missingLlm = stub { rt-translator = { enable = true; package = fakeEdge; mode = "translate"; endpoints.tts = [ "http://gpu:8093" ]; }; };
+  missingTts = stub { rt-translator = { enable = true; package = fakeEdge; mode = "translate"; llm.directUrl = "http://llm:1"; }; };
+  noDjangoToken = stub { rt-translator = { enable = true; package = fakeEdge; llm.djangoEndpoints = [ "http://dj:8000" ]; }; };
+  storeToken = stub { rt-translator = { enable = true; package = fakeEdge; apiTokenFile = "${fakeEdge}/secret"; }; };
+  # Names the assertion that must fire: true only if some failing assertion's message contains `sub`.
+  failsWith = sub: cfg:
+    lib.any (a: !a.assertion && lib.hasInfix sub a.message) cfg.config.assertions;
+  # Sanity: no assertion fails for the positive configs.
+  noFailures = cfg: lib.all (a: a.assertion) cfg.config.assertions;
   env = cfg: cfg.config.systemd.user.services.rt-app.Service.Environment;
   edgeEnv = cfg: builtins.filter (lib.hasPrefix "RT_EDGE_") (env cfg);
 
@@ -55,10 +78,11 @@ let
       };
       expected = { env = [ "RT_EDGE_ASR_URLS=http://127.0.0.1:8091" "RT_EDGE_LLM_MODEL=local" ]; install = { }; sinks = false; };
     };
-    testTranslateNeedsLlm = { expr = evalFails missingLlm; expected = true; };
-    testTranslateNeedsTts = { expr = evalFails missingTts; expected = true; };
-    testDjangoNeedsToken = { expr = evalFails noDjangoToken; expected = true; };
-    testTokenNotInStore = { expr = evalFails storeToken; expected = true; };
+    testPositiveConfigsClean = { expr = noFailures translate && noFailures transcribe; expected = true; };
+    testTranslateNeedsLlm = { expr = failsWith "llm.djangoEndpoints or llm.directUrl" missingLlm; expected = true; };
+    testTranslateNeedsTts = { expr = failsWith "mode = \"translate\" requires" missingTts; expected = true; };
+    testDjangoNeedsToken = { expr = failsWith "requires llm.djangoTokenFile" noDjangoToken; expected = true; };
+    testTokenNotInStore = { expr = failsWith "must not point into the Nix store" storeToken; expected = true; };
   };
 in
 pkgs.runCommand "rt-hm-edge-check" { activation = translate.activationPackage; } (
