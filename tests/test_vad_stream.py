@@ -2,7 +2,6 @@ import builtins
 
 import numpy as np
 
-from src.audio import vad_stream
 from src.audio.vad_stream import VadStream, make_vad
 from src.segmentation import SegmenterConfig
 
@@ -38,8 +37,27 @@ def test_blocks_of_any_size_produce_same_segments():
     a, b = _run(1024), _run(4000)
     assert len(a) == len(b) >= 1
     for x, y in zip(a, b):
-        assert abs(x.start_s - y.start_s) <= 0.032
-        assert abs(x.end_s - y.end_s) <= 0.032
+        assert (x.start_s, x.end_s) == (y.start_s, y.end_s)
+        assert np.array_equal(x.audio, y.audio)
+
+
+def test_windows_match_whole_signal_resample():
+    from scipy.signal import resample_poly
+
+    seen = []
+
+    def rec(window):
+        seen.append(window.copy())
+        return 0.0
+
+    stream = VadStream(rec, SegmenterConfig.translate(), RATE)
+    sig = _signal()
+    for i in range(0, len(sig), 1000):
+        stream.feed_block(sig[i : i + 1000])
+    got = np.concatenate(seen).astype(np.float64) / 32767.0
+    ref = resample_poly(sig, 1, 3)[: len(got)]
+    assert len(got) >= 16000
+    assert np.max(np.abs(got - ref)) < 2e-3
 
 
 def test_flush_after_stop_returns_tail():
@@ -55,9 +73,13 @@ def test_reconfigure_switches_mode():
     stream = VadStream(_energy, SegmenterConfig.translate(), RATE)
     stream.reconfigure(SegmenterConfig.transcribe())
     sig = _signal()
+    out = []
     for i in range(0, len(sig), 4096):
-        stream.feed_block(sig[i : i + 4096])
-    assert stream.last_level() >= 0.0
+        out += stream.feed_block(sig[i : i + 4096])
+    # translate mode would have ended the phrase after 0.7 s of silence;
+    # transcribe mode keeps accumulating until flush.
+    assert out == []
+    assert stream.flush() is not None
 
 
 def test_last_level_is_block_rms():
@@ -78,4 +100,3 @@ def test_energy_fallback_when_silero_missing(monkeypatch):
     vad = make_vad()
     assert vad(np.zeros(512, dtype=np.int16)) == 0.0
     assert vad(np.full(512, 10000, dtype=np.int16)) == 1.0
-    assert vad_stream is not None

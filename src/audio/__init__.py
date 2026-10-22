@@ -5,6 +5,7 @@ that lightweight modules such as ``vad_stream`` work on the edge devShell.
 """
 
 import importlib
+from typing import Any
 
 _LAZY = {
     "AudioCapture": ".capture",
@@ -15,7 +16,7 @@ _LAZY = {
 __all__ = list(_LAZY)
 
 
-def __getattr__(name: str):
+def __getattr__(name: str) -> Any:
     if name in _LAZY:
         return getattr(importlib.import_module(_LAZY[name], __name__), name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
