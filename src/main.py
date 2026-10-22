@@ -13,39 +13,23 @@ from .ui.widgets.main_window import MainWindow
 from .ui.controller.ui_controller import UIController
 
 
-def create_adapter(mode: str = "direct", use_wyoming: bool = False, wyoming_host: str = "localhost", wyoming_port: int = 10300, **kwargs):
-    """Create the appropriate adapter based on the mode.
-    
-    Args:
-        mode: Adapter mode (direct or ipc)
-        use_wyoming: Whether to use Wyoming whisper service
-        wyoming_host: Wyoming service host
-        wyoming_port: Wyoming service port
-        **kwargs: Additional arguments to pass to the adapter
-        
-    Returns:
-        An adapter instance
-    """
-    # Load Wyoming settings from config if not explicitly provided
+def create_adapter(mode: str = "direct", **kwargs):
+    """Create the backend adapter (only 'direct' exists)."""
+    if mode != "direct":
+        raise ValueError(f"Unsupported adapter mode: {mode}")
     from .core.config import get_config_manager
-    config_manager = get_config_manager()
+    from .core.runtime import get_runtime_config
 
-    # Only override with config values if not explicitly provided in function call
-    if 'use_wyoming' not in kwargs:
-        use_wyoming = config_manager.get('wyoming.use_wyoming', use_wyoming)
-    if 'wyoming_host' not in kwargs:
-        wyoming_host = config_manager.get('wyoming.host', wyoming_host)
-    if 'wyoming_port' not in kwargs:
-        wyoming_port = config_manager.get('wyoming.port', wyoming_port)
-    
-    if mode == "direct":
-        return DirectAdapter(
-            use_wyoming=use_wyoming,
-            wyoming_host=wyoming_host,
-            wyoming_port=wyoming_port,
-            **kwargs
-        )
-    raise ValueError(f"Unknown adapter mode: {mode}")
+    cfg = get_config_manager()
+    return DirectAdapter(
+        source_lang=cfg.get("translation.source_lang", "auto"),
+        target_lang=cfg.get("translation.target_lang", "en"),
+        tts_voice=cfg.get("speech.tts_voice"),
+        tts_speed=cfg.get("speech.tts_speed"),
+        settings=get_runtime_config(),
+        **kwargs,
+    )
+
 
 def setup_logging(log_level: str = "INFO"):
     """Set up logging configuration.
@@ -117,30 +101,10 @@ def parse_args():
         "--mode",
         type=str,
         default="direct",
-        choices=["direct", "ipc"],
-        help="Adapter mode (direct or ipc)"
+        choices=["direct"],
+        help="Adapter mode (only direct)"
     )
-    
-    parser.add_argument(
-        "--use-wyoming",
-        action="store_true",
-        help="Use Wyoming whisper service instead of local model"
-    )
-    
-    parser.add_argument(
-        "--wyoming-host",
-        type=str,
-        default="localhost",
-        help="Wyoming service host"
-    )
-    
-    parser.add_argument(
-        "--wyoming-port",
-        type=int,
-        default=10300,
-        help="Wyoming service port"
-    )
-    
+
     return parser.parse_args()
 
 
@@ -165,12 +129,7 @@ def main():
         app = QApplication(sys.argv)
         
         # Create and show main window with controller
-        adapter = create_adapter(
-            args.mode,
-            use_wyoming=args.use_wyoming,
-            wyoming_host=args.wyoming_host,
-            wyoming_port=args.wyoming_port
-        )
+        adapter = create_adapter(args.mode)
         backend_controller = ConcreteTranslatorController(adapter)
         ui_controller = UIController(backend_controller)
         window = MainWindow(controller=ui_controller)
