@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
-from typing import Callable, Dict, Optional, Sequence, Union
+from typing import Callable, Dict, Mapping, Optional, Sequence, Union
 
 from fastapi import FastAPI
 
@@ -18,7 +19,11 @@ from .settings import AsrSettings
 
 
 def _settings_env(settings: AsrSettings) -> Dict[str, str]:
-    """Env that reproduces ``settings`` (bootstrap for the runtime config)."""
+    """Env that reproduces ``settings``.
+
+    Fallback only: it pins device-dependent defaults (model, compute_type,
+    beam_size), so a runtime ``device`` change would not re-derive them.
+    """
     return {
         key: render_env_value(getattr(settings, field))
         for field, key in AsrSettings.env_keys().items()
@@ -30,13 +35,18 @@ def create_app(
     backend_factory: Optional[Callable[[], AsrBackend]] = None,
     lifespan_hooks: Sequence[LifespanHook] = (),
     state_path: Optional[Union[str, Path]] = None,
+    bootstrap_env: Optional[Mapping[str, str]] = None,
 ) -> FastAPI:
-    settings = settings or AsrSettings.from_env()
+    """``bootstrap_env`` is the raw env ``settings`` came from (the runtime
+    config re-derives defaults from it); main() passes ``os.environ``."""
+    if settings is None:
+        bootstrap_env = os.environ if bootstrap_env is None else bootstrap_env
+        settings = AsrSettings.from_env(bootstrap_env)
+    elif bootstrap_env is None:
+        bootstrap_env = _settings_env(settings)
     token = load_token(settings.api_token_file)
     state = state_path or settings.config_state
-    config = RuntimeConfig(
-        AsrSettings, _settings_env(settings), Path(state) if state else None
-    )
+    config = RuntimeConfig(AsrSettings, bootstrap_env, Path(state) if state else None)
     config.restore()
     runtime = ServiceRuntime(
         settings.service,

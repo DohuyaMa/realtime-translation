@@ -134,7 +134,7 @@ def build_http_router(
                     Segment(seg.start + offset, seg.end + offset, seg.text)
                     for seg in segs
                 )
-                tail = _join(segs)[-PROMPT_TAIL_CHARS:]
+                tail = filter_repetitions(_join(segs))[-PROMPT_TAIL_CHARS:]
                 chunk_opts = dataclasses.replace(opts, prompt=tail or None)
             text_raw, chunks = _join(segments), len(bounds)
 

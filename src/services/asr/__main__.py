@@ -1,5 +1,6 @@
 """python -m src.services.asr (entry point rt-asr)."""
 
+import os
 import sys
 from typing import cast
 
@@ -10,7 +11,10 @@ from .settings import AsrSettings
 
 def main() -> int:
     return run_service(
-        AsrSettings.from_env, lambda settings: create_app(cast(AsrSettings, settings))
+        AsrSettings.from_env,
+        lambda settings: create_app(
+            cast(AsrSettings, settings), bootstrap_env=os.environ
+        ),
     )
 
 

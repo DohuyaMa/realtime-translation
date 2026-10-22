@@ -9,13 +9,21 @@ import pytest
 from src.services.asr.app import create_app
 from src.services.asr.backend import FakeAsrBackend, Segment, Transcription
 from src.services.asr.settings import AsrSettings
+from src.services.common.device import default_beams, default_model
+from src.services.common.worker import Priority
 from svc_testutil import SR, running, tone, wav_file
 
 
 def make(backend=None, state_path=None, **env):
-    settings = AsrSettings.from_env({"RT_ASR_BACKEND": "fake", **env})
+    env = {"RT_ASR_BACKEND": "fake", **env}
+    settings = AsrSettings.from_env(env)
     backend = backend or FakeAsrBackend()
-    app = create_app(settings, backend_factory=lambda: backend, state_path=state_path)
+    app = create_app(
+        settings,
+        backend_factory=lambda: backend,
+        state_path=state_path,
+        bootstrap_env=env,
+    )
     return app, backend
 
 
@@ -330,3 +338,55 @@ def test_client_disconnect_stops_batch_between_chunks():
     with running(app):
         asyncio.run(app(scope, receive, send))
     assert len(backend.calls) == 1  # first chunk only, then the disconnect
+
+
+def test_config_device_change_rederives_device_defaults():
+    app, _ = make()
+    with running(app) as client:
+        body = set_config(client, device="cuda")
+    assert body["values"]["model"] == default_model("asr", "cuda")
+    assert body["values"]["compute_type"] == "int8_float16"
+    assert body["values"]["beam_size"] == default_beams("asr", "cuda")
+    assert body["bootstrap"]["model"] == default_model("asr", "cpu")
+    assert app.state.runtime.backend.model_id == default_model("asr", "cuda")
+
+
+def spy_runtime(runtime):
+    """Record (kind, fn name, audio samples, priority) of submitted jobs."""
+    jobs = []
+    run, run_iter = runtime.run, runtime.run_iter
+
+    async def spy_run(fn, *args, priority=Priority.REQUEST, **kw):
+        jobs.append(("run", fn.__name__, len(args[0]), priority))
+        return await run(fn, *args, priority=priority, **kw)
+
+    async def spy_run_iter(fn, *args, priority=Priority.BATCH, **kw):
+        jobs.append(("run_iter", fn.__name__, len(args[0]), priority))
+        return await run_iter(fn, *args, priority=priority, **kw)
+
+    runtime.run, runtime.run_iter = spy_run, spy_run_iter
+    return jobs
+
+
+def test_job_priorities_and_detection_window():
+    app, _ = make()
+    jobs = spy_runtime(app.state.runtime)
+    with running(app) as client:
+        post(client, data=wav_file(tone(5 * SR)))
+        post(client, data=wav_file(tone(70 * SR)), chunk_seconds="30")
+    assert jobs == [
+        ("run", "detect_language", 5 * SR, Priority.REQUEST),
+        ("run", "transcribe", 5 * SR, Priority.REQUEST),
+        ("run", "detect_language", 30 * SR, Priority.BATCH),
+        ("run_iter", "transcribe_iter", 30 * SR, Priority.BATCH),
+        ("run_iter", "transcribe_iter", 30 * SR, Priority.BATCH),
+        ("run_iter", "transcribe_iter", 10 * SR, Priority.BATCH),
+    ]
+
+
+def test_next_chunk_prompt_is_tail_of_filtered_text():
+    backend = FakeAsrBackend(text_fn=lambda audio, opts: "again " * 60)
+    app, _ = make(backend, RT_ASR_LANGUAGE="uk")
+    with running(app) as client:
+        post(client, data=wav_file(tone(70 * SR)), chunk_seconds="30")
+    assert backend.calls[1][1].prompt == "again"
