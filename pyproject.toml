@@ -16,3 +16,4 @@ include = ["src*"]
 
 [project.scripts]
 translator-ui               = "src.main:main"
+rt-models                   = "src.services.common.models_cli:main"
