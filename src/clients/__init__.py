@@ -12,6 +12,8 @@ from .asr import AsrClient, AsrResult
 from .base import ServiceClient, ServiceError
 from .lease import DjangoLeaseApi, Lease, LeaseError, LeaseKeeper
 from .llm import LlmClient, LlmTarget, StaticTarget
+from .health import ServiceHealthMonitor
+from .pool import EndpointPool, SpeechPools, build_pools
 from .tts import TtsClient
 
 __all__ = [
@@ -29,6 +31,10 @@ __all__ = [
     "ServiceError",
     "ClientFactories",
     "client_factories",
+    "EndpointPool",
+    "SpeechPools",
+    "build_pools",
+    "ServiceHealthMonitor",
 ]
 
 
