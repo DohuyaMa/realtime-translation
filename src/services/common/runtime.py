@@ -27,6 +27,10 @@ def _describe(exc: BaseException) -> str:
     return f"{type(exc).__name__}: {exc}"
 
 
+class _LoadAbandoned(TimeoutError):
+    """reload() timed out; the loader thread now owns ``_load_lock``."""
+
+
 class ServiceRuntime:
     """Owns the backend and the single inference thread that uses it.
 
@@ -137,10 +141,13 @@ class ServiceRuntime:
         previous = self.state
         self.state = ModelState.LOADING
         t0 = time.monotonic()
+        owns_lock = True
         try:
             backend = self._load_off_thread(backend_factory, deadline, timeout_s)
             self._swap(backend, deadline, timeout_s)
         except BaseException as exc:
+            if isinstance(exc, _LoadAbandoned):
+                owns_lock = False  # the loader thread releases it when done
             logger.warning(
                 "{}: model reload failed, keeping the previous model: {}",
                 self.service,
@@ -158,18 +165,34 @@ class ServiceRuntime:
                 "{}: model reloaded in {:.1f}s", self.service, self.load_seconds
             )
         finally:
-            self._load_lock.release()
+            if owns_lock:
+                self._load_lock.release()
 
     def _load_off_thread(
         self, factory: Callable[[], Any], deadline: float, timeout_s: float
     ) -> Any:
+        """Build + load on a loader thread; wait for it until ``deadline``.
+
+        On timeout the load is abandoned and the loader thread takes over
+        ``_load_lock``: it releases it (and drops the backend) only when the
+        load really ends, so no second load can run next to it.
+        """
         loaded: concurrent.futures.Future = concurrent.futures.Future()
+        handoff = threading.Lock()
+        abandoned = False
 
         def load() -> None:
             try:
                 loaded.set_result(self._build(factory))
             except Exception as exc:  # noqa: BLE001 — re-raised by reload()
                 loaded.set_exception(exc)
+            finally:
+                with handoff:
+                    if abandoned:
+                        logger.info(
+                            "{}: abandoned model load ended; discarded", self.service
+                        )
+                        self._load_lock.release()
 
         threading.Thread(
             target=load, name=f"{self.service}-loader", daemon=True
@@ -177,8 +200,12 @@ class ServiceRuntime:
         try:
             return loaded.result(timeout=max(deadline - time.monotonic(), 0.0))
         except concurrent.futures.TimeoutError:
-            # The abandoned load finishes in the background and is discarded.
-            raise TimeoutError(
+            with handoff:
+                if not loaded.done():
+                    abandoned = True
+            if not abandoned:  # finished right at the deadline
+                return loaded.result()
+            raise _LoadAbandoned(
                 f"{self.service}: model load did not finish within {timeout_s}s"
             ) from None
 

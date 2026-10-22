@@ -296,6 +296,7 @@ def test_reload_shows_loading_while_old_backend_serves():
         assert runtime.require_ready() is old
         gate.set()
         thread.join(5)
+        assert not thread.is_alive()
         assert not errors
         assert client.get("/status").json()["model"]["state"] == "ready"
         assert runtime.backend is new
@@ -324,6 +325,7 @@ def test_reload_swap_waits_for_running_job(started):
     release.set()
     fut.result(5)
     thread.join(5)
+    assert not thread.is_alive()
     assert seen == [old, old]
     assert runtime.backend is new and runtime.state is ModelState.READY
 
@@ -342,6 +344,28 @@ def test_reload_timeout_keeps_old_backend(started):
     newer = GatedBackend()
     runtime.reload(lambda: newer)
     assert runtime.backend is newer
+
+
+def test_reload_timeout_blocks_further_loads_until_abandoned_load_ends(started):
+    old = GatedBackend()
+    gate = threading.Event()
+    runtime = started(old)
+    with pytest.raises(TimeoutError, match="did not finish"):
+        runtime.reload(lambda: GatedBackend(gate), timeout_s=0.1)
+    built = []
+
+    def factory():
+        built.append(True)
+        return GatedBackend()
+
+    # the abandoned load still runs: no second load may start next to it
+    with pytest.raises(TimeoutError, match="another model load is still running"):
+        runtime.reload(factory, timeout_s=0.1)
+    assert built == []
+    assert runtime.backend is old and runtime.state is ModelState.READY
+    gate.set()
+    runtime.reload(factory, timeout_s=5)  # waits for the abandoned load to end
+    assert built == [True] and runtime.state is ModelState.READY
 
 
 @pytest.mark.asyncio
