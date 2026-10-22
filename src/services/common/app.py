@@ -10,8 +10,8 @@ from fastapi import APIRouter, Depends, FastAPI
 from .auth import make_bearer_dependency
 from .errors import install_error_handlers
 from .gpu import VramProbe
-from .health import VersionedConfig, build_health_router
-from .runtime_config import build_config_router
+from .health import build_health_router
+from .runtime_config import RuntimeConfig, build_config_router
 from .runtime import ServiceRuntime
 from .settings import BaseSettings
 from .version import SERVICE_VERSION
@@ -29,7 +29,7 @@ def create_service_app(
     ws_routers: Sequence[APIRouter] = (),
     lifespan_hooks: Sequence[LifespanHook] = (),
     vram: Optional[VramProbe] = None,
-    config: Optional[VersionedConfig] = None,
+    config: Optional[RuntimeConfig[Any]] = None,
     on_reload: Optional[Callable[[Any], None]] = None,
 ) -> FastAPI:
     @asynccontextmanager
@@ -56,9 +56,8 @@ def create_service_app(
 
     auth = [Depends(make_bearer_dependency(token))]
     if config is not None:
-        reload_cb = on_reload or (lambda _: None)
         app.include_router(
-            build_config_router(config, reload_cb),  # type: ignore[arg-type]
+            build_config_router(config, on_reload),
             dependencies=auth,
         )
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -105,9 +106,10 @@ class RuntimeConfig(Generic[S]):
     def rollback(self, snap: Snapshot) -> None:
         overrides, version = snap
         with self._lock:
-            self._current = self._build(overrides)
-            self._overrides, self._version = dict(overrides), version
+            settings = self._build(overrides)
             self._persist(overrides, version)
+            self._current = settings
+            self._overrides, self._version = dict(overrides), version
 
     def _persist(self, overrides: Mapping[str, object], version: int) -> None:
         if self._state_path is None:
@@ -146,9 +148,13 @@ class ConfigUpdate(BaseModel):
 
 
 def build_config_router(
-    cfg: RuntimeConfig, on_reload: Callable[[Any], None]
+    cfg: RuntimeConfig[Any],
+    on_reload: Optional[Callable[[Any], None]] = None,
 ) -> APIRouter:
+    """GET/POST /config. Without on_reload nothing is ever reported reloaded."""
     router = APIRouter()
+    # Serializes snapshot + apply + reload + rollback of concurrent POSTs.
+    update_lock = asyncio.Lock()
 
     @router.get("/config")
     async def get_config() -> dict:
@@ -156,17 +162,24 @@ def build_config_router(
 
     @router.post("/config")
     async def post_config(body: ConfigUpdate):
-        snap = cfg.snapshot()
-        try:
-            changed = cfg.apply(body.values, body.version, body.reset)
-        except ValueError as exc:
-            return JSONResponse({"detail": str(exc)}, status_code=422)
-        if changed:
+        async with update_lock:
+            snap = cfg.snapshot()
             try:
-                await run_in_threadpool(on_reload, cfg.current())
-            except Exception as exc:  # noqa: BLE001 - report any reload failure
-                cfg.rollback(snap)
-                return JSONResponse({"detail": str(exc)}, status_code=500)
-        return cfg.effective() | {"reloaded": bool(changed)}
+                changed = cfg.apply(body.values, body.version, body.reset)
+            except ValueError as exc:
+                return JSONResponse({"detail": str(exc)}, status_code=422)
+            reloaded = False
+            if changed and on_reload is not None:
+                try:
+                    await run_in_threadpool(on_reload, cfg.current())
+                except Exception as exc:  # noqa: BLE001 - report any reload failure
+                    detail = str(exc)
+                    try:
+                        cfg.rollback(snap)
+                    except Exception:  # noqa: BLE001
+                        log.exception("runtime config rollback failed")
+                    return JSONResponse({"detail": detail}, status_code=500)
+                reloaded = True
+            return cfg.effective() | {"reloaded": reloaded}
 
     return router

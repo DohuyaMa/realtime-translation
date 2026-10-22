@@ -212,3 +212,115 @@ def test_app_mounts_config_behind_bearer():
         "/config", json={"version": 1, "values": {"model": "x"}}, headers=auth
     )
     assert r.status_code == 200 and len(reloads) == 1
+
+
+def _on_disk(path):
+    return json.loads(path.read_text())
+
+
+def test_state_file_untouched_on_422(tmp_path):
+    path = tmp_path / "s.json"
+    cfg = _cfg(path)
+    cfg.apply({"log_level": "debug"}, 1)
+    before = path.read_text()
+    client = _client(cfg, lambda _: None)
+    r = client.post("/config", json={"version": 2, "values": {"max_pending": 0}})
+    assert r.status_code == 422
+    assert path.read_text() == before
+
+
+def test_rollback_restores_overrides_on_disk(tmp_path):
+    path = tmp_path / "s.json"
+    cfg = _cfg(path)
+    cfg.apply({"log_level": "debug"}, 1)
+
+    def boom(_):
+        raise RuntimeError("nope")
+
+    client = _client(cfg, boom)
+    client.post("/config", json={"version": 2, "values": {"model": "x"}})
+    assert _on_disk(path) == {"version": 1, "overrides": {"log_level": "debug"}}
+
+
+def test_persist_failure_leaves_memory_unchanged(tmp_path, monkeypatch):
+    cfg = _cfg(tmp_path / "s.json")
+    cfg.apply({"log_level": "debug"}, 1)
+
+    def fail(*_a):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(cfg, "_persist", fail)
+    with pytest.raises(OSError):
+        cfg.apply({"log_level": "error"}, 2)
+    assert cfg.current().log_level == "debug"
+    assert cfg.effective()["version"] == 1
+
+
+def test_rollback_persist_failure_still_returns_500(tmp_path, monkeypatch):
+    cfg = _cfg(tmp_path / "s.json")
+
+    def boom(_):
+        monkeypatch.setattr(cfg, "_persist", lambda *_a: 1 / 0)
+        raise RuntimeError("load failed")
+
+    r = _client(cfg, boom).post(
+        "/config", json={"version": 1, "values": {"model": "x"}}
+    )
+    assert r.status_code == 500 and r.json() == {"detail": "load failed"}
+
+
+@pytest.mark.asyncio
+async def test_concurrent_failed_reload_does_not_wipe_other_commit(tmp_path):
+    import asyncio
+    import threading
+
+    import httpx
+
+    path = tmp_path / "s.json"
+    cfg = _cfg(path)
+    first_in_reload = threading.Event()
+    release = threading.Event()
+
+    def on_reload(settings):
+        if settings.model == "a":
+            first_in_reload.set()
+            assert release.wait(5)
+            raise RuntimeError("a failed")
+
+    app = FastAPI()
+    app.include_router(build_config_router(cfg, on_reload))
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+
+        def post(version, values):
+            return c.post("/config", json={"version": version, "values": values})
+
+        ta = asyncio.create_task(post(1, {"model": "a"}))
+        while not first_in_reload.is_set():
+            await asyncio.sleep(0.01)
+        tb = asyncio.create_task(post(2, {"log_level": "debug"}))
+        await asyncio.sleep(0.2)  # b must wait on the update lock
+        assert cfg.effective()["version"] == 1
+        release.set()
+        ra, rb = await asyncio.gather(ta, tb)
+    assert ra.status_code == 500
+    assert rb.status_code == 200
+    assert cfg.current().log_level == "debug"
+    assert cfg.current().model == "whisper-base"
+    assert _on_disk(path) == {"version": 2, "overrides": {"log_level": "debug"}}
+
+
+def test_no_on_reload_never_reports_reloaded():
+    client = _client(_cfg(), None)
+    r = client.post("/config", json={"version": 1, "values": {"model": "x"}})
+    assert r.status_code == 200 and r.json()["reloaded"] is False
+
+
+def test_422_keeps_detail_shape_through_service_app():
+    cfg = _cfg()
+    settings = cfg.current()
+    runtime = ServiceRuntime("rt-asr", lambda: object(), settings.max_pending)
+    app = create_service_app(settings=settings, runtime=runtime, token=None, config=cfg)
+    r = TestClient(app).post("/config", json={"version": 1, "values": {"port": 1}})
+    assert r.status_code == 422
+    assert r.json() == {"detail": "port is not runtime-configurable"}
