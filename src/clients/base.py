@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Sequence
 
 import httpx
 from loguru import logger
@@ -180,6 +180,30 @@ class ServiceClient:
             return self._json(self._request("GET", "/status"))
         except ServiceError:
             return None
+
+    # -- service administration (settings dialog) --------------------------
+
+    def get_config(self) -> dict:
+        """GET /config: runtime values, their source and the version."""
+        return self._json(self._request("GET", "/config"))
+
+    def update_config(
+        self,
+        values: dict,
+        version: int,
+        reset: Sequence[str] = (),
+        *,
+        timeout_s: Optional[float] = None,
+    ) -> dict:
+        """POST /config; a model/device change reloads (and may download)."""
+        body = {"version": version, "values": values, "reset": list(reset)}
+        return self._json(
+            self._request("POST", "/config", json=body, timeout_s=timeout_s)
+        )
+
+    def models(self) -> dict:
+        """GET /v1/models: pinned models, ``cached`` flag, ``current``."""
+        return self._json(self._request("GET", "/v1/models"))
 
     def close(self) -> None:
         self._client.close()

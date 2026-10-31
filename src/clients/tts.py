@@ -47,3 +47,7 @@ class TtsClient(ServiceClient):
         if header and header.isdigit():
             rate = int(header)
         return audio, rate
+
+    def voices(self) -> dict:
+        """GET /v1/audio/voices: ``voices`` [{id, language, gender}], ``default``."""
+        return self._json(self._request("GET", "/v1/audio/voices"))

@@ -26,8 +26,6 @@ class DirectAdapter:
         sample_rate: int = 16000,
         skip_preflight: bool = False,
         settings: Optional[EdgeSettings] = None,
-        tts_voice: Optional[str] = None,
-        tts_speed: Optional[float] = None,
         translation_system_factory: Callable[..., TranslationSystem] = (
             TranslationSystem
         ),
@@ -55,7 +53,6 @@ class DirectAdapter:
         self._input_device: Optional[str] = None
         self._output_device: Optional[str] = None
         self.translation_system = translation_system_factory(self.settings)
-        self.translation_system.set_tts(tts_voice, tts_speed)
         try:
             self.audio_router = audio_router_factory()
         except Exception as e:
@@ -156,7 +153,7 @@ class DirectAdapter:
     def get_status(self) -> Dict:
         return self.translation_system.get_stats()
 
-    # -- languages / voice ------------------------------------------------
+    # -- languages ------------------------------------------------
     def set_languages(self, source_lang: str, target_lang: str = "en") -> bool:
         self.source_lang, self.target_lang = source_lang, target_lang
         new = dataclasses.replace(self.settings, source_language=source_lang)
@@ -164,10 +161,6 @@ class DirectAdapter:
             logger.warning("unsupported source language {!r}", source_lang)
             return False
         return self.reconfigure_services(new)
-
-    def set_tts(self, voice: Optional[str], speed: Optional[float]) -> bool:
-        self.translation_system.set_tts(voice, speed)
-        return True
 
     # -- audio devices ----------------------------------------------------
     def _devices(self, key: str) -> List[Device]:

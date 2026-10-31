@@ -241,10 +241,15 @@ def feed(ts, vads, capture, *segments):
 
 
 def test_translate_flow_calls_asr_llm_tts_and_playback():
+    from src.core.runtime import AsrRequestSettings, TtsRequestSettings
+
     ts, pools, llm, vads, capture, sink, events = make(
-        translate_settings(), [AsrResult("cześć", "pl")]
+        translate_settings(
+            tts=TtsRequestSettings(voice="am_adam", speed=1.1),
+            asr=AsrRequestSettings(prompt="NixOS"),
+        ),
+        [AsrResult("cześć", "pl")],
     )
-    ts.set_tts("am_adam", 1.1)
     assert ts.start() is True
     try:
         feed(ts, vads, capture, seg())
@@ -253,7 +258,7 @@ def test_translate_flow_calls_asr_llm_tts_and_playback():
         ts.stop()
     call = pools.asr.client.calls[0]
     assert call["language"] is None and call["priority"] == "realtime"
-    assert call["prompt"] is None
+    assert call["prompt"] == "NixOS"  # user prompt, no recognized context yet
     assert llm.calls == [("cześć", "pl", [])]
     assert pools.tts.client.calls == [("EN(cześć)", "am_adam", 1.1)]
     assert sink.played == [(240, 24000)]
@@ -269,6 +274,8 @@ def test_translate_flow_calls_asr_llm_tts_and_playback():
         "tts": {"url": "http://tts"},
     }
     assert stats["discovery"] == "none"
+    assert stats["use"] == {"llm": None, "asr": None, "tts": None}
+    assert {c["url"] for c in stats["choices"]["tts"]} == {"http://tts"}
 
 
 def test_translate_start_opens_session_and_stop_closes():

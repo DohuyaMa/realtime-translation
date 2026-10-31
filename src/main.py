@@ -24,8 +24,6 @@ def create_adapter(mode: str = "direct", **kwargs):
     return DirectAdapter(
         source_lang=cfg.get("translation.source_lang", "auto"),
         target_lang=cfg.get("translation.target_lang", "en"),
-        tts_voice=cfg.get("speech.tts_voice"),
-        tts_speed=cfg.get("speech.tts_speed"),
         settings=get_runtime_config(),
         **kwargs,
     )

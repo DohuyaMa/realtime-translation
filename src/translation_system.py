@@ -29,7 +29,8 @@ from .clients import (
     discover,
     endpoints,
 )
-from .core.runtime import EdgeSettings, LlmSettings
+from .clients.discovery import choices
+from .core.runtime import KINDS, EdgeSettings, LlmSettings
 from .segmentation import Segment, SegmenterConfig
 
 CAPTURE_RATE = 48000
@@ -41,7 +42,14 @@ PROMPT_HISTORY = 3
 
 # LlmSettings fields that only shape the prompt/request; everything else
 # changes where/how the LLM is reached and requires a restart.
-_LLM_LIVE_FIELDS = ("model", "max_tokens_cap", "temperature", "context_pairs")
+_LLM_LIVE_FIELDS = (
+    "model",
+    "max_tokens_cap",
+    "temperature",
+    "context_pairs",
+    "system_prompt",
+    "user_template",
+)
 
 _STOP = object()
 
@@ -127,8 +135,6 @@ class TranslationSystem:
         self._capture_factory = capture_factory or self._default_capture
         self._playback_sink = playback_sink or self._default_sink
 
-        self.tts_voice: Optional[str] = None
-        self.tts_speed: Optional[float] = None
         self.input_device_name: Optional[str] = None
         self.output_device_name: Optional[str] = None
         self.status_callback: Optional[Callable[[Dict], None]] = None
@@ -217,10 +223,6 @@ class TranslationSystem:
 
     def set_status_callback(self, cb: Optional[Callable[[Dict], None]]) -> None:
         self.status_callback = cb
-
-    def set_tts(self, voice: Optional[str], speed: Optional[float]) -> None:
-        self.tts_voice = voice
-        self.tts_speed = speed
 
     def set_devices(self, input_name: Optional[str], output_name: Optional[str]):
         self.input_device_name = input_name
@@ -391,6 +393,7 @@ class TranslationSystem:
             "local",
             "local_token_file",
             "allowed_services",
+            "use",
             "timeouts",
         ):
             if getattr(old, name) != getattr(new, name):
@@ -516,6 +519,7 @@ class TranslationSystem:
                 lambda c: c.transcribe(
                     audio,
                     language=self._language(),
+                    prompt=self.settings.asr.prompt or None,
                     priority="batch",
                     timeout_s=timeout_s,
                 )
@@ -532,7 +536,7 @@ class TranslationSystem:
 
     def _translate_segment(self, segment: Segment) -> None:
         lang = self._language()
-        prompt = " ".join(self._recognized) or None
+        prompt = " ".join([self.settings.asr.prompt, *self._recognized]).strip() or None
         try:
             result = self._pools.asr.call(
                 lambda c: c.transcribe(
@@ -575,9 +579,10 @@ class TranslationSystem:
         with self._lock:
             self._pending_translated.append(translation)
 
+        tts = self.settings.tts
         try:
             audio, sr = self._pools.tts.call(
-                lambda c: c.synthesize(translation, self.tts_voice, self.tts_speed)
+                lambda c: c.synthesize(translation, tts.voice, tts.speed)
             )
         except ServiceError as e:
             self._service_error(e)
@@ -620,6 +625,14 @@ class TranslationSystem:
                 "tts": tts.active() if tts is not None else None,
             },
             "session": self._session_snapshot(),
+            "use": {k: getattr(self.settings.use, k) for k in KINDS},
+            "choices": {
+                k: [
+                    {"node": e.node, "url": e.url, "local": e.local}
+                    for e in choices(k, self.settings, self._directory)
+                ]
+                for k in KINDS
+            },
         }
         with self._lock:
             stats["pending_recognized"] = self._pending_recognized

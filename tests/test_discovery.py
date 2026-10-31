@@ -180,7 +180,7 @@ def test_401_triggers_rate_limited_rediscovery_and_retry(tmp_path):
     )
     clock = Clock()
     d.clock, d._last = clock, 0.0
-    (ep,) = endpoints("llm", s, d, hostname="sktop")
+    ep = endpoints("llm", s, d, hostname="sktop")[-1]  # cyborg (rotating token)
     assert ep.credential.value == "t-old"
     valid = {"t": "t-new"}
     seen = []
@@ -217,7 +217,7 @@ def test_periodic_refresh_pushes_new_tokens(tmp_path):
     d = discover(
         s, cache_path=tmp_path / "c.json", transport=httpx.MockTransport(handle)
     )
-    (ep,) = endpoints("llm", s, d, hostname="sktop")
+    ep = endpoints("llm", s, d, hostname="sktop")[-1]
     d.min_refresh_s = 0.0
     d.start_periodic(0.02)
     try:
@@ -239,3 +239,113 @@ def test_failed_refresh_keeps_current_list(tmp_path):
         min_refresh_s=0.0,
     )
     assert d.refresh() is False and d.services[0].token == "t"
+
+
+def _dir(*entries):
+    return Directory([ServiceEntry(*e) for e in entries], "cache")
+
+
+def _no_local(host):
+    return False
+
+
+def test_own_node_without_local_url_goes_via_loopback():
+    s = EdgeSettings(local=LocalUrls(asr=None, llm=None, tts=None))
+    d = _dir(
+        ("asr", "SKTOP-NOTE27-NIXOS", "http://100.87.250.83:8091", "t-own"),
+        ("asr", "cyborg", "http://100.69.30.96:8091", "t-c"),
+    )
+    eps = endpoints("asr", s, d, hostname="sktop-note27-nixos", local_address=_no_local)
+    assert [(e.node, e.url, e.local) for e in eps] == [
+        (
+            "SKTOP-NOTE27-NIXOS",
+            "http://127.0.0.1:8091",
+            True,
+        ),  # never its tailscale URL
+        ("cyborg", "http://100.69.30.96:8091", False),
+    ]
+    assert eps[0].credential.value == "t-own"
+
+
+def test_own_node_by_local_url_host_and_by_config_node():
+    d = _dir(
+        ("tts", "box", "http://100.69.30.96:8093", "t"),
+        ("tts", "far", "http://100.1.1.1:8093", "t2"),
+    )
+    s = EdgeSettings(local=LocalUrls(asr=None, tts="http://127.0.0.1:9993"))
+    eps = endpoints(
+        "tts", s, d, hostname="other", local_address=lambda h: h == "100.69.30.96"
+    )
+    assert [(e.node, e.url) for e in eps] == [
+        ("box", "http://127.0.0.1:9993"),  # explicit local.tts wins
+        ("far", "http://100.1.1.1:8093"),
+    ]
+    s = EdgeSettings(local=LocalUrls(asr=None, tts=None, node="far"))
+    eps = endpoints("tts", s, d, hostname="other", local_address=_no_local)
+    assert [(e.node, e.url, e.local) for e in eps] == [
+        ("far", "http://127.0.0.1:8093", True),
+        ("box", "http://100.69.30.96:8093", False),
+    ]
+
+
+def test_disallowed_own_node_is_skipped():
+    s = EdgeSettings(
+        local=LocalUrls(asr="http://127.0.0.1:8091"), allowed_services=("asr:gpu",)
+    )
+    d = _dir(
+        ("asr", "me", "http://me:8091", "t"), ("asr", "gpu", "http://gpu:8091", "t")
+    )
+    eps = endpoints("asr", s, d, hostname="me", local_address=_no_local)
+    assert [e.node for e in eps] == ["gpu"]
+
+
+def test_pinned_service_is_the_only_endpoint():
+    from src.core.runtime import ServiceUse
+
+    d = _dir(
+        ("asr", "me", "http://100.0.0.1:8091", "t"),
+        ("asr", "gpu", "http://gpu:8091", "t"),
+        ("asr", "far", "http://far:8091", "t"),
+    )
+    base = EdgeSettings(local=LocalUrls(asr=None))
+    auto = endpoints("asr", base, d, hostname="me", local_address=_no_local)
+    assert [e.node for e in auto] == ["me", "gpu", "far"]
+    pin_gpu = EdgeSettings(local=LocalUrls(asr=None), use=ServiceUse(asr="gpu"))
+    assert [
+        (e.node, e.url)
+        for e in endpoints("asr", pin_gpu, d, hostname="me", local_address=_no_local)
+    ] == [("gpu", "http://gpu:8091")]
+    pin_me = EdgeSettings(local=LocalUrls(asr=None), use=ServiceUse(asr="me"))
+    assert [
+        (e.node, e.url)
+        for e in endpoints("asr", pin_me, d, hostname="me", local_address=_no_local)
+    ] == [("me", "http://127.0.0.1:8091")]
+    gone = EdgeSettings(local=LocalUrls(asr=None), use=ServiceUse(asr="nope"))
+    assert endpoints("asr", gone, d, hostname="me", local_address=_no_local) == []
+
+
+def test_choices_ignore_pin_and_do_not_register():
+    from src.clients.discovery import choices
+    from src.core.runtime import ServiceUse
+
+    d = _dir(
+        ("asr", "me", "http://me:8091", "t"), ("asr", "gpu", "http://gpu:8091", "t")
+    )
+    s = EdgeSettings(local=LocalUrls(asr=None), use=ServiceUse(asr="gpu"))
+    eps = choices("asr", s, d, hostname="me", local_address=_no_local)
+    assert [e.node for e in eps] == ["me", "gpu"]
+    assert d._creds == {}
+
+
+def test_is_local_address_uses_host_addresses(monkeypatch):
+    from src.clients import discovery
+
+    monkeypatch.setattr(
+        discovery, "host_addresses", lambda: frozenset({"100.69.30.96"})
+    )
+    assert discovery.is_local_address("100.69.30.96")
+    assert discovery.is_local_address("127.0.0.1") and discovery.is_local_address(
+        "localhost"
+    )
+    assert not discovery.is_local_address("100.64.0.1")
+    assert not discovery.is_local_address("cyborg")

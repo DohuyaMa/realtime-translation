@@ -21,7 +21,7 @@
 - `translate` - короткі фрази: ASR -> LLM -> TTS; потребує джерела LLM і TTS (`local.llm`/`local.tts` або `django_urls`);
 - `auto` (default) - `translate`, якщо є джерела LLM і TTS, інакше `transcribe`.
 
-Сервіси доступні лише через HTTP (OpenAI-сумісний стиль): `POST /audio/transcriptions`, `POST /audio/speech`, `GET /audio/voices`, `GET /health`, `GET /status`, `GET|POST /config`. Опційний токен: `RT_API_TOKEN_FILE` (заголовок `Authorization: Bearer <token>` або `Token <token>`; edge шле `Token`).
+Сервіси доступні лише через HTTP (OpenAI-сумісний стиль): `POST /audio/transcriptions`, `POST /audio/speech`, `GET /audio/voices`, `GET /models` (pinned моделі сервісу, `cached`), `GET /health`, `GET /status`, `GET|POST /config`. Опційний токен: `RT_API_TOKEN_FILE` (заголовок `Authorization: Bearer <token>` або `Token <token>`; edge шле `Token`).
 
 Пакети flake: `rt-edge` (default package, `nix run .`), `rt-asr-{cpu,gpu}`, `rt-tts-{cpu,gpu}` (також ROCm-варіант ASR, якщо не `broken`), `nixosModules.rt-speech`, `nixosModules.virtual-sinks`, `overlays.default` (`pkgs.rtSpeech.{asr,tts}.<variant>`), `lib.rtSpeech`.
 
@@ -165,13 +165,19 @@ curl -s -X POST http://127.0.0.1:8091/config -H "$H" \
 | `services.django_urls` | `RT_EDGE_DJANGO_URLS` | Django для discovery (`GET /api/llm/app-services/`), свій хост першим |
 | `services.django_token_file` | `RT_EDGE_DJANGO_TOKEN_FILE` | DRF-токен користувача (файл) |
 | `services.allowed_services` | `RT_EDGE_ALLOWED_SERVICES` | дозволені сервіси `<kind>:<node>` (через кому в env); `null` - усі знайдені; вибір у UI |
-| `services.local.{llm,asr,tts}` | `RT_EDGE_LOCAL_{LLM,ASR,TTS}_URL` | сервіси цього хоста, завжди першими (default: asr `http://127.0.0.1:8091`, llm/tts `null`) |
+| `services.local.{llm,asr,tts}` | `RT_EDGE_LOCAL_{LLM,ASR,TTS}_URL` | сервіси цього хоста, завжди першими (default: asr `http://127.0.0.1:8091`, llm/tts `null`); `null` при знайденому в discovery сервісі цього хоста = `http://127.0.0.1:<його порт>` |
+| `services.local.node` | `RT_EDGE_LOCAL_NODE` | ім'я цього хоста в discovery (`null` = hostname, без урахування регістру); сервіс цього вузла (або з URL на адресу цього хоста) ніколи не викликається через tailscale-URL |
+| `services.use.{llm,asr,tts}` | - | який екземпляр використовувати: `null`/`auto` - локальний першим + failover; ім'я вузла - лише він (без failover, недоступний = явна помилка). Вибір у панелі «Сервіси» головного вікна або в діалозі |
 | `services.local_token_file` | `RT_EDGE_LOCAL_TOKEN_FILE` | токен локального воркера без Django, default `/run/llama/local-token` |
 | `services.source_language` | - | `auto`/`pl`/`uk`/`ru`/`en` |
 | `services.timeouts.{connect_s,asr_s,tts_s}` | - | 3 / 30 / 30 |
 | `services.llm.session_ttl_s` | - | ttl app-сесії, 6..300, default 30 (heartbeat кожні ttl/3) |
 | `services.llm.model` | `RT_EDGE_LLM_MODEL` | default `local` |
 | `services.llm.{max_tokens_cap,temperature,context_pairs,timeout_s}` | - | 512 / 0.1 / 3 / 15 |
+| `services.llm.system_prompt` | - | system prompt перекладу, плейсхолдер `{lang}`; `""` = вбудований |
+| `services.llm.user_template` | - | шаблон фрази для LLM, `{text}` обов'язковий, `{lang}`; `""` = `{text}` |
+| `services.asr.prompt` | - | Whisper prompt (словник, імена, стиль), додається перед контекстом останніх фраз |
+| `services.tts.{voice,speed}` | - | голос (з `GET /v1/audio/voices`) і швидкість; `null` = типові сервісу |
 | `segmentation.translate.*` | - | `threshold, min_speech_ms, end_silence_ms, soft_max_ms, soft_silence_ms, hard_max_ms, lookback_ms, preroll_ms` |
 | `segmentation.transcribe.*` | - | `chunk_min_s` (300), `chunk_max_s` (600, <= 900), `soft_silence_ms, lookback_ms, keep_silence_ms` |
 
@@ -249,7 +255,9 @@ HM-модуль edge: `homeManagerModules.rt-translator` (також `default`),
 
 **Discovery.** `GET <django>/api/llm/app-services/` з `Authorization: Token <DRF>` по `django_urls` по черзі; відповідь `{"instance", "generated_at", "services": [{"kind": llm|asr|tts, "node", "url", "token", "tier", "models", "healthy"}]}`. Кожен сервіс викликається з `Authorization: Token <його token>`. Остання відповідь кешується в `$XDG_CACHE_HOME/real-time-translator/app-services.json` (0600). Список оновлюється при старті, при зміні налаштувань і у фоні кожні 5 хв (нові токени підставляються в чинні з'єднання). Токен воркера ротується при кожному рестарті/перереєстрації: на 401 від сервісу кластера edge робить свіже discovery (не частіше ніж раз на 30 с) і повторює запит один раз; повторний 401 - явна помилка `auth` і перехід на наступний вузол.
 
-**Вибір і порядок.** Для кожного виду: спочатку локальний (`local.<kind>`), далі дозволені (`allowed_services`, вибір у діалозі налаштувань) у порядку Django. Береться перший здоровий; при помилці - наступний (WARNING `switched A -> B`), позначений недоступним вузол повертається через 30 с, а LLM на кожному heartbeat перевіряє `/health` пріоритетніших воркерів і повертається на локальний. UI показує, який вузол обслуговує кожен сервіс (`локальний`, `офлайн-токен`) і джерело списку (кеш / лише локальні).
+**Вибір і порядок.** `services.use.<kind>` = вузол - лише він, без failover. Інакше (auto) для кожного виду: спочатку локальний (`local.<kind>`, або 127.0.0.1 на порту знайденого сервісу цього хоста), далі дозволені (`allowed_services`, вибір у діалозі налаштувань) у порядку Django. Береться перший здоровий; при помилці - наступний (WARNING `switched A -> B`), позначений недоступним вузол повертається через 30 с, а LLM на кожному heartbeat перевіряє `/health` пріоритетніших воркерів і повертається на локальний. UI показує, який вузол обслуговує кожен сервіс (`локальний`, `офлайн-токен`) і джерело списку (кеш / лише локальні); у панелі «Сервіси» для кожного виду є вибір `auto` / конкретний вузол (зберігається в `services.use`, застосовується одразу).
+
+**Налаштування сервісів (діалог «Налаштування»).** Вкладки «Розпізнавання», «Переклад», «Озвучка»: мої налаштування (Whisper prompt; system prompt і шаблон LLM, модель, temperature; голос і швидкість TTS) - у `config.yml`, йдуть із кожним запитом. Блок «Налаштування сервісу на вузлі» читає `GET /config` + `GET /v1/models` обраного вузла (модель із позначкою «кеш» / «завантажити ~розмір», beam size, VAD, мови, типовий голос...) і застосовує через `POST /config`; зміна моделі перезавантажує сервіс і, якщо моделі немає в кеші, завантажує її (`RT_MODEL_DOWNLOAD`). Ці значення спільні для всіх клієнтів вузла і зберігаються сервісом (`RT_CONFIG_STATE`).
 
 **App-сесія у воркера.** `POST /app-session` `{"client": "rt-edge", "ttl_s": 30}` -> 201 `{"session_id", "ttl_s"}`; heartbeat `POST /app-session/<id>/heartbeat` кожні ttl/3 (404 - нова сесія); `DELETE /app-session/<id>` на stop. Далі `POST /v1/chat/completions` на тому ж воркері.
 

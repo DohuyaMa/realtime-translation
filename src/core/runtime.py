@@ -22,6 +22,14 @@ DEFAULT_LOCAL_TOKEN_FILE = "/run/llama/local-token"
 KINDS = ("llm", "asr", "tts")
 MODES = ("auto", "transcribe", "translate")
 SOURCE_LANGUAGES = ("auto", "pl", "uk", "ru", "en")
+# {lang}: source language name (e.g. "Polish")
+DEFAULT_SYSTEM_PROMPT = (
+    "You are a professional interpreter. Translate the user's {lang} speech transcript "
+    "into natural English. Output only the English translation, nothing else. "
+    "Fix obvious speech-recognition errors using context."
+)
+# {text}: recognized phrase, {lang}: source language name
+DEFAULT_USER_TEMPLATE = "{text}"
 
 
 @dataclass(frozen=True)
@@ -33,11 +41,18 @@ class Timeouts:
 
 @dataclass(frozen=True)
 class LocalUrls:
-    """Services on this host; always tried first."""
+    """Services on this host; always tried first.
+
+    ``node``: this host's node name in discovery (None = hostname). A
+    discovered service of this node is reached at ``local.<kind>``, or at
+    127.0.0.1 on its discovered port when ``local.<kind>`` is not set; never
+    at the cluster (tailscale) URL Django lists for it.
+    """
 
     llm: Optional[str] = None
     asr: Optional[str] = DEFAULT_ASR_URL
     tts: Optional[str] = None
+    node: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -48,6 +63,36 @@ class LlmSettings:
     temperature: float = 0.1
     context_pairs: int = 3
     timeout_s: float = 15.0
+    system_prompt: str = DEFAULT_SYSTEM_PROMPT
+    user_template: str = DEFAULT_USER_TEMPLATE
+
+
+@dataclass(frozen=True)
+class ServiceUse:
+    """Which instance serves each kind: None = auto (local first, failover
+    over the allowed cluster services); a node name = only that node, no
+    failover (a down pinned service is an explicit error)."""
+
+    llm: Optional[str] = None
+    asr: Optional[str] = None
+    tts: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class AsrRequestSettings:
+    """Sent with every rt-asr request (per user, not per service node)."""
+
+    # Whisper initial prompt (vocabulary / spelling / style hint); prepended
+    # to the rolling context of the last recognized phrases.
+    prompt: str = ""
+
+
+@dataclass(frozen=True)
+class TtsRequestSettings:
+    """Sent with every rt-tts request; None = the service's default."""
+
+    voice: Optional[str] = None
+    speed: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -65,7 +110,10 @@ class EdgeSettings:
     local_token_file: Optional[str] = DEFAULT_LOCAL_TOKEN_FILE
     # "kind:node" entries of the discovered services the app may use; None = all
     allowed_services: Optional[tuple[str, ...]] = None
+    use: ServiceUse = ServiceUse()
     llm: LlmSettings = LlmSettings()
+    asr: AsrRequestSettings = AsrRequestSettings()
+    tts: TtsRequestSettings = TtsRequestSettings()
     source_language: Literal["auto", "pl", "uk", "ru", "en"] = "auto"
     timeouts: Timeouts = Timeouts(connect_s=3.0, asr_s=30.0, tts_s=30.0)
     segmentation: SegmentationSettings = SegmentationSettings()
@@ -102,8 +150,31 @@ class EdgeSettings:
             kind, _, node = item.partition(":")
             if kind not in KINDS or not node:
                 errors.append(f"allowed_services: {item!r} is not <kind>:<node>")
+        for kind in KINDS:
+            node = getattr(self.use, kind)
+            if (
+                node
+                and self.allowed_services is not None
+                and f"{kind}:{node}" not in self.allowed_services
+            ):
+                errors.append(f"use.{kind}: {kind}:{node} is not an allowed service")
         if not 6 <= self.llm.session_ttl_s <= 300:
             errors.append("llm.session_ttl_s must be in 6..300")
+        for name, template in (
+            ("llm.system_prompt", self.llm.system_prompt),
+            ("llm.user_template", self.llm.user_template),
+        ):
+            try:
+                template.format(lang="Polish", text="x")
+            except (KeyError, IndexError, ValueError) as e:
+                errors.append(
+                    f"{name}: only {{lang}} and {{text}} placeholders allowed"
+                    f" (use {{{{ }}}} for literal braces): {e}"
+                )
+        if "{text}" not in self.llm.user_template:
+            errors.append("llm.user_template must contain {text}")
+        if self.tts.speed is not None and not 0.25 <= self.tts.speed <= 4.0:
+            errors.append("tts.speed must be in 0.25..4.0")
         for name in ("translate", "transcribe"):
             try:
                 getattr(self.segmentation, name).validate()
@@ -119,6 +190,13 @@ def _clean(value: Any) -> Optional[str]:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _text(value: Any) -> Optional[str]:
+    """Multi-line text (prompts): surrounding whitespace dropped, "" = None."""
+    if value is None:
+        return None
+    return str(value).strip() or None
 
 
 def _url(value: Any) -> Optional[str]:
@@ -201,7 +279,12 @@ def resolve_edge_settings(cfg: Mapping, environ: Mapping) -> EdgeSettings:
         temperature=float(llm_cfg.get("temperature", ld.temperature)),
         context_pairs=int(llm_cfg.get("context_pairs", ld.context_pairs)),
         timeout_s=float(llm_cfg.get("timeout_s", ld.timeout_s)),
+        system_prompt=_text(llm_cfg.get("system_prompt")) or ld.system_prompt,
+        user_template=_text(llm_cfg.get("user_template")) or ld.user_template,
     )
+    asr_cfg = svc.get("asr") or {}
+    tts_cfg = svc.get("tts") or {}
+    speed = tts_cfg.get("speed")
     local_cfg = svc.get("local") or {}
     ld_local = LocalUrls()
 
@@ -217,6 +300,12 @@ def resolve_edge_settings(cfg: Mapping, environ: Mapping) -> EdgeSettings:
         "local_token_file",
         svc.get("local_token_file", DEFAULT_LOCAL_TOKEN_FILE),
     )
+    use_cfg = svc.get("use") or {}
+
+    def use(kind: str) -> Optional[str]:
+        node = _clean(use_cfg.get(kind))
+        return None if node in (None, "auto") else node
+
     tcfg = svc.get("timeouts") or {}
     td = Timeouts()
     return EdgeSettings(
@@ -231,10 +320,23 @@ def resolve_edge_settings(cfg: Mapping, environ: Mapping) -> EdgeSettings:
                 svc.get("django_token_file"),
             )
         ),
-        local=LocalUrls(llm=local("llm"), asr=local("asr"), tts=local("tts")),
+        local=LocalUrls(
+            llm=local("llm"),
+            asr=local("asr"),
+            tts=local("tts"),
+            node=_clean(
+                pick("RT_EDGE_LOCAL_NODE", "local.node", local_cfg.get("node"))
+            ),
+        ),
         local_token_file=_clean(token_file),
         allowed_services=None if allowed is None else _items(allowed),
+        use=ServiceUse(llm=use("llm"), asr=use("asr"), tts=use("tts")),
         llm=llm,
+        asr=AsrRequestSettings(prompt=_text(asr_cfg.get("prompt")) or ""),
+        tts=TtsRequestSettings(
+            voice=_clean(tts_cfg.get("voice")),
+            speed=None if speed in (None, "") else float(speed),
+        ),
         source_language=_clean(svc.get("source_language")) or "auto",
         timeouts=Timeouts(
             connect_s=float(tcfg.get("connect_s", td.connect_s)),

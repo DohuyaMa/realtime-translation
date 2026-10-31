@@ -12,6 +12,7 @@ allowed cluster services in Django's order (own host first).
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import socket
@@ -21,6 +22,7 @@ import weakref
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional, Sequence
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 from loguru import logger
@@ -253,37 +255,157 @@ def is_allowed(entry: ServiceEntry, allowed: Optional[Sequence[str]]) -> bool:
     return allowed is None or entry.key in allowed
 
 
+_ADDR_CACHE: tuple[float, frozenset[str]] = (float("-inf"), frozenset())
+
+
+def host_addresses(max_age_s: float = 10.0) -> frozenset[str]:
+    """Cached ``read_host_addresses`` (polled by the UI every 0.5 s)."""
+    global _ADDR_CACHE
+    at, addrs = _ADDR_CACHE
+    if time.monotonic() - at > max_age_s:
+        _ADDR_CACHE = (time.monotonic(), read_host_addresses())
+        addrs = _ADDR_CACHE[1]
+    return addrs
+
+
+def read_host_addresses() -> frozenset[str]:
+    """IP addresses assigned to this host (Linux /proc; a bind probe is not
+    reliable: net.ipv4.ip_nonlocal_bind=1 lets any address bind)."""
+    out: set[str] = set()
+    try:
+        lines = Path("/proc/net/fib_trie").read_text().splitlines()
+    except OSError:
+        lines = []
+    for prev, line in zip(lines, lines[1:]):
+        if line.strip() == "/32 host LOCAL":
+            out.add(prev.strip().lstrip("|-+ ").strip())
+    try:
+        for line in Path("/proc/net/if_inet6").read_text().splitlines():
+            raw = line.split()[0]
+            out.add(str(ipaddress.ip_address(bytes.fromhex(raw))))
+    except (OSError, ValueError, IndexError):
+        pass
+    return frozenset(out)
+
+
+def is_local_address(host: str) -> bool:
+    """True for loopback names and IP literals assigned to this machine."""
+    if host.lower() in ("localhost", "localhost.localdomain"):
+        return True
+    try:
+        ip = ipaddress.ip_address(host.strip("[]"))
+    except ValueError:
+        return False
+    return ip.is_loopback or str(ip) in host_addresses()
+
+
+def own_node(settings: EdgeSettings, hostname: Optional[str] = None) -> str:
+    return settings.local.node or hostname or socket.gethostname()
+
+
+def is_own(
+    entry: ServiceEntry,
+    node: str,
+    local_address: Callable[[str], bool] = is_local_address,
+) -> bool:
+    """Service of this host: same node name (any case) or a local URL host."""
+    if entry.node.lower() == node.lower():
+        return True
+    host = urlsplit(entry.url).hostname
+    return bool(host) and local_address(host)
+
+
+def loopback_url(url: str) -> str:
+    parts = urlsplit(url)
+    netloc = "127.0.0.1" + (f":{parts.port}" if parts.port else "")
+    return urlunsplit((parts.scheme, netloc, parts.path, "", "")).rstrip("/")
+
+
 def endpoints(
     kind: str,
     settings: EdgeSettings,
     directory: Directory,
     hostname: Optional[str] = None,
+    local_address: Callable[[str], bool] = is_local_address,
+    register: bool = True,
 ) -> list[Endpoint]:
-    """Local endpoint first, then allowed cluster services (discovery order)."""
-    host = hostname or socket.gethostname()
+    """Endpoints for ``kind`` in priority order.
+
+    Auto (``use.<kind>`` unset): this host's service first, then the allowed
+    cluster services in discovery order. Pinned to a node: only that node's
+    endpoint (no failover). This host's service is always reached locally
+    (``local.<kind>`` or 127.0.0.1 on the discovered port), never via the
+    cluster URL Django lists for it. ``register=False``: credentials are not
+    refreshed by discovery (listing only, e.g. for the UI).
+    """
+    reg = directory.register if register else (lambda kind, node, cred: cred)
+    node = own_node(settings, hostname)
+    allowed = settings.allowed_services
+    pinned = getattr(settings.use, kind)
+    own = [
+        e
+        for e in directory.services
+        if e.kind == kind and is_own(e, node, local_address)
+    ]
+    own_entry = own[0] if own else None
+    own_name = own_entry.node if own_entry else node
     out: list[Endpoint] = []
     local_url = getattr(settings.local, kind)
-    if local_url:
-        own = next(
-            (e for e in directory.services if e.kind == kind and e.node == host), None
+    if not local_url and own_entry is not None:
+        local_url = loopback_url(own_entry.url)
+        logger.info(
+            "{}:{} is this host: using {} instead of {}",
+            kind,
+            own_entry.node,
+            local_url,
+            own_entry.url,
         )
+    own_allowed = allowed is None or f"{kind}:{own_name}" in allowed
+    own_picked = pinned is None or pinned.lower() in (own_name.lower(), node.lower())
+    if local_url and own_allowed and own_picked:
         fallback = settings.local_token_file if kind == "llm" else None
         out.append(
             Endpoint(
                 kind,
-                host,
+                own_name,
                 local_url,
-                directory.register(
-                    kind, host, Credential(own.token if own else "", fallback)
+                reg(
+                    kind,
+                    own_name,
+                    Credential(own_entry.token if own_entry else "", fallback),
                 ),
                 local=True,
             )
         )
     for e in directory.services:
-        if e.kind != kind or e.node == host:
+        if e.kind != kind or e in own or not is_allowed(e, allowed):
             continue
-        if not is_allowed(e, settings.allowed_services):
+        if pinned is not None and e.node != pinned:
             continue
-        cred = directory.register(kind, e.node, Credential(e.token))
+        cred = reg(kind, e.node, Credential(e.token))
         out.append(Endpoint(kind, e.node, e.url, cred))
+    if pinned is not None and not out and register:
+        logger.error(
+            "{}: pinned service {}:{} is not available (not discovered, not"
+            " allowed or no local endpoint)",
+            kind,
+            kind,
+            pinned,
+        )
     return out
+
+
+def choices(
+    kind: str,
+    settings: EdgeSettings,
+    directory: Directory,
+    hostname: Optional[str] = None,
+    local_address: Callable[[str], bool] = is_local_address,
+) -> list[Endpoint]:
+    """Every instance the user can pick for ``kind`` (auto order, unpinned)."""
+    import dataclasses
+
+    free = dataclasses.replace(
+        settings, use=dataclasses.replace(settings.use, **{kind: None})
+    )
+    return endpoints(kind, free, directory, hostname, local_address, register=False)

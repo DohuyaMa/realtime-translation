@@ -11,6 +11,7 @@ from .auth import make_bearer_dependency
 from .errors import install_error_handlers
 from .gpu import VramProbe
 from .health import build_health_router
+from .models_http import build_models_router
 from .runtime_config import RuntimeConfig, build_config_router
 from .runtime import ServiceRuntime
 from .settings import BaseSettings
@@ -64,6 +65,10 @@ def create_service_app(
     v1 = APIRouter(prefix="/v1", dependencies=auth)
     for router in routers:
         v1.include_router(router)
+    if config is not None:
+        v1.include_router(
+            build_models_router(settings.service.removeprefix("rt-"), config)
+        )
     app.include_router(v1)
     for router in ws_routers:  # WS handlers check the token themselves (close 1008)
         app.include_router(router, prefix="/v1")

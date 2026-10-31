@@ -30,7 +30,6 @@ class FakeTS:
         self.llm = object()
         self.llm_target = None
         self._audio_level_input = 0.25
-        self.tts = None
         FakeTS.instances.append(self)
 
     def start(self):
@@ -53,9 +52,6 @@ class FakeTS:
 
     def get_stats(self):
         return {"running": self.started, "session": {"node": "w"}}
-
-    def set_tts(self, voice, speed):
-        self.tts = (voice, speed)
 
     def set_devices(self, i, o):
         self.devices = (i, o)
@@ -100,8 +96,6 @@ def adapter(settings):
         translation_system_factory=FakeTS,
         health_factory=FakeMonitor,
         audio_router_factory=FakeRouter,
-        tts_voice="af_heart",
-        tts_speed=1.0,
     )
 
 
@@ -122,7 +116,6 @@ def test_start_failure_surfaces_system_error():
 def test_start_and_stop_pipeline():
     a = adapter(VALID)
     ts = FakeTS.instances[-1]
-    assert ts.tts == ("af_heart", 1.0)
     assert a.start_pipeline() is True and a.last_error is None
     assert ts.started is True
     assert a.stop_pipeline() is True and ts.started is False

@@ -14,7 +14,7 @@ from src.ui.widgets.service_status_panel import (  # noqa: E402
     SERVICES,
     ServiceStatusPanel,
 )
-from src.ui.widgets.settings_dialog import EndpointsDialog  # noqa: E402
+from src.ui.widgets.settings_dialog import SettingsDialog  # noqa: E402
 
 _WINDOWS = []
 
@@ -85,7 +85,7 @@ def test_status_panel_shows_serving_nodes(app):
 
 def test_endpoints_dialog_values_and_segmentation(app):
     s = resolve_edge_settings({"services": {"local": {"tts": "http://t:2"}}}, {})
-    dlg = EndpointsDialog(s)
+    dlg = SettingsDialog(s, services=[])
     dlg.endpoints_tab.django_urls.setPlainText("http://a:1\nhttp://b:2")
     dlg.endpoints_tab.local["asr"].setText("http://x:1")
     dlg.segmentation_tab.chunk_min_s.setValue(120)
@@ -102,7 +102,7 @@ def test_endpoints_dialog_values_and_segmentation(app):
 
 def test_managed_fields_disabled(app):
     s = resolve_edge_settings({}, {"RT_EDGE_LOCAL_ASR_URL": "http://e:1"})
-    dlg = EndpointsDialog(s)
+    dlg = SettingsDialog(s, services=[])
     assert not dlg.endpoints_tab.local["asr"].isEnabled()
     assert isinstance(s, EdgeSettings)
 
@@ -132,7 +132,7 @@ def _saved(mgr):
 def test_accept_persists_and_emits(app, cfg):
     from src.ui.widgets.settings_dialog import current_settings
 
-    dlg = EndpointsDialog(current_settings())
+    dlg = SettingsDialog(current_settings(), services=[])
     got = []
     dlg.settings_changed.connect(got.append)
     dlg.endpoints_tab.local["asr"].setText("http://a:1")
@@ -146,7 +146,7 @@ def test_accept_persists_and_emits(app, cfg):
 def test_invalid_keeps_dialog_open_and_unsaved(app, cfg):
     from src.ui.widgets.settings_dialog import current_settings
 
-    dlg = EndpointsDialog(current_settings())
+    dlg = SettingsDialog(current_settings(), services=[])
     dlg.endpoints_tab.mode.setCurrentText("translate")
     dlg.accept()
     assert "translate mode" in dlg.error_label.text()
@@ -158,8 +158,8 @@ def test_managed_not_saved(app, cfg, monkeypatch):
     from src.ui.widgets.settings_dialog import current_settings
 
     monkeypatch.setenv("RT_EDGE_LOCAL_ASR_URL", "http://env:1")
-    dlg = EndpointsDialog(current_settings())
-    dlg.endpoints_tab.model.setText("m2")
+    dlg = SettingsDialog(current_settings(), services=[])
+    dlg.llm_tab.model.setCurrentText("m2")
     dlg.accept()
     saved = _saved(cfg)["services"]
     assert "asr" not in (saved.get("local") or {})
@@ -270,7 +270,246 @@ def test_allowed_services_selection(app):
     )
     assert not tab.allow_all.isChecked()
     assert tab.allowed_values() == ["llm:cyborg"]
-    tab.allowed.item(1).setCheckState(Qt.CheckState.Checked)
-    assert tab.allowed_values() == ["llm:cyborg", "tts:cyborg"]
+    assert tab.allowed.isEnabled()  # always selectable
+    keys = [
+        tab.allowed.item(i).data(Qt.ItemDataRole.UserRole)
+        for i in range(tab.allowed.count())
+    ]
+    tab.allowed.item(keys.index("tts:cyborg")).setCheckState(Qt.CheckState.Checked)
+    assert sorted(tab.allowed_values()) == ["llm:cyborg", "tts:cyborg"]
     tab.allow_all.setChecked(True)
     assert tab.values()["services.allowed_services"] is None
+    tab.allowed.item(0).setCheckState(
+        Qt.CheckState.Unchecked
+    )  # unchecking leaves "all"
+    assert not tab.allow_all.isChecked()
+
+
+class FakeServiceClient:
+    """rt-asr / rt-tts admin API stand-in for the settings tabs."""
+
+    def __init__(self):
+        self.config = {
+            "values": {
+                "model": "whisper-small",
+                "beam_size": 1,
+                "vad_filter": True,
+                "languages": ["pl", "uk"],
+                "language": None,
+            },
+            "source": {"beam_size": "override"},
+            "version": 3,
+        }
+        self.posted = []
+
+    def get_config(self):
+        return self.config
+
+    def models(self):
+        return {
+            "models": [
+                {"id": "whisper-small", "cached": True, "size": 5 * 10**8},
+                {"id": "whisper-large-v3-turbo", "cached": False, "size": 16 * 10**8},
+            ],
+            "current": "whisper-small",
+        }
+
+    def update_config(self, values, version, reset=(), *, timeout_s=None):
+        self.posted.append((values, version, timeout_s))
+        self.config = {
+            **self.config,
+            "values": {**self.config["values"], **values},
+            "version": version,
+        }
+        return {**self.config, "reloaded": "model" in values}
+
+    def voices(self):
+        return {
+            "voices": [
+                {"id": "af_heart", "language": "en-us", "gender": "f"},
+                {"id": "am_adam", "language": "en-us", "gender": "m"},
+            ],
+            "default": "af_heart",
+        }
+
+    def close(self):
+        pass
+
+
+def _ep(node, url, local=False, kind="asr"):
+    from src.clients import Credential, Endpoint
+
+    return Endpoint(kind, node, url, Credential(""), local=local)
+
+
+def test_asr_panel_lists_cached_models_and_applies_changes(app):
+    from src.ui.widgets.service_tabs import AsrTab, Background
+
+    client = FakeServiceClient()
+    s = resolve_edge_settings(
+        {"services": {"asr": {"prompt": "Kubernetes, NixOS"}}}, {}
+    )
+    tab = AsrTab(
+        s,
+        [_ep("cyborg", "http://127.0.0.1:8091", True)],
+        lambda e: client,
+        Background(sync=True),
+    )
+    assert tab.values() == {"services.asr.prompt": "Kubernetes, NixOS"}
+    panel = tab.service
+    panel.load()
+    model = panel.editors["model"].widget
+    labels = [model.itemText(i) for i in range(model.count())]
+    assert labels[0] == "whisper-small (кеш)"
+    assert labels[1].startswith("whisper-large-v3-turbo (завантажити ~1.6 GB")
+    assert panel.changes() == {}
+    model.setCurrentIndex(1)
+    panel.editors["beam_size"].widget.setValue(5)
+    panel.editors["languages"].widget.setText("pl, uk, en")
+    assert panel.changes() == {
+        "model": "whisper-large-v3-turbo",
+        "beam_size": 5,
+        "languages": ["pl", "uk", "en"],
+    }
+    panel.apply()
+    values, version, timeout = client.posted[0]
+    assert (
+        version == 4 and timeout >= 600 and values["model"] == "whisper-large-v3-turbo"
+    )
+    assert "застосовано (модель перезавантажено)" in panel.status.text()
+    assert panel.changes() == {}  # reloaded from the service
+
+
+def test_tts_voice_picker_from_service(app):
+    from src.ui.widgets.service_tabs import Background, TtsTab
+
+    client = FakeServiceClient()
+    s = resolve_edge_settings({"services": {"tts": {"voice": "bf_emma"}}}, {})
+    tab = TtsTab(
+        s,
+        [_ep("cyborg", "http://127.0.0.1:8093", True, "tts")],
+        lambda e: client,
+        Background(sync=True),
+    )
+    assert tab.values() == {"services.tts.voice": "bf_emma", "services.tts.speed": None}
+    tab.load_voices()
+    ids = [tab.voice.itemData(i) for i in range(tab.voice.count())]
+    assert ids == [None, "af_heart", "am_adam", "bf_emma"]  # unknown kept, marked
+    tab.voice.setCurrentIndex(2)
+    tab.speed_default.setChecked(False)
+    tab.speed.setValue(1.25)
+    assert tab.values() == {"services.tts.voice": "am_adam", "services.tts.speed": 1.25}
+
+
+def test_llm_tab_prompt_template_and_reset(app):
+    from src.core.runtime import DEFAULT_SYSTEM_PROMPT
+    from src.ui.widgets.service_tabs import LlmTab
+
+    s = resolve_edge_settings(
+        {
+            "services": {
+                "llm": {
+                    "system_prompt": "Translate {lang}.",
+                    "user_template": "T: {text}",
+                }
+            }
+        },
+        {},
+    )
+    tab = LlmTab(s)
+    v = tab.values()
+    assert v["services.llm.system_prompt"] == "Translate {lang}."
+    assert v["services.llm.user_template"] == "T: {text}"
+    tab.reset_prompts()
+    assert tab.values()["services.llm.system_prompt"] == DEFAULT_SYSTEM_PROMPT
+    assert tab.values()["services.llm.user_template"] == "{text}"
+
+
+def test_dialog_saves_per_service_settings(app, cfg):
+    from src.ui.widgets.settings_dialog import current_settings
+
+    dlg = SettingsDialog(current_settings(), services=[])
+    dlg.asr_tab.prompt.setPlainText("NixOS, Kubernetes")
+    dlg.llm_tab.user_template.setPlainText("Переклади: {text}")
+    got = []
+    dlg.settings_changed.connect(got.append)
+    dlg.accept()
+    assert got[0].asr.prompt == "NixOS, Kubernetes"
+    assert got[0].llm.user_template == "Переклади: {text}"
+    saved = _saved(cfg)["services"]
+    assert saved["asr"]["prompt"] == "NixOS, Kubernetes"
+
+
+def test_dialog_rejects_template_without_text(app, cfg):
+    from src.ui.widgets.settings_dialog import current_settings
+
+    dlg = SettingsDialog(current_settings(), services=[])
+    dlg.llm_tab.user_template.setPlainText("no placeholder")
+    dlg.accept()
+    assert "{text}" in dlg.error_label.text() and dlg.result() == 0
+
+
+def test_use_choice_lists_local_via_loopback(app):
+    from src.clients import ServiceEntry
+    from src.ui.widgets.settings_dialog import EndpointsTab
+
+    s = resolve_edge_settings(
+        {
+            "services": {
+                "local": {"node": "sktop", "asr": None},
+                "use": {"tts": "cyborg"},
+            }
+        },
+        {},
+    )
+    services = [
+        ServiceEntry("asr", "sktop", "http://100.64.0.2:8091", "t"),
+        ServiceEntry("asr", "cyborg", "http://100.64.0.1:8091", "t"),
+        ServiceEntry("tts", "cyborg", "http://100.64.0.1:8093", "t"),
+    ]
+    tab = EndpointsTab(s, services=services)
+    asr = tab.use["asr"]
+    assert [asr.itemData(i) for i in range(asr.count())] == [None, "sktop", "cyborg"]
+    assert "127.0.0.1:8091" in asr.itemText(1) and "локальний" in asr.itemText(1)
+    assert tab.use["tts"].currentData() == "cyborg"
+    asr.setCurrentIndex(2)
+    v = tab.values()
+    assert v["services.use.asr"] == "cyborg" and v["services.use.tts"] == "cyborg"
+    assert v["services.use.llm"] is None
+
+
+def test_status_panel_use_combo_emits_choice(app):
+    panel = ServiceStatusPanel()
+    got = []
+    panel.use_changed.connect(lambda k, n: got.append((k, n)))
+    status = {
+        "use": {"asr": None, "tts": "cyborg", "llm": None},
+        "choices": {
+            "asr": [{"node": "sktop", "url": "http://127.0.0.1:8091", "local": True}],
+            "tts": [
+                {"node": "cyborg", "url": "http://100.64.0.1:8093", "local": False}
+            ],
+            "llm": [],
+        },
+        "health": {},
+    }
+    panel.update_status(status)
+    assert panel._use["tts"].currentData() == "cyborg"
+    box = panel._use["asr"]
+    assert box.itemText(1) == "sktop (http://127.0.0.1:8091), локальний"
+    box.setCurrentIndex(1)
+    box.activated.emit(1)
+    assert got == [("asr", "sktop")]
+    panel.update_status(status)  # same choices: selection not reset
+    assert box.currentIndex() == 1
+
+
+def test_apply_use_persists_and_validates(app, cfg):
+    from src.ui.widgets.settings_dialog import apply_use, save_values
+
+    settings, errors = apply_use("asr", "cyborg")
+    assert not errors and settings.use.asr == "cyborg"
+    assert _saved(cfg)["services"]["use"]["asr"] == "cyborg"
+    save_values({"services.allowed_services": ["asr:sktop"]})
+    settings, errors = apply_use("asr", "cyborg")
+    assert settings is None and "not an allowed service" in errors[0]

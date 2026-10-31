@@ -219,3 +219,20 @@ def test_config_bootstrap_reflects_only_given_env(tmp_path):
     assert body["bootstrap"]["speed"] == 1.5
     assert body["bootstrap"]["voice"] == "af_heart"  # not in env -> default
     assert body["source"]["voice"] == "override"
+
+
+def test_models_lists_registry_with_cache_state(tmp_path, monkeypatch):
+    from src.services.common.model_store import ModelStore
+
+    monkeypatch.setenv("RT_MODEL_DIR", str(tmp_path))
+    app, _ = make()
+    with running(app) as client:
+        r = client.get("/v1/models")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["current"] == "kokoro-82m-v1.0-onnx"
+        (m,) = body["models"]
+        assert (m["id"], m["cached"]) == ("kokoro-82m-v1.0-onnx", False)
+        assert m["size"] > 0
+        monkeypatch.setattr(ModelStore, "verify", lambda self, s, full=False: [])
+        assert client.get("/v1/models").json()["models"][0]["cached"] is True

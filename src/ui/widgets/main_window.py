@@ -61,6 +61,7 @@ class MainWindow(QMainWindow):
         self.service_status_panel.endpoints_requested.connect(
             self.settings_button.open_settings
         )
+        self.service_status_panel.use_changed.connect(self.on_use_changed)
         self.ui_controller.start_event_polling(interval=0.5)
         
     def init_ui(self):
@@ -432,6 +433,21 @@ class MainWindow(QMainWindow):
                 self.status_manager.log_error(f"Settings rejected: {err}")
 
         self._run_async(lambda: self.ui_controller.reconfigure_services(settings), done)
+
+    def on_use_changed(self, kind, node):
+        """Status panel: user picked the instance for ``kind`` (None = auto).
+
+        Persisted to config.yml and applied at once (backends rebuilt)."""
+        from .settings_dialog import apply_use
+
+        settings, errors = apply_use(kind, node)
+        if errors:
+            self.status_manager.log_error(
+                f"Вибір {kind} відхилено: {'; '.join(errors)}"
+            )
+            return
+        self.status_manager.log_info(f"{kind}: використовувати {node or 'auto'}")
+        self.on_general_settings_changed(settings)
 
     def on_settings_changed(self, settings):
         """Handle settings changes from the settings dialog - legacy method."""

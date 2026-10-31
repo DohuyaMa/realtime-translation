@@ -4,6 +4,7 @@ from typing import Dict, List, Optional
 
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
+    QComboBox,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
@@ -19,6 +20,7 @@ SERVICES = {
 }
 
 _DOT = "font-size: 16px; font-weight: bold; color: {};"
+AUTO = "auto (failover)"
 
 
 def _aggregate(entries: List[Dict]) -> str:
@@ -64,12 +66,16 @@ class ServiceStatusPanel(QGroupBox):
 
     refresh_requested = Signal()
     endpoints_requested = Signal()
+    # kind, node (None = auto): the user picked which instance serves kind
+    use_changed = Signal(str, object)
 
     def __init__(self, parent=None):
         super().__init__("Сервіси", parent)
         self._dots: Dict[str, QLabel] = {}
         self._texts: Dict[str, QLabel] = {}
         self._details: Dict[str, QLabel] = {}
+        self._use: Dict[str, QComboBox] = {}
+        self._use_sig: Dict[str, tuple] = {}
         self._build()
 
     def _build(self):
@@ -84,17 +90,28 @@ class ServiceStatusPanel(QGroupBox):
             text = QLabel("Offline")
             text.setStyleSheet("color: gray;")
             grid.addWidget(text, row, 2)
+            use = QComboBox()
+            use.addItem(AUTO, None)
+            use.setToolTip(
+                "Який екземпляр використовувати: auto - локальний першим з"
+                " failover; вузол - лише він (недоступний = помилка)"
+            )
+            use.activated.connect(
+                lambda _i, k=key, box=use: self.use_changed.emit(k, box.currentData())
+            )
+            grid.addWidget(use, row, 3)
             detail = QLabel("")
             detail.setWordWrap(True)
-            grid.addWidget(detail, row, 3)
+            grid.addWidget(detail, row, 4)
             self._dots[key], self._texts[key], self._details[key] = dot, text, detail
+            self._use[key] = use
 
         bar = QHBoxLayout()
         outer.addLayout(bar)
         refresh = QPushButton("Оновити")
         refresh.clicked.connect(self.refresh_requested.emit)
         bar.addWidget(refresh)
-        endpoints = QPushButton("Ендпоінти…")
+        endpoints = QPushButton("Налаштування…")
         endpoints.clicked.connect(self.endpoints_requested.emit)
         bar.addWidget(endpoints)
         bar.addStretch()
@@ -108,8 +125,32 @@ class ServiceStatusPanel(QGroupBox):
         self._texts[key].setStyleSheet("color: green;" if ok else "color: gray;")
         self._details[key].setText(detail)
 
+    def _update_use(self, kind: str, items: List[Dict], pinned) -> None:
+        sig = (tuple((i["node"], i["url"], i.get("local")) for i in items), pinned)
+        if self._use_sig.get(kind) == sig:
+            return
+        self._use_sig[kind] = sig
+        box = self._use[kind]
+        box.blockSignals(True)
+        box.clear()
+        box.addItem(AUTO, None)
+        for i in items:
+            label = f"{i['node']} ({i['url']})" + (
+                ", локальний" if i.get("local") else ""
+            )
+            box.addItem(label, i["node"])
+        if pinned is not None and box.findData(pinned) < 0:
+            box.addItem(f"{pinned} (недоступний)", pinned)
+        box.setCurrentIndex(max(box.findData(pinned), 0) if pinned else 0)
+        box.blockSignals(False)
+
     def update_status(self, status: Dict):
         """Apply a status dict (get_status() plus optional ``health``)."""
+        choices = status.get("choices") or {}
+        use = status.get("use") or {}
+        for kind in SERVICES:
+            if kind in choices:
+                self._update_use(kind, choices[kind], use.get(kind))
         health = status.get("health") or {}
         active = status.get("active") or {}
         source = status.get("discovery")

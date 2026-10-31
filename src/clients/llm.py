@@ -9,11 +9,6 @@ from ..core.runtime import LlmSettings
 from .base import ServiceError, json_body, raise_for_response
 
 LANGUAGE_NAMES = {"pl": "Polish", "uk": "Ukrainian", "ru": "Russian"}
-SYSTEM_PROMPT = (
-    "You are a professional interpreter. Translate the user's {lang} speech transcript "
-    "into natural English. Output only the English translation, nothing else. "
-    "Fix obvious speech-recognition errors using context."
-)
 _THINK = re.compile(r"(?s)<think>.*?</think>")
 
 
@@ -82,16 +77,19 @@ class LlmClient:
         if source_lang not in LANGUAGE_NAMES:
             raise ValueError(f"unsupported source language {source_lang!r}")
         s = self._settings
-        messages = [
-            {
-                "role": "system",
-                "content": SYSTEM_PROMPT.format(lang=LANGUAGE_NAMES[source_lang]),
+        lang = LANGUAGE_NAMES[source_lang]
+
+        def user(phrase: str) -> dict:
+            return {
+                "role": "user",
+                "content": s.user_template.format(lang=lang, text=phrase),
             }
-        ]
+
+        messages = [{"role": "system", "content": s.system_prompt.format(lang=lang)}]
         for src, tr in context:
-            messages.append({"role": "user", "content": src})
+            messages.append(user(src))
             messages.append({"role": "assistant", "content": tr})
-        messages.append({"role": "user", "content": text})
+        messages.append(user(text))
         body = {
             "model": s.model,
             "messages": messages,

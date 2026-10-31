@@ -130,7 +130,7 @@ def test_build_pools_local_first_then_allowed_cluster_services():
     )
     s = EdgeSettings(
         local=LocalUrls(asr="http://127.0.0.1:8091", tts=None),
-        allowed_services=("asr:gpu", "tts:gpu"),
+        allowed_services=("asr:me", "asr:gpu", "tts:gpu"),
     )
     from src.clients import discovery
 
