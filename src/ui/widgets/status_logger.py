@@ -1,13 +1,20 @@
 """Status and logging component for the real-time translation system."""
+
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QCheckBox,
-    QPushButton, QLabel, QSplitter, QPlainTextEdit, QGroupBox
+    QWidget,
+    QVBoxLayout,
+    QHBoxLayout,
+    QCheckBox,
+    QPushButton,
+    QLabel,
+    QSplitter,
+    QPlainTextEdit,
+    QGroupBox,
 )
 from PySide6.QtCore import Qt
 from typing import List, Optional, Tuple
 import datetime
 from loguru import logger
-
 
 SHOW_CHECK_TEXT = "Показувати текст Vosk"
 CHECK_PREFIX = "    Vosk: "
@@ -39,6 +46,13 @@ class StatusLogger(QWidget):
         self.recognized_view.setReadOnly(True)
         self.recognized_view.setPlaceholderText("Тут з'явиться розпізнана мова…")
         rec_layout.addWidget(self.recognized_view)
+        # whisper's words not translated yet (uncommitted tail + words not in
+        # a unit yet): grey, never spoken (spec 2026-10-31, owner decision 2)
+        self.tail_label = QLabel("")
+        self.tail_label.setWordWrap(True)
+        self.tail_label.setStyleSheet("color: gray;")
+        self.tail_label.setToolTip("Ще не перекладено: whisper може його уточнити")
+        rec_layout.addWidget(self.tail_label)
         # Vosk's text of the same phrase under whisper's line, to compare
         self.show_check = QCheckBox(SHOW_CHECK_TEXT)
         self.show_check.setChecked(True)
@@ -105,7 +119,7 @@ class StatusLogger(QWidget):
         ts = datetime.datetime.now().strftime("%H:%M:%S")
         self._recognized.append((ts, text, check))
         if len(self._recognized) > self._max_messages:
-            self._recognized = self._recognized[-self._max_messages:]
+            self._recognized = self._recognized[-self._max_messages :]
             self._render_recognized()
             return
         self.recognized_view.appendPlainText(self._recognized_lines(ts, text, check))
@@ -150,7 +164,7 @@ class StatusLogger(QWidget):
         )
         self._messages.append((ts, level, message))
         if len(self._messages) > self._max_messages:
-            self._messages = self._messages[-self._max_messages:]
+            self._messages = self._messages[-self._max_messages :]
 
     def add_info(self, message: str):
         self.add_log_message(message, "INFO")
@@ -164,8 +178,14 @@ class StatusLogger(QWidget):
     def add_debug(self, message: str):
         self.add_log_message(message, "DEBUG")
 
+    def set_tail(self, text: str) -> None:
+        """The grey not-yet-translated tail under the recognized text."""
+        if self.tail_label.text() != text:
+            self.tail_label.setText(text)
+
     def clear_all(self):
         self._recognized.clear()
+        self.tail_label.setText("")
         self.recognized_view.clear()
         self.translated_view.clear()
         self.log_view.clear()
@@ -173,6 +193,7 @@ class StatusLogger(QWidget):
 
     def copy_log(self):
         from PySide6.QtWidgets import QApplication
+
         QApplication.clipboard().setText(self.log_view.toPlainText())
 
     def get_recent_messages(self, count: int = 10) -> List[Tuple]:
@@ -194,6 +215,10 @@ class StatusManager:
     def log_recognized(self, text: str, check: Optional[str] = None):
         if self.status_logger:
             self.status_logger.add_recognized(text, check)
+
+    def set_tail(self, text: str):
+        if self.status_logger:
+            self.status_logger.set_tail(text)
 
     def log_translated(self, text: str):
         if self.status_logger:

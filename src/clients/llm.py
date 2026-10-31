@@ -108,9 +108,12 @@ class LlmClient:
         source_lang: str,
         context: Sequence[tuple] = (),
         check: Optional[Aligned] = None,
+        next_text: str = "",
     ) -> str:
         """Whole translation (joined stream)."""
-        return " ".join(self.translate_stream(text, source_lang, context, check))
+        return " ".join(
+            self.translate_stream(text, source_lang, context, check, next_text)
+        )
 
     def translate_stream(
         self,
@@ -118,6 +121,7 @@ class LlmClient:
         source_lang: str,
         context: Sequence[tuple] = (),
         check: Optional[Aligned] = None,
+        next_text: str = "",
     ) -> Iterator[str]:
         """Translated sentences as soon as each one is complete.
 
@@ -129,6 +133,10 @@ class LlmClient:
         the Vosk words of its time span. Context items are ``(source,
         translation)`` or ``(source, translation, check)``; in two-text mode
         only the latter are used (a whisper-only pair has no Vosk text).
+
+        ``next_text``: speech recognized after ``text`` (the NEXT line, for
+        understanding only); a later chunk of the same text is part of an
+        earlier chunk's NEXT.
         """
         if source_lang == "en":
             yield text
@@ -143,7 +151,8 @@ class LlmClient:
             system, template = s.check_system_prompt, s.check_user_template
             ctx = tuple(c for c in context if len(c) > 2)
         rest = check
-        for chunk in split_words(text, s.words_per_request):
+        chunks = split_words(text, s.words_per_request)
+        for i, chunk in enumerate(chunks):
             chunk_check = None
             if rest is not None:
                 part, rest = rest.cut(len(chunk.split()))
@@ -156,6 +165,7 @@ class LlmClient:
                 ctx,
                 check=chunk_check,
                 terms=s.terms,
+                next_text=" ".join(chunks[i + 1 :] + [next_text]).strip(),
             )
             parts = []
             for sentence in self._complete_stream(messages, chunk):

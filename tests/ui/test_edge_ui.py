@@ -636,7 +636,7 @@ def test_llm_tab_prompt_template_and_reset(app):
     assert v["services.llm.user_template"] == "T: {{text}}"
     tab.reset_prompts()
     assert tab.values()["services.llm.system_prompt"] == DEFAULT_SYSTEM_PROMPT
-    assert tab.values()["services.llm.user_template"] == "{{text}}"
+    assert tab.values()["services.llm.user_template"] == "TEXT: {{text}}"
 
 
 def test_dialog_saves_per_service_settings(app, cfg):
@@ -743,7 +743,7 @@ def test_llm_tab_preview_and_words_per_request(app):
     tab = LlmTab(s)
     assert tab.words_per_request.value() == 40
     text = tab.preview.toPlainText()
-    assert "[system] You are a professional interpreter" in text and "Polish" in text
+    assert "[system] You are a professional simultaneous interpreter" in text and "Polish" in text
     assert (
         "[запит 1/1, {{text}} = 16 слів] [Polish->English] Dzień dobry wszystkim."
         in text
@@ -762,7 +762,7 @@ def test_llm_tab_shows_legacy_template_notice(app):
     from src.ui.widgets.service_tabs import LlmTab
 
     s = resolve_edge_settings({"services": {"llm": {"user_template": "T: {text}"}}}, {})
-    assert s.llm.user_template == "{{text}}"  # default used
+    assert s.llm.user_template == "TEXT: {{text}}"  # default used
     tab = LlmTab(s)
     assert not tab.notice.isHidden()
     assert "old {lang}/{text} syntax" in tab.notice.text()
@@ -916,20 +916,23 @@ def test_status_panel_shows_stage_timing(app):
         {
             "timing": {
                 "seq": 7,
-                "asr_ms": 3800.0,
+                "commit_ms": 1100.0,
                 "llm_ms": 400.0,
                 "llm_total_ms": 900.0,
                 "tts_ms": 4700.0,
                 "e2e_ms": 8900.0,
             },
-            "queues": {"asr": 0, "llm": 1, "tts": 2, "playback": 0},
+            "queues": {"units": 0, "llm": 1, "tts": 2, "playback": 0},
             "backpressure": {"llm": 0, "tts": 3, "playback": 0},
-            "dropped_segments": 0,
+            "vosk_late": 2,
             "health": {},
         }
     )
     text = panel._timing.text()
-    assert "Фраза #7: ASR 3800 мс · LLM 400 мс (усього 900) · TTS 4700 мс" in text
+    assert (
+        "Одиниця #7: фіксація 1100 мс · LLM 400 мс (усього 900) · TTS 4700 мс" in text
+    )
+    assert "без звірки Vosk (не встиг за 300 мс): 2" in text
     assert "кінець мовлення → звук 8900 мс" in text
     assert "черги: llm 1, tts 2" in text and "не встигає: tts ×3" in text
 
@@ -1249,6 +1252,12 @@ def test_recognized_panel_shows_vosk_line_and_toggle(app):
     assert "Vosk:" not in text and text.count("\n") == 2
     log.show_check.setChecked(True)
     assert log.recognized_view.toPlainText().count("Vosk:") == 3
+    # the not-yet-translated tail is grey under the text, replaced each time
+    log.set_tail("картки без")
+    assert log.tail_label.text() == "картки без"
+    assert "gray" in log.tail_label.styleSheet()
+    log.set_tail("")
+    assert log.tail_label.text() == ""
 
 
 def test_llm_tab_lists_variables_and_active_prompt_pair(app, cfg):

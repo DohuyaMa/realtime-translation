@@ -42,7 +42,7 @@ def test_legacy_config_warns_and_uses_default(caplog):
         {},
     )
     assert s.llm.system_prompt == DEFAULT_SYSTEM_PROMPT
-    assert s.llm.user_template == "{{text}}"
+    assert s.llm.user_template == "TEXT: {{text}}"
     assert len(s.notices) == 2 and all("old {lang}/{text}" in n for n in s.notices)
     assert s.validate() == []
 
@@ -86,7 +86,7 @@ def test_llm_client_one_call_per_chunk_in_order():
     def handle(req):
         body = json.loads(req.content)
         seen.append(body["messages"])
-        last = body["messages"][-1]["content"]
+        last = body["messages"][-1]["content"].split("\n")[0]  # not NEXT
         return httpx.Response(
             200, json={"choices": [{"message": {"content": last.upper()}}]}
         )
@@ -106,8 +106,8 @@ def test_llm_client_one_call_per_chunk_in_order():
     out = client.translate("raz dwa. trzy cztery pięć sześć", "pl")
     assert out == "T: RAZ DWA. T: TRZY CZTERY PIĘĆ T: SZEŚĆ"
     assert [m[-1]["content"] for m in seen] == [
-        "T: raz dwa.",
-        "T: trzy cztery pięć",
+        "T: raz dwa.\nNEXT (do not translate): trzy cztery pięć sześć",
+        "T: trzy cztery pięć\nNEXT (do not translate): sześć",
         "T: sześć",
     ]
     # earlier chunks of the phrase are context of the next ones
@@ -162,23 +162,25 @@ def test_default_system_prompt_forbids_untranslated_words():
     assert "{{" not in text
 
 
-# -- whisper echo (live test §12 #20) and the LLM glossary {{terms}} ---------
+# -- NEXT line (spec 2026-10-31 §4) and the LLM glossary {{terms}} ----------
 
 
-def test_prompt_echo():
-    from src.core.prompt import is_prompt_echo
+def test_next_line_only_in_the_last_message():
+    from src.core.prompt import DEFAULT_SYSTEM_PROMPT, NEXT_LABEL, build_messages
 
-    previous = (
-        "Кіберспортивний додаток для прогнозів на матчі Трімове ТВА. Платформу"
-        " Гараш між бар'єрами, агенція та... сайти і веб-додатки для бізнесу"
-    ).split()
-    assert is_prompt_echo("Платформу Гараш між бар'єрами, агенція та...", previous)
-    # one word misheard is still an echo
-    assert is_prompt_echo("Платформа Гараш між бар'єрами, агенція та.", previous)
-    assert not is_prompt_echo("Так, дякую.", "Так, дякую.".split())  # too short
-    # new speech sharing a few scattered words is not an echo
-    assert not is_prompt_echo("Що я шукаю? Сайти для бізнесу і команди.", previous)
-    assert not is_prompt_echo("Платформу Гараш між бар'єрами", [])
+    msgs = build_messages(
+        DEFAULT_SYSTEM_PROMPT,
+        "TEXT: {{text}}",
+        "Перше речення.",
+        "uk",
+        context=(("Раніше.", "Earlier."),),
+        next_text="  друге без ",
+    )
+    assert msgs[1] == {"role": "user", "content": "TEXT: Раніше."}
+    assert msgs[-1]["content"] == f"TEXT: Перше речення.\n{NEXT_LABEL}друге без"
+    assert "NEXT" in msgs[0]["content"] and "never translate NEXT" in msgs[0]["content"]
+    bare = build_messages(DEFAULT_SYSTEM_PROMPT, "TEXT: {{text}}", "x", "uk")
+    assert bare[-1]["content"] == "TEXT: x"
 
 
 def test_terms_render_only_when_present():

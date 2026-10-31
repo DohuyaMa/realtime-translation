@@ -28,7 +28,8 @@ def llm(words_per_request):
     calls = []
 
     def handle(req):
-        text = json.loads(req.content)["messages"][-1]["content"]
+        content = json.loads(req.content)["messages"][-1]["content"]
+        text = content.split("\n")[0].removeprefix("TEXT: ")  # no NEXT line
         calls.append(text)
         return httpx.Response(200, json={"choices": [{"message": {"content": text}}]})
 

@@ -69,3 +69,23 @@ def test_cyrillic_in_the_english_translation_is_rejected(output):
 
 def test_latin_diacritics_and_dashes_pass():
     assert reject_reason("kawiarnia", "Café — naïve façade.") is None
+
+
+def test_next_leakage_is_rejected():
+    text = "Не витрачайте час на пошук інформації."  # 6 words: too_long > 18
+    nxt = "Картки постійного покупця отримуйте бонуси"
+    assert reject_reason(text, "Don't waste time searching for information.", nxt) is None
+    # the NEXT part translated too: 17 words > 2 x 6 + 4
+    leaked = (
+        "Don't waste time searching for information. Loyalty cards from regular"
+        " customers, get your bonuses right now please."
+    )
+    assert reject_reason(text, leaked, nxt) == "next_leak"
+    # without NEXT the length rule is the plain too_long one
+    assert reject_reason(text, leaked) is None
+    # prompt labels echoed
+    assert reject_reason(text, "TEXT: Don't waste time.", nxt) == "next_leak"
+    assert reject_reason(text, "Don't waste time. NEXT", "") == "next_leak"
+    # NEXT words copied (Latin source)
+    out = "Don't waste time karty stałego klienta"
+    assert reject_reason("Nie trać czasu.", out, "karty stałego klienta") == "next_leak"

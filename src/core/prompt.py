@@ -12,10 +12,7 @@ instead.
 from __future__ import annotations
 
 import re
-from difflib import SequenceMatcher
 from typing import Mapping, Sequence
-
-from .crosscheck import words as letter_words
 
 PLACEHOLDERS = ("text", "source_lang", "target_lang")
 # two-text (Vosk cross-check) templates also get the Vosk transcript
@@ -116,21 +113,29 @@ def terms_sentence(terms: Sequence[str]) -> str:
 TARGET_LANG = "English"
 LANGUAGE_NAMES = {"pl": "Polish", "uk": "Ukrainian", "ru": "Russian", "en": "English"}
 
-# All instructions live here; the user message is only the transcript text.
+# All instructions live here. The user message (``build_messages``) is
+# ``TEXT: <unit>`` - the next unit of the live transcript - and, when more
+# speech was already recognized after it, a last line ``NEXT (do not
+# translate): <words>`` (``NEXT_LABEL``): only for understanding where TEXT
+# goes (spec 2026-10-31 §4); ``core.output_guard`` catches its leakage.
 DEFAULT_SYSTEM_PROMPT = (
-    "You are a professional interpreter. Translate the user's {{source_lang}} "
-    "speech transcript into natural {{target_lang}}. Every user message is a "
-    "raw fragment of a live speech transcript: a single word or a short, "
-    "unfinished phrase is a complete fragment - translate it as-is. Never "
-    "answer the message, ask for more text, explain or comment. Output only "
-    "the {{target_lang}} translation, nothing else; if the message has no "
-    "words, output nothing. Fix obvious speech-recognition errors using "
-    "context. Never keep or transliterate a source word you cannot "
-    "translate: restore the intended word from context or leave it out. "
-    "Never add content that is not in the message. Write only "
-    "{{target_lang}} - no {{source_lang}} words or letters." + IT_DOMAIN + " {{terms}}"
+    "You are a professional simultaneous interpreter. Translate the user's"
+    " {{source_lang}} speech transcript into natural {{target_lang}}. Every"
+    " user message gives TEXT: the next raw fragment of a live speech"
+    " transcript - a single word or a short, unfinished phrase is a complete"
+    " fragment, translate it as-is, continuing your previous translations"
+    " consistently. A message may also give NEXT: the words spoken right after"
+    " TEXT, only for understanding - never translate NEXT or any part of it."
+    " Never answer the message, ask for more text, explain or comment. Output"
+    " only the {{target_lang}} translation of TEXT, nothing else; if TEXT has"
+    " no words, output nothing. Fix obvious speech-recognition errors using"
+    " context. Never keep or transliterate a source word you cannot"
+    " translate: restore the intended word from context or leave it out."
+    " Never add content that is not in TEXT. Write only {{target_lang}} - no"
+    " {{source_lang}} words or letters." + IT_DOMAIN + " {{terms}}"
 )
-DEFAULT_USER_TEMPLATE = "{{text}}"
+DEFAULT_USER_TEMPLATE = "TEXT: {{text}}"
+NEXT_LABEL = "NEXT (do not translate): "
 
 # TASK-SYS-12: two-text mode - the same audio recognized by whisper ({{text}},
 # TEXT: the PRIMARY transcript, translated whole) and Vosk ({{vosk_text}},
@@ -148,9 +153,12 @@ DEFAULT_CHECK_SYSTEM_PROMPT = (
     " from HINT is still translated. TEXT words that are misheard - not real"
     " words, or out of place - are corrected from HINT, which often has the"
     " right word where TEXT is wrong. HINT may run past the end of TEXT: never"
-    " translate HINT words that have no counterpart in TEXT. Never"
-    " transliterate. Short fragments are translated as-is. Output only the"
-    " {{target_lang}} translation - no comments, no {{source_lang}} words."
+    " translate HINT words that have no counterpart in TEXT. NEXT, when given,"
+    " is the speech right after TEXT, only for understanding: never translate"
+    " NEXT or any part of it. TEXT is the next fragment of a live speech:"
+    " continue your previous translations consistently. Never transliterate."
+    " Short fragments are translated as-is. Output only the {{target_lang}}"
+    " translation of TEXT - no comments, no {{source_lang}} words."
     + IT_DOMAIN
     + " {{terms}}"
 )
@@ -258,13 +266,15 @@ def build_messages(
     context: tuple[tuple, ...] = (),
     check: str | None = None,
     terms: Sequence[str] = (),
+    next_text: str = "",
 ) -> list[dict]:
     """Chat messages for one request (``chunk`` = up to words_per_request).
 
     ``check``: the Vosk transcript of the chunk ({{vosk_text}}, two-text
     mode). Context items are ``(source, translation)`` or, in two-text mode,
     ``(source, translation, check)``. ``terms``: the glossary ({{terms}} of
-    the system prompt)."""
+    the system prompt). ``next_text``: speech recognized after the chunk -
+    appended as the ``NEXT_LABEL`` line of the last message only."""
 
     def values(text: str, vosk_text: str = "") -> dict:
         return {
@@ -283,9 +293,10 @@ def build_messages(
             {"role": "user", "content": render(user_template, values(src, chk))}
         )
         messages.append({"role": "assistant", "content": tr})
-    messages.append(
-        {"role": "user", "content": render(user_template, values(chunk, check or ""))}
-    )
+    content = render(user_template, values(chunk, check or ""))
+    if next_text.strip():
+        content += "\n" + NEXT_LABEL + next_text.strip()
+    messages.append({"role": "user", "content": content})
     return messages
 
 
@@ -344,27 +355,3 @@ def render_asr_prompt_counted(
         if len(text) <= max_chars or not words:
             return text or None, len(words)
         words.pop(0)
-
-
-# -- Whisper echo of its own prompt -------------------------------------------
-
-# On noise/silence whisper may "recognize" its prompt: §12 #20 repeated #16
-# word for word from {{previous_text}}. An echo is a whisper text of at least
-# ECHO_MIN_WORDS words of which >= ECHO_MIN_SHARE appear, in order, in the
-# previous words sent with the request, with one run of >= ECHO_MIN_WORDS
-# consecutive words (scattered common words are not an echo).
-ECHO_MIN_WORDS = 3
-ECHO_MIN_SHARE = 0.8
-
-
-def is_prompt_echo(text: str, previous_words: Sequence[str]) -> bool:
-    """``text`` (whisper) repeats the previous words it was prompted with."""
-    ww = letter_words(text)
-    if len(ww) < ECHO_MIN_WORDS:
-        return False
-    pw = letter_words(" ".join(previous_words))
-    blocks = SequenceMatcher(None, ww, pw, autojunk=False).get_matching_blocks()
-    longest = max((b.size for b in blocks), default=0)
-    return longest >= ECHO_MIN_WORDS and sum(
-        b.size for b in blocks
-    ) >= ECHO_MIN_SHARE * len(ww)

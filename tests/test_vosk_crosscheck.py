@@ -1,6 +1,7 @@
-"""TASK-SYS-12: whisper + Vosk cross-check in the translate pipeline -
-parallel calls, the gate, two-text LLM messages, the hold/merge of both
-texts, Vosk off/unavailable visible, rt-vosk in the kill switch."""
+"""TASK-SYS-12: whisper + Vosk cross-check in the streaming translate
+pipeline - the per-unit gate (Vosk covers the unit's end within
+VOSK_WAIT_S, else whisper-only), two-text LLM messages, Vosk off /
+unavailable / of another language visible, rt-vosk in the kill switch."""
 
 import dataclasses
 import json
@@ -11,7 +12,6 @@ import numpy as np
 import pytest
 
 from src.clients import Directory, ServiceEntry, ServiceError, build_pools
-from src.clients.asr import AsrResult
 from src.clients.discovery import endpoints
 from src.clients.llm import LlmClient
 from src.clients.vosk import VoskClient, VoskResult, VoskWord
@@ -26,7 +26,6 @@ from src.core.crosscheck import (
     gate_reason,
     has_real_word,
     mean_conf,
-    whisper_word_times,
 )
 from src.core.prompt import (
     DEFAULT_CHECK_SYSTEM_PROMPT,
@@ -41,58 +40,40 @@ from src.core.runtime import (
     ServiceUse,
     resolve_edge_settings,
 )
-from src.segmentation import Segment
-from src.translation_system import TranslationSystem
-from test_pipeline_stages import SlowAsr, SlowLlm, SlowTts
+from src.core.simul import Word
+from src.translation_system import VOSK_WAIT_S, TranslationSystem
+from test_pipeline_stages import SlowLlm, SlowTts
 from test_translation_system import (
+    FakeAsr,
     FakeCapture,
     FakeModelService,
     FakePools,
     FakeStreams,
-    FakeVad,
     StaticTarget,
+    final,
     wait_for,
 )
 
 
-def seg(start=0.0, end=1.0, reason="end"):
-    audio = np.ones(int((end - start) * 16000) or 1, dtype=np.int16)
-    return Segment(audio=audio, start_s=start, end_s=end, reason=reason)
-
-
 def words(text, start=0.0, step=0.2):
-    return tuple(
-        VoskWord(w, 1.0, start + i * step, start + (i + 1) * step)
+    return [
+        Word(w, start + i * step, start + (i + 1) * step)
         for i, w in enumerate(text.split())
-    )
-
-
-class FakeVosk(FakeModelService):
-    def __init__(self, results, delay=0.0):
-        self.results = list(results)
-        self.delay = delay
-        self.calls = []
-        self.warmups = 0
-
-    def transcribe(self, audio, language, sample_rate=16000, **kw):
-        self.calls.append({"language": language, "t": time.monotonic()})
-        time.sleep(self.delay)
-        r = self.results.pop(0) if self.results else VoskResult("", language)
-        if isinstance(r, Exception):
-            raise r
-        return r
+    ]
 
 
 class CheckLlm(SlowLlm):
-    """Records (whisper text, Vosk check text or None)."""
+    """Records (whisper text, Vosk check text or None, NEXT)."""
 
     def __init__(self):
         super().__init__(0)
         self.checks = []
+        self.nexts = []
 
-    def translate_stream(self, text, source_lang, context=(), check=None):
+    def translate_stream(self, text, source_lang, context=(), check=None, next_text=""):
         self.calls.append(text)
         self.checks.append(None if check is None else check.check_text)
+        self.nexts.append(next_text)
         yield f"EN{len(self.calls)}."
 
 
@@ -102,37 +83,66 @@ def settings(**kw):
     return EdgeSettings(mode="translate", local=local, **kw)
 
 
-def system(asr, vosk, llm=None, streams=None, **kw):
-    vads, capture, events = [], FakeCapture(), []
+def system(llm=None, streams=None, vosk=True, **kw):
+    """(ts, streams, llm, events); ``vosk`` = rt-vosk is configured."""
+    capture, events = FakeCapture(), []
     llm = llm or CheckLlm()
-
-    def vad_factory(cfg):
-        v = FakeVad(cfg)
-        vads.append(v)
-        return v
-
+    streams = streams or FakeStreams()
+    vosk_client = FakeModelService() if vosk else None
     ts = TranslationSystem(
         settings(**kw),
         directory_factory=lambda s: Directory(),
-        pools_factory=lambda s, d: FakePools(asr, SlowTts(0), vosk),
+        pools_factory=lambda s, d: FakePools(FakeAsr(), SlowTts(0), vosk_client),
         llm_target_factory=lambda s, d: StaticTarget("http://llm"),
-        vad_stream_factory=vad_factory,
         llm_factory=lambda t, s: llm,
         capture_factory=capture,
         playback_sink=lambda a, sr: None,
-        stream_factory=streams or FakeStreams(),
+        stream_factory=streams,
     )
     ts.set_status_callback(events.append)
-    return ts, vads, capture, llm, events
+    return ts, streams, llm, events
 
 
-def run(ts, vads, capture, segments, until):
+def vosk_final(text, start, end, language="uk", eos=True):
+    ws = text.split()
+    step = (end - start) / max(1, len(ws))
+    return {
+        "type": "final",
+        "text": text,
+        "words": [
+            {
+                "word": w,
+                "start": start + i * step,
+                "end": start + (i + 1) * step,
+                "conf": 1.0,
+            }
+            for i, w in enumerate(ws)
+        ],
+        "start": start,
+        "end": end,
+        "eos": eos,
+        "language": language,
+        "audio_end": end + 0.5,
+    }
+
+
+def speak(streams, whisper, vosk=None, start=0.0, language="uk", eos=True):
+    """One utterance: Vosk's final over the same span first (when given),
+    then whisper's; returns where the next one may start."""
+    msg = final(whisper, start, eos=eos, language=language)
+    if vosk is not None:
+        streams["vosk"].emit(vosk_final(vosk, start, msg["end"], language))
+    streams["asr"].emit(msg)
+    return msg["end"] + 0.5
+
+
+def run(ts, streams, utterances, until):
+    """utterances: (whisper, vosk text or None) in order."""
     assert ts.start()
     try:
-        for s in segments:
-            vads[-1].pending.append(s)
-            capture.push()
-            time.sleep(0.02)
+        t = 0.0
+        for whisper, vosk in utterances:
+            t = speak(streams, whisper, vosk, t)
         assert wait_for(until)
         return ts.get_stats()
     finally:
@@ -148,31 +158,10 @@ def test_gate_needs_a_word_of_two_letters():
     assert has_real_word("е до")
 
 
-def test_whisper_word_times_follow_segments():
-    segs = [
-        {"start": 0.0, "end": 1.0, "text": "Раз два."},
-        {"start": 2.0, "end": 4.0, "text": "три"},
-    ]
-    assert whisper_word_times("Раз два. три", segs, 4.0, 10.0) == (
-        10.25,
-        10.75,
-        13.0,
-    )
-    # text not covered word for word: spread over the whole audio
-    assert whisper_word_times("a b", [], 2.0, 0.0) == (0.5, 1.5)
-
-
-def test_aligned_cut_splits_vosk_words_by_time():
-    a = Aligned.build(
-        "Раз два. Три",
-        [
-            {"start": 0.0, "end": 1.0, "text": "Раз два."},
-            {"start": 1.0, "end": 2.0, "text": "Три"},
-        ],
+def test_aligned_from_words_cuts_vosk_words_by_time():
+    a = Aligned.from_words(
+        [Word("Раз", 0.0, 0.5), Word("два.", 0.5, 1.0), Word("Три", 1.0, 2.0)],
         words("раз два три", 0.0, 0.66),
-        "раз два три",
-        2.0,
-        0.0,
     )
     head, tail = a.cut(2)
     assert head.check_text == "раз два" and tail.check_text == "три"
@@ -216,7 +205,7 @@ def test_config_keeps_defaults_and_parses_vosk_use():
     assert "use.asr: asr cannot be switched off" in asr_off.validate()
 
 
-def test_llm_client_sends_check_prompts_per_chunk():
+def test_llm_client_sends_check_prompts_per_chunk_with_next():
     bodies = []
 
     def handler(req):
@@ -231,24 +220,32 @@ def test_llm_client_sends_check_prompts_per_chunk():
         LlmSettings(words_per_request=2),
         transport=httpx.MockTransport(handler),
     )
-    check = Aligned.build(
-        "Раз два три",
-        [],
+    check = Aligned.from_words(
+        [Word("Раз", 0, 1), Word("два", 1, 2), Word("три", 2, 3)],
         words("раз два три", 0.0, 1.0),
-        "раз два три",
-        3.0,
-        0.0,
     )
-    out = client.translate("Раз два три", "uk", [("x", "X")], check=check)
+    out = client.translate(
+        "Раз два три", "uk", [("x", "X")], check=check, next_text="чотири"
+    )
     assert out == "T1. T2."
     first, second = (b["messages"] for b in bodies)
     assert first[0]["content"].startswith("You are a live Ukrainian")
-    # whisper-only context pairs are not shown in two-text mode
-    assert first[1:] == [{"role": "user", "content": "TEXT: Раз два\nHINT: раз два"}]
+    # whisper-only context pairs are not shown in two-text mode; the rest of
+    # the unit and the speech after it are NEXT
+    assert first[1:] == [
+        {
+            "role": "user",
+            "content": "TEXT: Раз два\nHINT: раз два\nNEXT (do not translate): три"
+            " чотири",
+        }
+    ]
     assert second[1:] == [
         {"role": "user", "content": "TEXT: Раз два\nHINT: раз два"},
         {"role": "assistant", "content": "T1."},
-        {"role": "user", "content": "TEXT: три\nHINT: три"},
+        {
+            "role": "user",
+            "content": "TEXT: три\nHINT: три\nNEXT (do not translate): чотири",
+        },
     ]
 
 
@@ -274,27 +271,78 @@ def test_vosk_client_request_and_words():
     assert r == VoskResult("привіт", "uk", (VoskWord("привіт", 0.9, 0.1, 0.5),))
 
 
+# -- live test §12: Latin terms against a uk Vosk model (rt-app log 21:15:07)
+
+S19 = (
+    "CPress, Stack, TypeScript, React, SGS, NodeJS, Python, PostgreSQL, Redis,"
+    " Docker..."
+)
+V19 = "єс поступ із доки"
+
+
 # -- pipeline ---------------------------------------------------------------
 
 
-def test_whisper_and_vosk_run_in_parallel():
-    asr = SlowAsr([AsrResult("Добрий день.", "uk")], 0.3)
-    vosk = FakeVosk([VoskResult("добрий день", "uk", words("добрий день"))], 0.3)
-    ts, vads, capture, llm, _ = system(asr, vosk)
-    stats = run(ts, vads, capture, [seg()], lambda: llm.calls)
-    assert vosk.calls[0]["language"] == "uk"
-    assert stats["timing"]["asr_ms"] < 500  # max of the two, not the sum
+def test_unit_carries_the_vosk_words_of_its_span():
+    ts, streams, llm, _ = system()
+    stats = run(ts, streams, [("Добрий день.", "добрий день")], lambda: llm.calls)
+    assert streams["vosk"].language == "uk"
     assert llm.checks == ["добрий день"]
     assert stats["vosk_checked"] == 1 and stats["vosk"] == {"mode": "on", "error": None}
 
 
-def test_gate_drops_segment_before_the_llm():
-    asr = SlowAsr(
-        [AsrResult("Дякую за перегляд!", "uk"), AsrResult("Добрий день.", "uk")], 0
+def test_unit_waits_for_vosk_to_cover_its_end():
+    ts, streams, llm, _ = system()
+    assert ts.start()
+    try:
+        msg = final("Добрий день.", 0.0)
+        streams["asr"].emit(msg)  # whisper first: the unit waits for Vosk
+        time.sleep(VOSK_WAIT_S / 3)
+        assert llm.calls == [] and ts.get_stats()["queues"]["units"] == 1
+        streams["vosk"].emit(vosk_final("добрий день", 0.0, msg["end"]))
+        assert wait_for(lambda: llm.calls)
+        stats = ts.get_stats()
+    finally:
+        ts.stop()
+    assert llm.checks == ["добрий день"] and stats["vosk_late"] == 0
+
+
+def test_vosk_late_is_whisper_only_and_counted():
+    ts, streams, llm, _ = system()
+    stats = run(ts, streams, [("Добрий день.", None)], lambda: llm.calls)
+    assert llm.checks == [None]
+    assert stats["vosk_late"] == 1 and stats["vosk"]["mode"] == "on"
+
+
+def test_unit_hint_is_cut_from_one_vosk_final_by_time():
+    ts, streams, llm, _ = system()
+    assert ts.start()
+    try:
+        vosk = vosk_final("не витрачайте час", 0.0, 0.9)
+        vosk["words"] += [
+            {"word": "картки", "start": 1.3, "end": 1.6, "conf": 1.0},
+            {"word": "без", "start": 1.6, "end": 1.9, "conf": 1.0},
+        ]
+        vosk["audio_end"] = 2.4
+        streams["vosk"].emit(vosk)
+        # a short pause after the sentence; the sentence end cuts a unit
+        streams["asr"].emit(final("Не витрачайте час.", 0.0, eos=False))
+        streams["asr"].emit(final("Картки без", 1.3, eos=True))
+        assert wait_for(lambda: len(llm.calls) == 2)
+    finally:
+        ts.stop()
+    assert llm.calls == ["Не витрачайте час.", "Картки без"]
+    assert llm.checks == ["не витрачайте час", "картки без"]
+
+
+def test_gate_drops_unit_before_the_llm():
+    ts, streams, llm, events = system()
+    stats = run(
+        ts,
+        streams,
+        [("Дякую за перегляд!", "е"), ("Добрий день.", "добрий день")],
+        lambda: llm.calls,
     )
-    vosk = FakeVosk([VoskResult("е", "uk"), VoskResult("добрий день", "uk")])
-    ts, vads, capture, llm, events = system(asr, vosk)
-    stats = run(ts, vads, capture, [seg(), seg()], lambda: llm.calls)
     assert llm.calls == ["Добрий день."]
     assert stats["vosk_gate_dropped"] == 1
     assert any(
@@ -303,91 +351,148 @@ def test_gate_drops_segment_before_the_llm():
     )
 
 
-def test_held_tail_merges_both_texts():
-    asr = SlowAsr(
-        [AsrResult("Чикає ДОКИ", "uk"), AsrResult("До паузи, по факту.", "uk")], 0
+def test_gate_drops_disagreeing_unit_and_counts_it():
+    ts, streams, llm, events = system()
+    stats = run(
+        ts,
+        streams,
+        [("Дякую за перегляд!", "що можна зробити"), ("Добрий день.", "добрий день")],
+        lambda: llm.calls,
     )
-    vosk = FakeVosk(
-        [
-            VoskResult("чикає доки", "uk", words("чикає доки")),
-            VoskResult("до паузи по факту", "uk", words("до паузи по факту")),
-        ]
+    assert llm.calls == ["Добрий день."]
+    assert stats["vosk_gate_dropped"] == 1 and stats["vosk_gate_disagree"] == 1
+    assert any(
+        e.get("status") == "vosk_gate" and e["reason"] == GATE_DISAGREE for e in events
     )
-    ts, vads, capture, llm, _ = system(asr, vosk)
-    stats = run(ts, vads, capture, [seg(0, 1), seg(1.5, 3)], lambda: llm.calls)
-    assert llm.calls == ["Чикає ДОКИ До паузи, по факту."]
-    assert llm.checks == ["чикає доки до паузи по факту"]
-    assert stats["asr_merged"] == 1
 
 
-def test_complete_sentence_goes_with_its_vosk_words_and_tail_waits():
-    whisper = AsrResult(
-        "Не витрачайте час. Картки без",
-        "uk",
-        [
-            {"start": 0.0, "end": 1.0, "text": "Не витрачайте час."},
-            {"start": 1.0, "end": 2.0, "text": "Картки без"},
-        ],
-    )
-    vosk_words = (
-        VoskWord("не", 1, 0.0, 0.2),
-        VoskWord("витрачайте", 1, 0.2, 0.6),
-        VoskWord("час", 1, 0.6, 0.9),
-        VoskWord("картки", 1, 1.1, 1.5),
-        VoskWord("без", 1, 1.5, 1.9),
-    )
-    asr = SlowAsr([whisper, AsrResult("фізичної карти.", "uk")], 0)
-    vosk = FakeVosk(
-        [
-            VoskResult("не витрачайте час картки без", "uk", vosk_words),
-            VoskResult("фізичної карти", "uk", words("фізичної карти")),
-        ]
-    )
-    ts, vads, capture, llm, _ = system(asr, vosk)
-    run(ts, vads, capture, [seg(0, 2), seg(2.5, 4)], lambda: len(llm.calls) == 2)
-    assert llm.calls == ["Не витрачайте час.", "Картки без фізичної карти."]
-    assert llm.checks == ["не витрачайте час", "картки без фізичної карти"]
+def test_sparse_vosk_keeps_the_whole_whisper_text():
+    text = "Запитайте про відео або аудіо яке ви відтворювали."
+    ts, streams, llm, _ = system()
+    stats = run(ts, streams, [(text, "або")], lambda: llm.calls)
+    assert llm.calls == [text] and llm.checks == ["або"]
+    assert stats["vosk_gate_dropped"] == 0
+
+
+def test_terms_unit_passes_as_foreign_terms():
+    """§12 #19: the stack list against a uk model - no longer dropped."""
+    ts, streams, llm, _ = system()
+    stats = run(ts, streams, [(S19, V19)], lambda: llm.calls)
+    assert llm.calls == [S19] and llm.checks == [V19]
+    assert stats["vosk_gate_foreign_terms"] == 1 and stats["vosk_gate_dropped"] == 0
 
 
 def test_vosk_off_is_whisper_only_and_visible():
-    asr = SlowAsr([AsrResult("Добрий день.", "uk")], 0)
-    ts, vads, capture, llm, _ = system(asr, None, use=ServiceUse(vosk=OFF))
-    stats = run(ts, vads, capture, [seg()], lambda: llm.calls)
+    ts, streams, llm, _ = system(vosk=False, use=ServiceUse(vosk=OFF))
+    stats = run(ts, streams, [("Добрий день.", None)], lambda: llm.calls)
+    assert [s.kind for s in streams.opened] == ["asr"]
     assert llm.checks == [None]
     assert stats["vosk"] == {"mode": "off", "error": "вимкнено в налаштуваннях"}
     assert stats["vosk_whisper_only"] == 0  # a configured mode, not a problem
 
 
 def test_vosk_not_found_is_visible():
-    asr = SlowAsr([AsrResult("Добрий день.", "uk")], 0)
-    ts, vads, capture, llm, _ = system(asr, None)
-    stats = run(ts, vads, capture, [seg()], lambda: llm.calls)
+    ts, streams, llm, _ = system(vosk=False)
+    stats = run(ts, streams, [("Добрий день.", None)], lambda: llm.calls)
     assert llm.checks == [None]
     assert stats["vosk"]["mode"] == "unavailable"
     assert stats["vosk_whisper_only"] == 1
 
 
-def test_vosk_error_goes_whisper_only_then_back_on():
-    asr = SlowAsr([AsrResult("Раз.", "uk"), AsrResult("Два.", "uk")], 0)
-    vosk = FakeVosk(
-        [ServiceError("vosk", "unreachable", "down"), VoskResult("два", "uk")]
-    )
-    ts, vads, capture, llm, events = system(asr, vosk)
-    stats = run(ts, vads, capture, [seg(), seg()], lambda: len(llm.calls) == 2)
+def test_vosk_stream_down_goes_whisper_only_then_back_on():
+    ts, streams, llm, events = system()
+    assert ts.start()
+    try:
+        streams["vosk"].emit({"type": "down", "url": "http://vosk", "error": "x"})
+        t = speak(streams, "Раз.", None)
+        assert wait_for(lambda: len(llm.calls) == 1)
+        streams["vosk"].emit({"type": "ready", "url": "http://vosk", "reconnect": True})
+        speak(streams, "Два.", "два", t)
+        assert wait_for(lambda: len(llm.calls) == 2)
+        stats = ts.get_stats()
+    finally:
+        ts.stop()
     assert llm.checks == [None, "два"]
     assert stats["vosk_whisper_only"] == 1 and stats["vosk"]["mode"] == "on"
     states = [e["vosk"]["mode"] for e in events if e.get("status") == "vosk_state"]
     assert states == ["unavailable", "on"]
 
 
-def test_auto_language_first_phrase_waits_for_whisper_then_parallel():
-    asr = SlowAsr([AsrResult("Dzień dobry.", "pl"), AsrResult("Cześć.", "pl")], 0)
-    vosk = FakeVosk([VoskResult("dzień dobry", "pl"), VoskResult("cześć", "pl")])
-    ts, vads, capture, llm, _ = system(asr, vosk, source_language="auto")
-    stats = run(ts, vads, capture, [seg(), seg()], lambda: len(llm.calls) == 2)
-    assert [c["language"] for c in vosk.calls] == ["pl", "pl"]
-    assert stats["vosk_after_whisper"] == 1  # only the first phrase
-    assert llm.checks == ["dzień dobry", "cześć"]
+def test_auto_language_vosk_model_of_another_language_is_closed():
+    """Auto: whisper fixes the language on the first words; a Vosk model of
+    another language cannot check it - its stream closes, whisper-only."""
+    ts, streams, llm, _ = system(source_language="auto")
+    assert ts.start()
+    try:
+        assert streams["vosk"].language is None  # rt-vosk: its model's language
+        streams["vosk"].emit(vosk_final("добрий день", 0.0, 0.6, language="uk"))
+        streams["asr"].emit(final("Dzień dobry.", 0.0, language="pl"))
+        assert wait_for(lambda: llm.calls)
+        stats = ts.get_stats()
+    finally:
+        ts.stop()
+    assert streams["vosk"].stopped
+    assert stats["vosk"]["mode"] == "unavailable"
+    assert stats["vosk"]["error"].startswith("немає моделі для «pl»")
+    assert llm.checks == [None]
+
+
+def test_wrong_language_model_is_visible_and_never_retried():
+    """rt-vosk holds one model; 409 model_language_mismatch -> whisper-only,
+    the reason names the language; the model is never switched by the edge."""
+    import httpx as _httpx
+
+    from src.clients.base import raise_for_response
+
+    resp = _httpx.Response(
+        409,
+        json={
+            "error": {
+                "code": "model_language_mismatch",
+                "message": "loaded Vosk model vosk-small-uk-v3-nano is 'uk', not 'pl'",
+            }
+        },
+    )
+    with pytest.raises(ServiceError) as exc:
+        raise_for_response("vosk", resp)
+    err = exc.value
+    assert err.kind == "wrong_language" and err.status_code == 409
+    from src.clients.pool import is_retryable
+
+    assert not is_retryable(err)
+    # the stream refuses the start the same way
+    ts, streams, llm, _ = system(source_language="pl")
+    assert ts.start()
+    try:
+        streams["vosk"].emit(
+            {
+                "type": "down",
+                "url": "http://vosk",
+                "error": "model_language_mismatch: loaded model is 'uk', not 'pl'",
+            }
+        )
+        streams["asr"].emit(final("Dzień dobry.", 0.0, language="pl"))
+        assert wait_for(lambda: llm.calls)
+        stats = ts.get_stats()
+    finally:
+        ts.stop()
+    assert llm.checks == [None] and streams["vosk"].stopped
+    assert stats["vosk"]["mode"] == "unavailable"
+    assert stats["vosk"]["error"].startswith("немає моделі для «pl»")
+    assert stats["pending_recognized"] == [{"text": "Dzień dobry.", "check": None}]
+
+
+def test_recognized_unit_carries_vosk_text():
+    ts, streams, llm, _ = system()
+    stats = run(ts, streams, [("Добрий день.", "добрий день")], lambda: llm.calls)
+    assert stats["pending_recognized"] == [
+        {"text": "Добрий день.", "check": "добрий день"}
+    ]
+
+
+def test_mean_conf():
+    assert mean_conf(()) is None
+    assert mean_conf((VoskWord("а", 0.5, 0, 1), VoskWord("б", 1.0, 1, 2))) == 0.75
 
 
 # -- discovery / pools / kill switch -----------------------------------------
@@ -452,50 +557,7 @@ def test_vosk_events_are_described_for_the_log():
     assert level == "WARN" and "лише з whisper" in msg
 
 
-def test_wrong_language_model_is_visible_and_never_retried():
-    """rt-vosk holds one model; 409 model_language_mismatch -> whisper-only,
-    the reason names the language; the model is never switched by the edge."""
-    import httpx as _httpx
-
-    from src.clients.base import raise_for_response
-
-    resp = _httpx.Response(
-        409,
-        json={
-            "error": {
-                "code": "model_language_mismatch",
-                "message": "loaded Vosk model vosk-small-uk-v3-nano is 'uk', not 'pl'",
-            }
-        },
-    )
-    with pytest.raises(ServiceError) as exc:
-        raise_for_response("vosk", resp)
-    err = exc.value
-    assert err.kind == "wrong_language" and err.status_code == 409
-    from src.clients.pool import is_retryable
-
-    assert not is_retryable(err)
-    asr = SlowAsr([AsrResult("Dzień dobry.", "pl")], 0)
-    vosk = FakeVosk([err])
-    ts, vads, capture, llm, _ = system(asr, vosk, source_language="pl")
-    stats = run(ts, vads, capture, [seg()], lambda: llm.calls)
-    assert llm.checks == [None]
-    assert stats["vosk"]["mode"] == "unavailable"
-    assert stats["vosk"]["error"].startswith("немає моделі для «pl»")
-    assert stats["pending_recognized"] == [{"text": "Dzień dobry.", "check": None}]
-
-
-def test_recognized_phrase_carries_vosk_text():
-    asr = SlowAsr([AsrResult("Добрий день.", "uk")], 0)
-    vosk = FakeVosk([VoskResult("добрий день", "uk", words("добрий день"))])
-    ts, vads, capture, llm, _ = system(asr, vosk)
-    stats = run(ts, vads, capture, [seg()], lambda: llm.calls)
-    assert stats["pending_recognized"] == [
-        {"text": "Добрий день.", "check": "добрий день"}
-    ]
-
-
-# -- segment-level gate: veto hallucinations, never delete real words (§10) --
+# -- the gate: veto hallucinations, never delete real words (§10) ----------
 
 # the owner's live whisper lines (2026-10-31 20:27) and what rt-vosk with
 # vosk-small-uk-v3-nano heard on espeak-ng audio of the same text
@@ -548,86 +610,25 @@ def test_gate_silence_and_short_words():
     assert agreement("Інформації.", "інформа ції", "uk") == 1.0
 
 
-def test_mean_conf():
-    assert mean_conf(()) is None
-    assert mean_conf((VoskWord("а", 0.5, 0, 1), VoskWord("б", 1.0, 1, 2))) == 0.75
+# -- session recording and per-unit log ------------------------------------
 
 
-def test_gate_drops_disagreeing_segment_and_counts_it():
-    asr = SlowAsr(
-        [AsrResult("Дякую за перегляд!", "uk"), AsrResult("Добрий день.", "uk")], 0
-    )
-    vosk = FakeVosk(
-        [
-            VoskResult("що можна зробити", "uk", words("що можна зробити")),
-            VoskResult("добрий день", "uk", words("добрий день")),
-        ]
-    )
-    ts, vads, capture, llm, events = system(asr, vosk)
-    stats = run(ts, vads, capture, [seg(), seg()], lambda: llm.calls)
-    assert llm.calls == ["Добрий день."]
-    assert stats["vosk_gate_dropped"] == 1 and stats["vosk_gate_disagree"] == 1
-    assert any(
-        e.get("status") == "vosk_gate" and e["reason"] == GATE_DISAGREE for e in events
-    )
-
-
-def test_sparse_vosk_keeps_the_whole_whisper_text():
-    text = "Запитайте про відео або аудіо, яке ви відтворювали."
-    asr = SlowAsr([AsrResult(text, "uk")], 0)
-    vosk = FakeVosk([VoskResult("або", "uk", words("або"))])
-    ts, vads, capture, llm, _ = system(asr, vosk)
-    stats = run(ts, vads, capture, [seg()], lambda: llm.calls)
-    assert llm.calls == [text] and llm.checks == ["або"]
-    assert stats["vosk_gate_dropped"] == 0
-
-
-def test_held_piece_with_empty_vosk_span_is_still_translated():
-    """Vosk words are split by interpolated time; a held tail whose span got
-    no Vosk word was spoken all the same - no per-piece gate."""
-    whisper = AsrResult(
-        "Новий спосіб перегляду вкладок. Вертикальні вкладки",
-        "uk",
-        [
-            {"start": 0.0, "end": 1.0, "text": "Новий спосіб перегляду вкладок."},
-            {"start": 1.0, "end": 2.0, "text": "Вертикальні вкладки"},
-        ],
-    )
-    vosk_words = words("новий спосіб перегляду вкладок", 0.0, 0.2)
-    asr = SlowAsr([whisper], 0)
-    vosk = FakeVosk([VoskResult("новий спосіб перегляду вкладок", "uk", vosk_words)])
-    ts, vads, capture, llm, _ = system(asr, vosk)
-    stats = run(ts, vads, capture, [seg(0, 2)], lambda: len(llm.calls) == 2)
-    assert llm.calls == ["Новий спосіб перегляду вкладок.", "Вертикальні вкладки"]
-    assert llm.checks == ["новий спосіб перегляду вкладок", ""]
-    assert stats["vosk_gate_dropped"] == 0 and stats["asr_held_flushed"] == 1
-
-
-# -- session recording and per-phrase log ------------------------------------
-
-
-def _recording_system(tmp_path, asr, vosk, **kw):
+def _recording_system(tmp_path, **kw):
     from src.core.session_record import SessionRecorder
 
-    ts, vads, capture, llm, events = system(asr, vosk, **kw)
+    ts, streams, llm, events = system(**kw)
     ts._recorder_factory = lambda: SessionRecorder(tmp_path)
-    return ts, vads, capture, llm, events
+    return ts, streams, llm, events
 
 
 def test_session_recording_writes_wav_and_jsonl(tmp_path):
-    asr = SlowAsr(
-        [AsrResult("Дякую за перегляд!", "uk"), AsrResult("Добрий день.", "uk")], 0
+    ts, streams, llm, events = _recording_system(tmp_path, record_session=True)
+    stats = run(
+        ts,
+        streams,
+        [("Дякую за перегляд!", "що можна"), ("Добрий день.", "добрий день")],
+        lambda: llm.calls,
     )
-    vosk = FakeVosk(
-        [
-            VoskResult("що можна", "uk", words("що можна")),
-            VoskResult("добрий день", "uk", words("добрий день")),
-        ]
-    )
-    ts, vads, capture, llm, events = _recording_system(
-        tmp_path, asr, vosk, record_session=True
-    )
-    stats = run(ts, vads, capture, [seg(), seg()], lambda: llm.calls)
     (session,) = list(tmp_path.iterdir())
     assert sorted(p.name for p in session.glob("*.wav")) == [
         "seg-00001.wav",
@@ -640,6 +641,8 @@ def test_session_recording_writes_wav_and_jsonl(tmp_path):
     assert [x["gate"] for x in segs] == [GATE_DISAGREE, GATE_AGREE]
     assert segs[1]["vosk"] == "добрий день" and segs[1]["vosk_conf"] == 1.0
     assert segs[1]["vosk_words"][0]["word"] == "добрий"
+    assert segs[1]["whisper_words"][0]["word"] == "Добрий"
+    assert segs[1]["reason"] == "sentence"
     (tr,) = [x for x in lines if x["type"] == "translation"]
     assert tr["mode"] == "two-text" and tr["text"] == "Добрий день."
     assert tr["hint"] == "добрий день" and tr["translation"] == "EN1."
@@ -649,20 +652,14 @@ def test_session_recording_writes_wav_and_jsonl(tmp_path):
 
 
 def test_session_recording_is_off_by_default_and_toggles_live(tmp_path):
-    asr = SlowAsr([AsrResult("Раз.", "uk"), AsrResult("Два.", "uk")], 0)
-    vosk = FakeVosk(
-        [VoskResult("раз", "uk", words("раз")), VoskResult("два", "uk", words("два"))]
-    )
-    ts, vads, capture, llm, _ = _recording_system(tmp_path, asr, vosk)
+    ts, streams, llm, _ = _recording_system(tmp_path)
     assert ts.start()
     try:
-        vads[-1].pending.append(seg())
-        capture.push()
+        t = speak(streams, "Раз.", "раз")
         assert wait_for(lambda: len(llm.calls) == 1)
         assert not tmp_path.exists() or not list(tmp_path.iterdir())
         ts.apply_settings(dataclasses.replace(ts.settings, record_session=True))
-        vads[-1].pending.append(seg())
-        capture.push()
+        speak(streams, "Два.", "два", t)
         assert wait_for(lambda: len(llm.calls) == 2)
         assert ts.get_stats()["session_record"]["on"] is True
     finally:
@@ -688,11 +685,10 @@ def test_session_recording_write_error_is_explicit(tmp_path):
 def test_tts_is_warmed_up_at_start():
     from test_translation_system import FakeTts
 
-    asr = SlowAsr([AsrResult("Раз.", "uk")], 0)
     tts = FakeTts()
-    ts, vads, capture, llm, events = system(asr, None, use=ServiceUse(vosk=OFF))
+    ts, streams, llm, events = system(vosk=False, use=ServiceUse(vosk=OFF))
     ts._pools.tts.client = tts
-    stats = run(ts, vads, capture, [seg()], lambda: tts.calls)
+    stats = run(ts, streams, [("Раз.", None)], lambda: tts.calls)
     assert tts.warmups == 1 and [c[0] for c in tts.calls] == ["EN1."]
     assert stats["warmup"]["tts"]["error"] is None
     assert any(e.get("status") == "warmup" and e["kind"] == "tts" for e in events)
@@ -714,15 +710,6 @@ def test_gate_and_record_events_are_described():
         {"status": "session_record", "path": None, "error": "PermissionError: x"}
     )
     assert level == "ERROR"
-
-
-# -- live test §12: Latin terms against a uk Vosk model (rt-app log 21:15:07)
-
-S19 = (
-    "CPress, Stack, TypeScript, React, SGS, NodeJS, Python, PostgreSQL, Redis,"
-    " Docker..."
-)
-V19 = "єс поступ із доки"
 
 
 def test_latin_terms_do_not_count_against_a_cyrillic_vosk_model():
@@ -750,49 +737,13 @@ def test_latin_terms_do_not_count_against_a_cyrillic_vosk_model():
     )
 
 
-def test_terms_segment_passes_merges_and_echo_releases_it():
-    """§12 #18-#20: #18 held (ellipsis), #19 (stack list) passed as
-    foreign_terms and merged, #20 (whisper echo of #16, Vosk empty) dropped
-    as asr_echo - which sends the held text at once."""
-    s16 = "Платформу Гараш між бар'єрами, агенція та..."
-    s18 = "сайти і веб-додатки для бізнесу, плюс авто-тестер, плейврайд..."
-    asr = SlowAsr([AsrResult(s16 + " Ок.", "uk"), AsrResult(s18, "uk")], 0)
-    asr.results += [AsrResult(S19, "uk"), AsrResult(s16, "uk")]
-    vosk = FakeVosk(
-        [
-            VoskResult("формула з бар'єрами агенція ок", "uk", words("формула з")),
-            VoskResult("сайти для бізнесу", "uk", words("сайти для бізнесу")),
-            VoskResult(V19, "uk", words(V19)),
-            VoskResult("", "uk"),
-        ]
-    )
-    ts, vads, capture, llm, events = system(asr, vosk)
-    assert ts.start()
-    try:
-        vads[-1].speaking = True
-        for s in (seg(0, 3), seg(3, 6), seg(6, 9), seg(9, 12)):
-            vads[-1].pending.append(s)
-            capture.push()
-            time.sleep(0.02)
-        assert wait_for(lambda: len(llm.calls) == 2, timeout=2)
-        stats = ts.get_stats()
-    finally:
-        ts.stop()
-    assert llm.calls == [f"{s16} Ок.", f"{s18} {S19}"]
-    assert llm.checks[1] == f"сайти для бізнесу {V19}"
-    assert stats["vosk_gate_foreign_terms"] == 1
-    assert stats["vosk_gate_dropped"] == 0 and stats["asr_echo"] == 1
-    assert any(e.get("status") == "asr_echo" for e in events)
-
-
 # -- pipeline-start warm-up of every service (owner 2026-10-31) --------------
 
 
 def test_start_opens_both_streams_and_warms_llm_tts_in_parallel():
-    asr = SlowAsr([AsrResult("Добрий день.", "uk")], 0)
-    vosk = FakeVosk([VoskResult("добрий день", "uk", words("добрий день"))])
     streams = FakeStreams(asr={"hold": True}, vosk={"hold": True})
-    ts, vads, capture, llm, events = system(asr, vosk, streams=streams)
+    ts, streams, llm, events = system(streams=streams)
+    capture = ts._capture_factory
     assert ts.start()
     try:
         # capture runs at once: audio goes to the opening streams' rings
@@ -820,11 +771,9 @@ def test_start_opens_both_streams_and_warms_llm_tts_in_parallel():
 
 
 def test_failed_service_warm_up_is_reported_and_translation_goes_on():
-    vosk = FakeVosk([VoskResult("добрий день", "uk", words("добрий день"))])
     streams = FakeStreams(vosk={"error": "vosk: unreachable: no endpoint"})
-    asr = SlowAsr([AsrResult("Добрий день.", "uk")], 0)
-    ts, vads, capture, llm, events = system(asr, vosk, streams=streams)
-    stats = run(ts, vads, capture, [seg()], lambda: llm.calls)
+    ts, streams, llm, events = system(streams=streams)
+    stats = run(ts, streams, [("Добрий день.", None)], lambda: llm.calls)
     assert "no endpoint" in stats["warmup"]["vosk"]["error"]
     assert any(
         e.get("status") == "warmup_state" and e.get("failed") == ["vosk"]

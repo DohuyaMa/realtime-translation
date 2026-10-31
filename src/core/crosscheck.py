@@ -1,11 +1,11 @@
 """Whisper + Vosk cross-check (TASK-SYS-12): the gate and word alignment.
 
-The same segment audio is recognized by whisper (correct spelling, may
-hallucinate a whole phrase) and Vosk (never invents words, but on a small
-model is sparse and garbled). Two pieces of logic live here, both pure:
+The same audio is streamed to whisper (correct spelling, may hallucinate a
+whole phrase) and Vosk (never invents words, but on a small model is sparse
+and garbled). Two pieces of logic live here, both pure:
 
-- ``gate_reason``: the segment-level gate (code, never the LLM - it cannot
-  reliably answer "nothing"). A segment is dropped before the LLM only when
+- ``gate_reason``: the per-unit gate (code, never the LLM - it cannot
+  reliably answer "nothing"). A unit is dropped before the LLM only when
   whisper clearly hallucinated it: Vosk heard no word of >= 2 letters
   (silence/noise), or not one whisper word of >= 3 letters agrees
   (fuzzy) with a Vosk word. Any agreement keeps the WHOLE whisper text:
@@ -14,12 +14,11 @@ model is sparse and garbled). Two pieces of logic live here, both pure:
   script than the Vosk model's language (Latin «TypeScript, Docker» for a
   uk model, Cyrillic for a pl model) are not evidence either way: the
   model cannot spell them, so they never count against agreement (§12 #19
-  was dropped as ``disagree``); a segment of only such words passes
+  was dropped as ``disagree``); a unit of only such words passes
   (``foreign_terms``).
-- ``Aligned``: both transcripts placed on the stream timeline, so the
-  incomplete-sentence hold (``split_complete`` on whisper's punctuation) can
-  cut the Vosk text at the same moment: Vosk words carry their own times,
-  whisper words get times interpolated inside whisper's segments.
+- ``Aligned``: both transcripts of a unit on the stream timeline (both
+  services send word times on one scale), so a unit split into several LLM
+  requests (``words_per_request``) cuts the Vosk text at the same moment.
 """
 
 from __future__ import annotations
@@ -39,7 +38,7 @@ AGREE_MIN_LETTERS = 3
 # Vosk nano/small on espeak audio) from hallucinations (0.0) in the
 # 2026-10-31 test (context/live-test-2026-10-31.md §10)
 AGREE_WORD_SIMILARITY = 0.67
-# gate_reason values: the segment is dropped ...
+# gate_reason values: the unit is dropped ...
 GATE_NO_WORD = "no_word"
 GATE_DISAGREE = "disagree"
 GATE_DROPS = (GATE_NO_WORD, GATE_DISAGREE)
@@ -117,7 +116,7 @@ def mean_conf(vosk_words: Sequence) -> Optional[float]:
 
 
 def gate_reason(whisper: str, vosk: str, language: Optional[str]) -> str:
-    """The gate decision for one segment; dropped iff in GATE_DROPS.
+    """The gate decision for one unit; dropped iff in GATE_DROPS.
 
     Only clear hallucination is dropped: no real Vosk word (GATE_NO_WORD) or
     zero agreement (GATE_DISAGREE). Passed: GATE_AGREE, GATE_FOREIGN_TERMS
@@ -133,34 +132,6 @@ def gate_reason(whisper: str, vosk: str, language: Optional[str]) -> str:
     return GATE_FOREIGN_TERMS if long_words(whisper) else GATE_SHORT_WORDS
 
 
-def whisper_word_times(
-    text: str, segments: Sequence[dict], duration_s: float, offset_s: float
-) -> tuple[float, ...]:
-    """Estimated stream time of every word of ``text`` (whisper output).
-
-    Words are spread evenly inside the whisper segment that holds them.
-    When the segments do not cover the text word for word (no segments, or
-    whisper's repetition filter changed the joined text) the words are
-    spread over the whole audio instead - same interpolation, one segment.
-    """
-    words = text.split()
-    spans: list[tuple[float, float, int]] = []
-    for seg in segments or ():
-        try:
-            n = len(str(seg.get("text") or "").split())
-            spans.append((float(seg["start"]), float(seg["end"]), n))
-        except (KeyError, TypeError, ValueError, AttributeError):
-            spans = []
-            break
-    if sum(n for _, _, n in spans) != len(words):
-        spans = [(0.0, max(duration_s, 0.0), len(words))]
-    times: list[float] = []
-    for start, end, n in spans:
-        for i in range(n):
-            times.append(offset_s + start + (end - start) * (i + 0.5) / n)
-    return tuple(times)
-
-
 @dataclass(frozen=True)
 class Aligned:
     """Whisper word times + Vosk words with times, on the stream timeline.
@@ -173,27 +144,14 @@ class Aligned:
     check: tuple[tuple[str, float], ...]  # (Vosk word, stream time)
 
     @classmethod
-    def build(
-        cls,
-        text: str,
-        segments: Sequence[dict],
-        vosk_words: Sequence,
-        vosk_text: str,
-        duration_s: float,
-        offset_s: float,
-    ) -> "Aligned":
-        times = whisper_word_times(text, segments, duration_s, offset_s)
-        if vosk_words:
-            check = tuple(
-                (w.word, offset_s + (w.start + w.end) / 2.0) for w in vosk_words
-            )
-        else:  # a backend without word timings: spread the text evenly
-            tokens = vosk_text.split()
-            check = tuple(
-                (t, offset_s + duration_s * (i + 0.5) / len(tokens))
-                for i, t in enumerate(tokens)
-            )
-        return cls(times, check)
+    def from_words(cls, words: Sequence, vosk_words: Sequence) -> "Aligned":
+        """Whisper words of a unit and the Vosk words of its span, both with
+        stream times (``.text``/``.start``/``.end``); a word sits at its
+        middle."""
+        return cls(
+            tuple((w.start + w.end) / 2.0 for w in words),
+            tuple((v.text, (v.start + v.end) / 2.0) for v in vosk_words),
+        )
 
     @property
     def check_text(self) -> str:

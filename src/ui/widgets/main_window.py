@@ -641,6 +641,7 @@ class MainWindow(QMainWindow):
             self.status_manager.log_recognized(phrase["text"], phrase["check"])
         for text in update_data.get('pending_translated', []):
             self.status_manager.log_translated(text)
+        self.status_manager.set_tail(update_data.get('source_tail') or "")
 
         # Service status indicators
         self.service_status_panel.update_status(update_data)

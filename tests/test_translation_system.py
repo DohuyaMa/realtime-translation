@@ -1,4 +1,5 @@
-"""TranslationSystem on endpoint pools, worker-session LLM and pause segmentation."""
+"""TranslationSystem on endpoint pools, worker-session LLM and the rt-asr /
+rt-vosk WS streams (spec 2026-10-31): stream finals -> units -> LLM -> TTS."""
 
 import threading
 import time
@@ -13,24 +14,12 @@ from src.clients import (
     ServiceError,
     WorkerSessions,
 )
-from src.clients.asr import AsrResult
-from src.core.runtime import (
-    EdgeSettings,
-    LlmSettings,
-    LocalUrls,
-    SegmentationSettings,
-)
-from src.segmentation import Segment, SegmenterConfig
+from src.core.runtime import AsrRequestSettings, EdgeSettings, LlmSettings, LocalUrls
 from src.translation_system import (
     TTS_WARMUP_TEXT,
     TranslationSystem,
     default_llm_target,
 )
-
-
-def seg(seconds: float = 1.0) -> Segment:
-    audio = np.ones(int(seconds * 16000), dtype=np.int16)
-    return Segment(audio=audio, start_s=0.0, end_s=seconds, reason="pause")
 
 
 class FakeModelService:
@@ -49,19 +38,11 @@ class FakeModelService:
 
 
 class FakeAsr(FakeModelService):
-    def __init__(self, results):
-        self.results = list(results)
-        self.calls = []
-        self.warmups = 0
+    """rt-asr behind the pool: only /status and /model/load (recognition
+    goes through the stream)."""
 
-    def transcribe(self, audio, sample_rate=16000, language=None, prompt=None, **kw):
-        self.calls.append(
-            {"n": len(audio), "language": language, "prompt": prompt, **kw}
-        )
-        r = self.results.pop(0) if self.results else AsrResult("", None)
-        if isinstance(r, Exception):
-            raise r
-        return r
+    def __init__(self, results=()):
+        self.calls = []
 
 
 class FakeStream:
@@ -80,6 +61,7 @@ class FakeStream:
         error=None,
     ):
         self.kind, self.pool, self.language = kind, pool, language
+        self.prompt = prompt
         self.on_event = on_event
         self.hold, self.error = hold, error
         self.fed = 0
@@ -115,6 +97,9 @@ class FakeStream:
 
     def close(self):
         self.stopped = True
+
+    def audio(self, t0, t1):
+        return np.zeros(int((t1 - t0) * 16000), dtype=np.int16)
 
     def stats(self):
         return {"url": self.pool.url, "state": "open"}
@@ -185,16 +170,17 @@ class FakeLlm:
         self.errors = list(errors)
         self.calls = []
 
-    def translate(self, text, source_lang, context=(), check=None):
+    def translate(self, text, source_lang, context=(), check=None, next_text=""):
         self.calls.append((text, source_lang, list(context)))
+        self.nexts = getattr(self, "nexts", []) + [next_text]
         if self.errors:
             err = self.errors.pop(0)
             if err is not None:
                 raise err
         return f"EN({text})"
 
-    def translate_stream(self, text, source_lang, context=(), check=None):
-        yield self.translate(text, source_lang, context)
+    def translate_stream(self, text, source_lang, context=(), check=None, next_text=""):
+        yield self.translate(text, source_lang, context, check, next_text)
 
     base_url = "http://llm"
 
@@ -237,36 +223,6 @@ class FakeKeeper(WorkerSessions):
 
     def invalidate(self, kind):
         pass
-
-
-class FakeVad:
-    def __init__(self, cfg):
-        self.cfg = cfg
-        self.pending = []
-        self.flush_segments = []
-        self.reconfigured = []
-        self.blocks = 0
-
-    def feed_block(self, block):
-        self.blocks += 1
-        out, self.pending = self.pending, []
-        return out
-
-    def flush(self):
-        out, self.flush_segments = self.flush_segments, []
-        return out
-
-    def reconfigure(self, cfg):
-        self.reconfigured.append(cfg)
-        self.cfg = cfg
-
-    def last_level(self):
-        return 0.1
-
-    def in_speech(self):
-        return self.speaking
-
-    speaking = False
 
 
 class FakeCapture:
@@ -315,34 +271,56 @@ def translate_settings(**kw):
     return EdgeSettings(mode="translate", local=local, llm=llm, **kw)
 
 
-def make(settings, asr_results=(), target=None, llm=None, tts=True):
-    asr = FakeAsr(asr_results)
+def final(text, start=0.0, step=0.3, eos=True, language="uk", seq=1):
+    """A stream final: the words of text from start, step s each."""
+    words = [
+        {
+            "word": w,
+            "start": round(start + i * step, 3),
+            "end": round(start + (i + 1) * step, 3),
+            "conf": 0.9,
+        }
+        for i, w in enumerate(text.split())
+    ]
+    end = words[-1]["end"] if words else start
+    return {
+        "type": "final",
+        "seq": seq,
+        "text": text,
+        "words": words,
+        "start": start,
+        "end": end,
+        "eos": eos,
+        "language": language,
+        "audio_end": end + 0.6,
+    }
+
+
+def say(streams, text, start=0.0, kind="asr", **kw):
+    streams[kind].emit(final(text, start, **kw))
+
+
+def make(settings, target=None, llm=None, tts=True, streams=None):
+    asr = FakeAsr()
     tts_client = FakeTts() if tts else None
     pools = FakePools(asr, tts_client)
-    vads = []
     capture = FakeCapture()
     sink = Sink()
     events = []
     llm = llm or FakeLlm()
-
-    def vad_factory(cfg):
-        v = FakeVad(cfg)
-        vads.append(v)
-        return v
-
+    streams = streams or FakeStreams()
     ts = TranslationSystem(
         settings,
         directory_factory=lambda s: Directory(),
         pools_factory=lambda s, d: pools,
         llm_target_factory=lambda s, d: target or StaticTarget("http://llm"),
-        vad_stream_factory=vad_factory,
         llm_factory=lambda t, s: llm,
         capture_factory=capture,
         playback_sink=sink,
-        stream_factory=FakeStreams(),
+        stream_factory=streams,
     )
     ts.set_status_callback(events.append)
-    return ts, pools, llm, vads, capture, sink, events
+    return ts, pools, llm, streams, capture, sink, events
 
 
 def wait_for(pred, timeout=3.0):
@@ -354,30 +332,26 @@ def wait_for(pred, timeout=3.0):
     return False
 
 
-def feed(ts, vads, capture, *segments):
-    vads[-1].pending.extend(segments)
-    capture.push()
+def test_translate_flow_stream_units_llm_tts_and_playback():
+    from src.core.runtime import TtsRequestSettings
 
-
-def test_translate_flow_calls_asr_llm_tts_and_playback():
-    from src.core.runtime import AsrRequestSettings, TtsRequestSettings
-
-    ts, pools, llm, vads, capture, sink, events = make(
+    ts, pools, llm, streams, capture, sink, events = make(
         translate_settings(
             tts=TtsRequestSettings(voice="am_adam", speed=1.1),
             asr=AsrRequestSettings(prompt="NixOS"),
         ),
-        [AsrResult("cześć", "pl")],
     )
     assert ts.start() is True
     try:
-        feed(ts, vads, capture, seg())
+        capture.push()
+        assert wait_for(lambda: streams["asr"].fed == 342)  # 1024 at 48 kHz
+        say(streams, "cześć", language="pl")
         assert wait_for(lambda: sink.played)
     finally:
         ts.stop()
-    call = pools.asr.client.calls[0]
-    assert call["language"] is None and call["priority"] == "realtime"
-    assert call["prompt"] == "NixOS"  # user prompt, no recognized context yet
+    asr = streams["asr"]
+    assert asr.language is None and asr.prompt == "NixOS" and asr.stopped
+    assert [s.kind for s in streams.opened] == ["asr"]  # no rt-vosk configured
     assert llm.calls == [("cześć", "pl", [])]
     assert pools.tts.client.calls == [("EN(cześć)", "am_adam", 1.1)]
     assert sink.played == [(240, 24000)]
@@ -388,6 +362,7 @@ def test_translate_flow_calls_asr_llm_tts_and_playback():
     } in events
     stats = ts.get_stats()
     assert stats["llm_requests"] == 1 and stats["llm_errors"] == 0
+    assert stats["units_processed"] == 1 and stats["detected_language"] == "pl"
     assert stats["active"] == {
         "asr": {"url": "http://asr"},
         "vosk": None,
@@ -396,6 +371,40 @@ def test_translate_flow_calls_asr_llm_tts_and_playback():
     assert stats["discovery"] == "none"
     assert stats["use"] == {"llm": None, "asr": None, "tts": None, "vosk": None}
     assert {c["url"] for c in stats["choices"]["tts"]} == {"http://tts"}
+    assert stats["latency"]["e2e_ms"]["n"] == 1
+
+
+def test_units_follow_sentence_ends_and_next_carries_the_rest():
+    ts, _, llm, streams, capture, sink, _ = make(
+        translate_settings(source_language="uk")
+    )
+    ts.start()
+    try:
+        # one final with a sentence end inside: the first sentence goes at
+        # once with the rest (committed + partial) as NEXT
+        streams["asr"].emit({"type": "partial", "text": "dalsze słowa", "start": 2.0})
+        say(streams, "Pierwsze zdanie. drugie bez", eos=False)
+        assert wait_for(lambda: len(sink.played) == 1)
+        assert ts.get_stats()["source_tail"] == "drugie bez dalsze słowa"
+        streams["asr"].emit({"type": "endpoint", "at": 1.5})
+        assert wait_for(lambda: len(sink.played) == 2)
+    finally:
+        ts.stop()
+    assert [c[0] for c in llm.calls] == ["Pierwsze zdanie.", "drugie bez"]
+    assert llm.nexts == ["drugie bez dalsze słowa", ""]
+    assert ts.get_stats()["source_tail"] == ""
+
+
+def test_stop_translates_the_uncommitted_rest():
+    ts, _, llm, streams, capture, sink, _ = make(
+        translate_settings(source_language="uk")
+    )
+    ts.start()
+    say(streams, "słowa bez końca", eos=False)
+    time.sleep(0.1)
+    assert llm.calls == []
+    ts.stop()
+    assert [c[0] for c in llm.calls] == ["słowa bez końca"] and sink.played
 
 
 def test_translate_start_opens_session_and_stop_closes():
@@ -413,21 +422,22 @@ def test_translate_start_opens_session_and_stop_closes():
 
 def test_translate_start_fails_cleanly_without_worker():
     keeper = FakeKeeper(ServiceError("llm", "unreachable", "no llm worker available"))
-    ts, _, _, _, capture, _, _ = make(translate_settings(), target=keeper)
+    ts, _, _, streams, capture, _, _ = make(translate_settings(), target=keeper)
     assert ts.start() is False
     assert ts.last_error.startswith("llm:")
     assert ts.is_running is False
     assert capture.on_block is None  # capture never opened
+    assert streams.opened == []
 
 
 def test_llm_context_carries_previous_pairs():
-    ts, _, llm, vads, capture, sink, _ = make(
-        translate_settings(source_language="uk"),
-        [AsrResult("odyn.", "uk"), AsrResult("dva.", "uk")],
+    ts, _, llm, streams, capture, sink, _ = make(
+        translate_settings(source_language="uk")
     )
     ts.start()
     try:
-        feed(ts, vads, capture, seg(), seg())
+        say(streams, "odyn.")
+        say(streams, "dva.", start=1.0)
         assert wait_for(lambda: len(sink.played) == 2)
     finally:
         ts.stop()
@@ -435,98 +445,74 @@ def test_llm_context_carries_previous_pairs():
     assert llm.calls[1] == ("dva.", "uk", [("odyn.", "EN(odyn.)")])
 
 
-def test_transcribe_mode_uses_batch_priority_scaled_timeout_and_no_session():
+def test_transcribe_mode_lines_from_the_stream_and_no_session():
     keeper = FakeKeeper()
     settings = EdgeSettings(mode="transcribe", local=LocalUrls(llm="http://l"))
-    ts, pools, llm, vads, capture, sink, events = make(
-        settings, [AsrResult("довгий текст", "uk")], target=keeper
-    )
+    ts, pools, llm, streams, capture, sink, events = make(settings, target=keeper)
     assert ts.start() is True
     try:
-        feed(ts, vads, capture, seg(120.0))
+        say(streams, "Довгий текст. і далі", eos=False)
         assert wait_for(lambda: _phrase_events(events))
     finally:
         ts.stop()
-    call = pools.asr.client.calls[0]
-    assert call["priority"] == "batch" and call["timeout_s"] == 120.0
     assert keeper.events == []
+    assert [s.kind for s in streams.opened] == ["asr"]
     assert llm.calls == [] and pools.tts.client.calls == [] and sink.played == []
-    assert vads[0].cfg == settings.segmentation.transcribe
-    assert _phrase_events(events) == [
-        {"status": "transcription_complete", "original_text": "довгий текст"}
-    ]
-
-
-def test_stop_flushes_and_drains_transcribe_chunk():
-    settings = EdgeSettings(mode="transcribe")
-    ts, pools, _, vads, capture, _, events = make(
-        settings, [AsrResult("середина"), AsrResult("кінець")]
-    )
-    gate = threading.Event()
-    asr = pools.asr.client
-    original = asr.transcribe
-
-    def slow(*a, **kw):
-        gate.wait(0.3)
-        return original(*a, **kw)
-
-    asr.transcribe = slow
-    ts.start()
-    vads[0].flush_segments = [seg(300.0), seg(30.0)]
-    ts.stop()
-    assert [c["n"] for c in asr.calls] == [300 * 16000, 30 * 16000]
-    assert [c["timeout_s"] for c in asr.calls] == [300.0, 60.0]
     assert [e["original_text"] for e in _phrase_events(events)] == [
-        "середина",
-        "кінець",
+        "Довгий текст.",
+        "і далі",  # stop: the rest is one more line
     ]
 
 
-def test_service_error_skips_phrase_and_continues():
+def test_service_error_skips_unit_and_continues():
     llm = FakeLlm(errors=[ServiceError("llm", "http", "HTTP 500"), None])
-    ts, _, llm, vads, capture, sink, events = make(
-        translate_settings(),
-        [AsrResult("raz.", "uk"), AsrResult("dva.", "uk")],
-        llm=llm,
-    )
+    ts, _, llm, streams, capture, sink, events = make(translate_settings(), llm=llm)
     ts.start()
     try:
-        feed(ts, vads, capture, seg(), seg())
+        say(streams, "raz.")
+        say(streams, "dva.", start=1.0)
         assert wait_for(lambda: len(sink.played) == 1)
     finally:
         ts.stop()
     assert ts.last_error == "llm: http"
     assert [c[0] for c in llm.calls] == ["raz.", "dva."]
-    assert llm.calls[1][2] == []  # failed phrase not added to context
+    assert llm.calls[1][2] == []  # failed unit not added to context
     assert any(e["status"] == "error" for e in events)
     stats = ts.get_stats()
     assert stats["llm_errors"] == 1 and stats["llm_requests"] == 2
 
 
-def test_apply_settings_reconfigures_segmenter_live():
-    settings = translate_settings()
-    ts, pools, _, vads, _, _, _ = make(settings)
+def test_asr_stream_loss_is_visible():
+    ts, _, _, streams, _, _, events = make(translate_settings())
     ts.start()
     try:
-        new_cfg = SegmenterConfig(end_silence_ms=500)
-        new = EdgeSettings(
-            mode=settings.mode,
-            local=settings.local,
-            llm=settings.llm,
-            source_language="pl",
-            segmentation=SegmentationSettings(translate=new_cfg),
+        streams["asr"].emit({"type": "down", "url": "http://asr", "error": "closed"})
+        assert wait_for(lambda: ts.last_error == "asr: closed")
+    finally:
+        ts.stop()
+    assert any(e.get("service") == "asr" and e["status"] == "error" for e in events)
+
+
+def test_apply_settings_live_llm_change_keeps_streams():
+    settings = translate_settings()
+    ts, _, _, streams, _, _, _ = make(settings)
+    ts.start()
+    try:
+        ts.apply_settings(
+            EdgeSettings(
+                mode=settings.mode,
+                local=settings.local,
+                llm=LlmSettings(context_pairs=3, temperature=0.5),
+            )
         )
-        ts.apply_settings(new)
-        assert vads[0].reconfigured == [new_cfg]
-        assert len(vads) == 1 and ts.is_running  # no restart
-        assert ts.settings.source_language == "pl"
+        assert len(streams.opened) == 1 and ts.is_running  # no restart
     finally:
         ts.stop()
 
 
-def test_apply_settings_restarts_when_urls_change():
+def test_apply_settings_restarts_when_urls_or_language_change():
     settings = translate_settings()
-    ts, _, _, vads, _, _, _ = make(settings)
+    ts, _, _, streams, _, _, _ = make(settings)
     ts.start()
     try:
         ts.apply_settings(
@@ -536,7 +522,17 @@ def test_apply_settings_restarts_when_urls_change():
                 llm=settings.llm,
             )
         )
-        assert len(vads) == 2 and ts.is_running
+        assert len(streams.opened) == 2 and ts.is_running
+        # the stream gets its language at the start
+        ts.apply_settings(
+            EdgeSettings(
+                mode="translate",
+                local=LocalUrls(asr="http://other", llm="http://llm", tts="http://tts"),
+                llm=settings.llm,
+                source_language="uk",
+            )
+        )
+        assert len(streams.opened) == 3 and streams["asr"].language == "uk"
     finally:
         ts.stop()
 
@@ -565,14 +561,6 @@ def test_default_llm_target_from_local_and_discovery():
     assert Endpoint and Credential  # re-exported
 
 
-def test_translate_queue_drops_oldest_segments():
-    ts, _, _, _, _, _, _ = make(translate_settings())
-    for i in range(7):
-        ts._enqueue_segment(seg(i + 1))
-    assert ts._chunk_queue.qsize() == 5
-    assert len(ts._chunk_queue.queue[0].segment.audio) == 3 * 16000
-
-
 def test_capture_failure_aborts_start_and_closes_session():
     keeper = FakeKeeper()
     ts, _, _, _, capture, _, events = make(translate_settings(), target=keeper)
@@ -588,13 +576,13 @@ def test_capture_failure_aborts_start_and_closes_session():
 
 def test_llm_context_evicts_beyond_context_pairs():
     texts = ["a.", "b.", "c.", "d.", "e."]
-    ts, _, llm, vads, capture, sink, _ = make(
-        translate_settings(source_language="uk"),
-        [AsrResult(t, "uk") for t in texts],
+    ts, _, llm, streams, capture, sink, _ = make(
+        translate_settings(source_language="uk")
     )
     ts.start()
     try:
-        feed(ts, vads, capture, *[seg() for _ in texts])
+        for i, t in enumerate(texts):
+            say(streams, t, start=float(i))
         assert wait_for(lambda: len(sink.played) == 5)
     finally:
         ts.stop()
@@ -603,31 +591,28 @@ def test_llm_context_evicts_beyond_context_pairs():
     assert llm.calls[4][2] == pairs[1:4]
 
 
-def test_start_clears_prompt_and_translation_context():
-    ts, pools, llm, vads, capture, sink, _ = make(
-        translate_settings(source_language="uk"),
-        [AsrResult("odyn.", "uk"), AsrResult("dva.", "uk")],
+def test_start_clears_ledger_and_translation_context():
+    ts, pools, llm, streams, capture, sink, _ = make(
+        translate_settings(source_language="uk")
     )
-    for _ in range(2):
+    for text in ("odyn.", "dva."):
         ts.start()
         try:
-            feed(ts, vads, capture, seg())
+            say(streams, text)
             assert wait_for(lambda: len(sink.played) == 1)
         finally:
             ts.stop()
         sink.played.clear()
     assert llm.calls[1] == ("dva.", "uk", [])
-    assert pools.asr.client.calls[1]["prompt"] is None
+    assert len(streams.opened) == 2
 
 
 def test_unsupported_language_sets_llm_language_error():
     llm = FakeLlm(errors=[ValueError("unsupported source language 'de'")])
-    ts, _, _, vads, capture, sink, events = make(
-        translate_settings(), [AsrResult("hallo", "de")], llm=llm
-    )
+    ts, _, _, streams, capture, sink, events = make(translate_settings(), llm=llm)
     ts.start()
     try:
-        feed(ts, vads, capture, seg())
+        say(streams, "hallo", language="de")
         assert wait_for(lambda: ts.last_error is not None)
     finally:
         ts.stop()

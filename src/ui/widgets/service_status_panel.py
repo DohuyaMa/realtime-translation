@@ -126,15 +126,12 @@ PIPELINE_COUNTERS = {
     "llm_rejected": "відкинуто LLM-відповідей (не переклад)",
     "asr_no_words": "ASR без слів",
     "pipeline_errors": "помилок сервісів",
-    "dropped_segments": "відкинуто фраз",
     "playback_short": "відтворень, коротших за аудіо",
-    "asr_merged": "незавершених фраз склеєно з наступними",
-    "asr_held_flushed": "незавершених фраз надіслано окремо",
-    "asr_echo": "відкинуто повторів попереднього тексту (ехо prompt whisper)",
     "vosk_gate_dropped": "відкинуто як галюцинацію whisper (звірка Vosk)",
     "vosk_gate_disagree": "з них: whisper не збігся з Vosk",
     "vosk_gate_foreign_terms": "пропущено звіркою: лише іноземні терміни",
     "vosk_whisper_only": "без звірки Vosk (недоступний)",
+    "vosk_late": "без звірки Vosk (не встиг за 300 мс)",
 }
 
 
@@ -149,7 +146,7 @@ def format_vosk_mode(vosk: Optional[Dict]) -> str:
 
 
 def format_pipeline_stats(status: Dict) -> str:
-    """Last phrase's per-stage latency, queue depths, backpressure and
+    """Last unit's per-stage latency, queue depths, backpressure and
     problem counters (rejected translations, ASR output without words...)."""
     t = status.get("timing") or {}
     parts = []
@@ -160,7 +157,8 @@ def format_pipeline_stats(status: Dict) -> str:
             return "-" if v is None else f"{v:.0f}"
 
         parts.append(
-            f"Фраза #{t.get('seq')}: ASR {ms('asr_ms')} мс · LLM {ms('llm_ms')} мс"
+            f"Одиниця #{t.get('seq')}: фіксація {ms('commit_ms')} мс ·"
+            f" LLM {ms('llm_ms')} мс"
             f" (усього {ms('llm_total_ms')}) · TTS {ms('tts_ms')} мс ·"
             f" кінець мовлення → звук {ms('e2e_ms')} мс"
         )

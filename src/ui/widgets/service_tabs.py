@@ -49,7 +49,6 @@ from ...core.prompt import (
     template_errors,
 )
 from ...clients.model_status import ModelStatus, parse_status
-from ...translation_system import PREVIOUS_WORDS_MAX
 from .model_state import (
     ERROR_STYLE,
     format_dropped,
@@ -57,6 +56,9 @@ from .model_state import (
     format_model_html,
 )
 from ...core.runtime import OFF, EdgeSettings
+
+# upper bound of «Слів у {{previous_text}}»
+PREVIOUS_WORDS_MAX = 1000
 
 PREVIEW_SAMPLE = (
     "Dzień dobry wszystkim. Dzisiaj omówimy wdrożenie klastra NixOS i"

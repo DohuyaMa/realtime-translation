@@ -88,7 +88,7 @@ def test_llm_request_body():
         "assistant",
         "user",
     ]
-    assert b["messages"][-1]["content"] == "привіт світе"
+    assert b["messages"][-1]["content"] == "TEXT: привіт світе"
     assert b["chat_template_kwargs"] == {"enable_thinking": False}
     assert (
         b["max_tokens"] == 32 + 3 * 2
