@@ -238,20 +238,18 @@ class UIController:
             logger.error(f"Error getting output devices: {e}")
             return []
     
-    def set_input_device(self, device_id: str) -> bool:
-        """Set the input device."""
-        result = self._controller.set_input_device(device_id)
-        if result and self._status_callback:
-            self._status_callback(f'Input device set to: {device_id}')
-        return result
-    
-    def set_output_device(self, device_id: str) -> bool:
-        """Set the output device."""
-        result = self._controller.set_output_device(device_id)
-        if result and self._status_callback:
-            self._status_callback(f'Output device set to: {device_id}')
-        return result
-    
+    def set_input_device(self, device_id: Optional[str]) -> bool:
+        """Source the app records (None = default); never the system mic."""
+        return self._controller.set_input_device(device_id)
+
+    def set_output_device(self, device_id: Optional[str]) -> bool:
+        """Sink the translation is played into (None = default)."""
+        return self._controller.set_output_device(device_id)
+
+    def set_monitor_device(self, device_id: Optional[str]) -> bool:
+        """Second sink for the translation (headphones); None = off."""
+        return self._controller.set_monitor_device(device_id)
+
     def get_audio_levels(self) -> Dict[str, float]:
         """Get current audio levels."""
         return self._controller.get_audio_levels()

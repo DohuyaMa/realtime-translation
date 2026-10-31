@@ -70,6 +70,10 @@ class TranslatorController(Protocol):
         """Set the output device."""
         ...
 
+    def set_monitor_device(self, device_id: Optional[str]) -> bool:
+        """Second sink for the translation (headphones); None = off."""
+        ...
+
     def get_audio_levels(self) -> Dict[str, float]:
         """Get current audio input/output levels."""
         ...

@@ -1,4 +1,5 @@
 """Configuration management for the real-time translation system."""
+import copy
 import os
 import yaml
 from typing import Dict, Any, Optional
@@ -26,6 +27,11 @@ class ConfigManager:
         # Default configuration
         self._default_config = {
             'audio': {
+                # device choices (pactl names; None = system default / off)
+                'input_device': None,
+                'output_device': None,
+                'monitor_enabled': False,
+                'monitor_device': None,
                 'sample_rate': 16000,
                 'chunk_size': 1024,
                 'use_virtual_devices': True
@@ -55,13 +61,14 @@ class ConfigManager:
                 return config
             except Exception as e:
                 logger.error(f"Error loading config file, using defaults: {e}")
-                return self._default_config.copy()
+                return copy.deepcopy(self._default_config)
         else:
-            return self._default_config.copy()
+            return copy.deepcopy(self._default_config)
     
     def _merge_config(self, default: Dict, override: Dict) -> Dict:
         """Recursively merge two configuration dictionaries."""
-        result = default.copy()
+        # deep: set() must never mutate the defaults save() compares to
+        result = copy.deepcopy(default)
         
         for key, value in override.items():
             if key in result and isinstance(result[key], dict) and isinstance(value, dict):
@@ -152,7 +159,7 @@ class ConfigManager:
     
     def reset_to_defaults(self):
         """Reset configuration to default values."""
-        self._config = self._default_config.copy()
+        self._config = copy.deepcopy(self._default_config)
         self.save()
     
     def get_wyoming_config(self) -> Dict[str, Any]:

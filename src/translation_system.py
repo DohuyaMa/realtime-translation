@@ -30,7 +30,7 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Sequence
 
 import numpy as np
 from loguru import logger
@@ -65,6 +65,8 @@ PREVIOUS_WORDS_MAX = 1000
 # sources of at most this many words are translated whole before TTS gets
 # anything (see _translate)
 SHORT_SOURCE_WORDS = 3
+# an unknown capture source makes parec exit within this time
+CAPTURE_START_CHECK_S = 0.2
 # how often the ASR stage re-checks a held incomplete text
 HOLD_POLL_S = 0.05
 # playback that returns this much earlier than its audio lasts is reported
@@ -128,41 +130,81 @@ def _default_vad_stream(cfg: SegmenterConfig) -> VadStream:
     return VadStream(make_vad(), cfg)
 
 
-class _SoundDeviceCapture:
-    """48 kHz mono float32 microphone stream (sounddevice)."""
+class PulseCapture:
+    """48 kHz mono float32 capture from the PipeWire/Pulse source named
+    ``source`` (``pactl list sources`` name; None = the default source) via
+    ``parec``. Recording a named source directly - instead of switching the
+    system default mic - leaves every other app's microphone alone."""
 
-    def __init__(self, on_block: Callable[[np.ndarray], None], device=None) -> None:
-        import sounddevice as sd
+    def __init__(
+        self, on_block: Callable[[np.ndarray], None], source: Optional[str] = None
+    ) -> None:
+        self._on_block = on_block
+        self.source = source
+        self._proc: Optional[subprocess.Popen] = None
+        self._thread: Optional[threading.Thread] = None
+        self._stopping = False
 
-        def _cb(indata, frames, cb_time, status):
-            if status:
-                logger.debug("sounddevice input status: {}", status)
-            on_block(indata[:, 0].copy())
-
-        self._stream = sd.InputStream(
-            samplerate=CAPTURE_RATE,
-            channels=1,
-            dtype="float32",
-            blocksize=BLOCKSIZE,
-            callback=_cb,
-            device=device,
-        )
+    def _where(self) -> str:
+        return self.source or "the default source"
 
     def start(self) -> None:
-        self._stream.start()
+        args = [
+            "parec",
+            "--raw",
+            "--format=float32le",
+            "--channels=1",
+            f"--rate={CAPTURE_RATE}",
+            f"--latency-msec={int(BLOCKSIZE * 1000 / CAPTURE_RATE)}",
+            "--client-name=real-time-translator",
+            "--stream-name=Захоплення",
+        ]
+        if self.source:
+            args.append(f"--device={self.source}")
+        self._proc = subprocess.Popen(
+            args, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        )
+        try:  # an unknown source makes parec exit at once
+            code = self._proc.wait(timeout=CAPTURE_START_CHECK_S)
+        except subprocess.TimeoutExpired:
+            code = None
+        if code is not None:
+            err = self._proc.stderr.read().decode(errors="replace").strip()
+            raise RuntimeError(
+                f"parec from {self._where()} failed (exit {code}): {err}"
+            )
+        self._thread = threading.Thread(target=self._read, daemon=True, name="rt-parec")
+        self._thread.start()
+
+    def _read(self) -> None:
+        proc = self._proc
+        size = BLOCKSIZE * 4
+        while True:
+            data = proc.stdout.read(size)
+            if len(data) < size:
+                break
+            self._on_block(np.frombuffer(data, dtype=np.float32).copy())
+        if not self._stopping:
+            err = proc.stderr.read().decode(errors="replace").strip()
+            logger.error(
+                "capture from {} ended unexpectedly (exit {}): {}",
+                self._where(),
+                proc.poll(),
+                err,
+            )
 
     def stop(self) -> None:
-        self._stream.stop()
+        self._stopping = True
+        if self._proc is not None and self._proc.poll() is None:
+            self._proc.terminate()
+            self._proc.wait(timeout=5.0)
 
     def close(self) -> None:
-        self._stream.close()
+        if self._thread is not None:
+            self._thread.join(timeout=2.0)
 
 
-def play_to_sink(audio: np.ndarray, sample_rate: int, sink: Optional[str]) -> None:
-    """Play mono float32 audio into the PipeWire/Pulse sink named ``sink``
-    (``pactl list sinks`` name, e.g. ``rt_virtual_output``; None = the
-    default sink); returns once it has been played. PortAudio cannot address
-    a PipeWire node by name, so this goes through ``pacat``."""
+def _pacat_args(sample_rate: int, sink: Optional[str]) -> List[str]:
     args = [
         "pacat",
         "--playback",
@@ -175,26 +217,51 @@ def play_to_sink(audio: np.ndarray, sample_rate: int, sink: Optional[str]) -> No
     ]
     if sink:
         args.append(f"--device={sink}")
+    return args
+
+
+def play_to_sinks(
+    audio: np.ndarray, sample_rate: int, sinks: Sequence[Optional[str]]
+) -> None:
+    """Play mono float32 audio into the PipeWire/Pulse sinks named in
+    ``sinks`` (``pactl list sinks`` names, e.g. ``rt_virtual_output``; None =
+    the default sink) at the same time - one ``pacat`` per sink, all started
+    together; returns once every sink has played it. PortAudio cannot address
+    a PipeWire node by name, so this goes through ``pacat``."""
     data = np.ascontiguousarray(audio, dtype=np.float32).tobytes()
-    proc = subprocess.run(args, input=data, capture_output=True)
-    if proc.returncode != 0:
-        err = proc.stderr.decode(errors="replace").strip()
-        raise RuntimeError(
-            f"pacat to {sink or 'the default sink'} failed"
-            f" (exit {proc.returncode}): {err}"
+    procs = [
+        (
+            sink,
+            subprocess.Popen(
+                _pacat_args(sample_rate, sink),
+                stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+            ),
         )
+        for sink in sinks
+    ]
+    results: Dict[int, bytes] = {}
 
+    def feed(i: int, proc: subprocess.Popen) -> None:
+        results[i] = proc.communicate(data)[1]
 
-def _find_device(name: Optional[str], kind: str) -> Optional[int]:
-    if not name:
-        return None
-    import sounddevice as sd
-
-    for d in sd.query_devices():
-        if d[f"max_{kind}_channels"] > 0 and d["name"] == name:
-            return d["index"]
-    logger.warning("preferred {} device {!r} not found", kind, name)
-    return None
+    threads = [
+        threading.Thread(target=feed, args=(i, proc), daemon=True)
+        for i, (_, proc) in enumerate(procs)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    errors = [
+        f"pacat to {sink or 'the default sink'} failed (exit {proc.returncode}):"
+        f" {results.get(i, b'').decode(errors='replace').strip()}"
+        for i, (sink, proc) in enumerate(procs)
+        if proc.returncode != 0
+    ]
+    if errors:
+        raise RuntimeError("; ".join(errors))
 
 
 class TranslationSystem:
@@ -226,6 +293,9 @@ class TranslationSystem:
 
         self.input_device_name: Optional[str] = None
         self.output_device_name: Optional[str] = None
+        # «Також чути в навушниках»: a second sink, played in sync (None = off)
+        self.monitor_device_name: Optional[str] = None
+        self._capture_lock = threading.Lock()
         self.status_callback: Optional[Callable[[Dict], None]] = None
         self.last_error: Optional[str] = None
         self.is_running = False
@@ -320,21 +390,53 @@ class TranslationSystem:
         return getattr(settings.segmentation, settings.effective_mode())
 
     def _default_capture(self, on_block):
-        return _SoundDeviceCapture(
-            on_block, _find_device(self.input_device_name, "input")
-        )
+        return PulseCapture(on_block, self.input_device_name)
 
     def _default_sink(self, audio: np.ndarray, sample_rate: int) -> None:
-        play_to_sink(audio, sample_rate, self.output_device_name)
+        sinks = [self.output_device_name]
+        if self.monitor_device_name is not None:
+            sinks.append(self.monitor_device_name)
+        play_to_sinks(audio, sample_rate, sinks)
 
     # -- public controls ----------------------------------------------------
 
     def set_status_callback(self, cb: Optional[Callable[[Dict], None]]) -> None:
         self.status_callback = cb
 
-    def set_devices(self, input_name: Optional[str], output_name: Optional[str]):
-        self.input_device_name = input_name
+    def set_devices(
+        self,
+        input_name: Optional[str],
+        output_name: Optional[str],
+        monitor_name: Optional[str] = None,
+    ) -> None:
+        """Capture source, playback sink and the optional monitor sink
+        (pactl names; None = default source/sink, monitor off). A new
+        source while capturing switches the capture at once; a failure
+        raises and keeps the old one."""
+        old_input = self.input_device_name
         self.output_device_name = output_name
+        self.monitor_device_name = monitor_name
+        if input_name == old_input:
+            return
+        self.input_device_name = input_name
+        if self._capturing:
+            try:
+                self._switch_capture()
+            except Exception:
+                self.input_device_name = old_input
+                raise
+
+    def _switch_capture(self) -> None:
+        new = self._capture_factory(self._on_block)
+        new.start()
+        with self._capture_lock:
+            old, self._stream = self._stream, new
+        logger.info("capture switched to {}", self.input_device_name or "default")
+        for op in ("stop", "close"):
+            try:
+                getattr(old, op)()
+            except Exception as e:
+                logger.warning("closing the previous capture ({}) failed: {}", op, e)
 
     def _emit(self, event: Dict) -> None:
         if self.status_callback:
@@ -575,7 +677,6 @@ class TranslationSystem:
         self._audio_q.put(block)
 
     def _pipeline_loop(self) -> None:
-        stream, self._stream = self._stream, None
         try:
             while self._capturing:
                 try:
@@ -583,6 +684,8 @@ class TranslationSystem:
                 except queue.Empty:
                     continue
         finally:
+            with self._capture_lock:
+                stream, self._stream = self._stream, None
             for op in ("stop", "close"):
                 try:
                     getattr(stream, op)()

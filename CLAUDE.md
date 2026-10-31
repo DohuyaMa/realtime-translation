@@ -39,7 +39,7 @@ Modes (`services.mode`): `transcribe` (long chunks, ASR only), `translate` (phra
 | `src/translation_system.py`, `src/adapters/`, `src/controller/` | Edge pipeline, adapter and controller on top of clients |
 | `src/core/runtime.py` | `EdgeSettings`: `RT_EDGE_*` env > `config.yml` > defaults |
 | `src/core/config.py` | `ConfigManager`: `~/.config/real-time-translator/config.yml` (keys: `config/default.yml`) |
-| `src/core/preflight/pipewire.py`, `src/audio/` | PipeWire virtual device check and routing (`pactl`); playback goes to the chosen sink via `pacat` (`translation_system.play_to_sink`) |
+| `src/core/preflight/pipewire.py`, `src/audio/` | PipeWire virtual device check and routing (`pactl`); capture records the chosen source via `parec` (`PulseCapture`), playback goes to the chosen sink(s) via `pacat` (`play_to_sinks`); system defaults are never changed |
 | `src/ui/` | PySide6 widgets and Qt controller: settings dialog (`settings_dialog.py`: allow-list + per-kind instance choice `services.use`; `service_tabs.py`: ASR/LLM/TTS tabs - per-user prompts/voice in config.yml, per-node tuning via `/config` + `/v1/models`), status panel with the instance chooser; kill switch (`DirectAdapter.standby/resume`) and the drawn tray icon (`widgets/tray_icon.py`) |
 
 ### Ports

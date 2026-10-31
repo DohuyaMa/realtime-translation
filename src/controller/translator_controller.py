@@ -69,6 +69,10 @@ class ConcreteTranslatorController(TranslatorController):
         """Set the output device."""
         return self._adapter.set_output_device(device_id)
 
+    def set_monitor_device(self, device_id) -> bool:
+        """Second sink for the translation (headphones); None = off."""
+        return self._adapter.set_monitor_device(device_id)
+
     def get_audio_levels(self) -> Dict[str, float]:
         """Get current audio input/output levels."""
         return self._adapter.get_audio_levels()

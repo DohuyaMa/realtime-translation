@@ -53,8 +53,10 @@ class FakeTS:
     def get_stats(self):
         return {"running": self.started, "session": {"node": "w"}}
 
-    def set_devices(self, i, o):
-        self.devices = (i, o)
+    def set_devices(self, i, o, m=None):
+        if i == "broken":
+            raise RuntimeError("parec from broken failed (exit 1): No such entity")
+        self.devices = (i, o, m)
 
     def cleanup(self):
         self.cleaned = True
@@ -78,12 +80,6 @@ class FakeMonitor:
 class FakeRouter:
     def __init__(self):
         self.calls = []
-
-    def set_default_source(self, n):
-        self.calls.append(("src", n))
-
-    def set_default_sink(self, n):
-        self.calls.append(("sink", n))
 
     def list_devices(self):
         return {"inputs": [{"name": "m", "description": "Mic"}], "outputs": []}
@@ -182,8 +178,9 @@ def test_devices():
     ts = FakeTS.instances[-1]
     assert [d.name for d in a.get_input_devices()] == ["m"]
     assert a.set_input_device("m") and a.set_output_device("o")
-    assert ts.devices == ("m", "o")
-    assert ("src", "m") in a.audio_router.calls
+    assert a.set_monitor_device("phones")
+    assert ts.devices == ("m", "o", "phones")
+    assert a.set_monitor_device(None) and ts.devices == ("m", "o", None)
 
 
 def test_no_service_management_left():
@@ -407,10 +404,20 @@ def test_standby_failure_in_one_step_still_runs_the_rest():
     assert a.last_error == "worker session: worker gone"
 
 
-def test_output_device_never_changes_system_default_sink():
+def test_devices_never_change_system_defaults():
     a = adapter(VALID)
     ts = FakeTS.instances[-1]
     assert a.set_output_device("rt_virtual_output")
-    assert ts.devices == (None, "rt_virtual_output")
-    assert not [c for c in a.audio_router.calls if c[0] == "sink"]
-    assert a.set_output_device("") and ts.devices == (None, None)
+    assert a.set_input_device("rt_virtual_input.monitor")
+    assert ts.devices == ("rt_virtual_input.monitor", "rt_virtual_output", None)
+    assert not hasattr(a.audio_router, "calls") or a.audio_router.calls == []
+    assert a.set_output_device("") and ts.devices[1] is None
+
+
+def test_input_device_failure_keeps_old_source():
+    a = adapter(VALID)
+    ts = FakeTS.instances[-1]
+    assert a.set_input_device("m")
+    assert a.set_input_device("broken") is False
+    assert "No such entity" in a.last_error
+    assert a._input_device == "m" and ts.devices[0] == "m"

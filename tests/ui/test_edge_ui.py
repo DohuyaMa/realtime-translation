@@ -249,25 +249,72 @@ def test_kill_switch_errors_are_shown(app, cfg):
     assert "tts: model unload: unreachable" in win.tray_icon.toolTip()
 
 
-def test_output_device_choice_targets_the_sink(app, cfg):
+def test_device_choices_are_applied_and_saved(app, cfg):
     from unittest.mock import MagicMock
 
-    from src.ui.widgets.main_window import DEFAULT_OUTPUT_TEXT
+    from src.ui.widgets.main_window import DEFAULT_INPUT_TEXT, DEFAULT_OUTPUT_TEXT
+
+    sinks = [
+        {"name": "rt_virtual_output", "description": "RT Переклад → мікрофон"},
+        {"name": "phones", "description": "Jabra"},
+    ]
+    ctl = MagicMock()
+    ctl.get_input_devices.return_value = [{"name": "mic2", "description": "Mic 2"}]
+    ctl.get_output_devices.return_value = sinks
+    ctl.set_input_device.return_value = True
+    ctl.set_output_device.return_value = True
+    ctl.set_monitor_device.return_value = True
+    win = _window(ctl)
+    assert win.input_device_combo.itemText(0) == DEFAULT_INPUT_TEXT
+    assert win.output_device_combo.itemText(0) == DEFAULT_OUTPUT_TEXT
+    # nothing saved yet: defaults are applied, the monitor is off
+    ctl.set_input_device.assert_called_with(None)
+    ctl.set_output_device.assert_called_with(None)
+    ctl.set_monitor_device.assert_called_with(None)
+    assert not win.monitor_check.isChecked()
+    assert not _saved(cfg).get("audio")
+    win.input_device_combo.setCurrentIndex(1)
+    win.output_device_combo.setCurrentIndex(1)
+    win.monitor_device_combo.setCurrentIndex(1)
+    win.monitor_check.setChecked(True)
+    ctl.set_input_device.assert_called_with("mic2")
+    ctl.set_output_device.assert_called_with("rt_virtual_output")
+    ctl.set_monitor_device.assert_called_with("phones")
+    assert _saved(cfg)["audio"] == {
+        "input_device": "mic2",
+        "output_device": "rt_virtual_output",
+        "monitor_enabled": True,
+        "monitor_device": "phones",
+    }
+    # a new window restores and applies the saved choices
+    ctl.reset_mock()
+    win2 = _window(ctl)
+    assert win2.output_device_combo.currentData() == "rt_virtual_output"
+    assert win2.monitor_check.isChecked()
+    ctl.set_input_device.assert_called_with("mic2")
+    ctl.set_monitor_device.assert_called_with("phones")
+    # back to the defaults: nothing left in config.yml
+    win2.monitor_check.setChecked(False)
+    win2.input_device_combo.setCurrentIndex(0)
+    win2.output_device_combo.setCurrentIndex(0)
+    ctl.set_monitor_device.assert_called_with(None)
+    assert (_saved(cfg).get("audio") or {}) == {"monitor_device": "phones"}
+
+
+def test_input_device_failure_is_shown_and_not_saved(app, cfg):
+    from unittest.mock import MagicMock
 
     ctl = MagicMock()
-    ctl.get_input_devices.return_value = []
-    ctl.get_output_devices.return_value = [
-        {"name": "rt_virtual_output", "description": "RT Переклад → мікрофон"}
-    ]
-    ctl.set_output_device.return_value = True
+    ctl.get_input_devices.return_value = [{"name": "bad", "description": "Bad"}]
+    ctl.get_output_devices.return_value = []
+    ctl.set_input_device.side_effect = lambda n: n != "bad"
+    ctl.last_error.return_value = "parec from bad failed"
     win = _window(ctl)
-    combo = win.output_device_combo
-    assert combo.itemText(0) == DEFAULT_OUTPUT_TEXT
-    ctl.set_output_device.assert_not_called()  # populating does not select
-    combo.setCurrentIndex(1)
-    ctl.set_output_device.assert_called_with("rt_virtual_output")
-    combo.setCurrentIndex(0)
-    ctl.set_output_device.assert_called_with(None)
+    errors = []
+    win.status_manager.log_error = errors.append
+    win.input_device_combo.setCurrentIndex(1)
+    assert any("parec from bad failed" in e for e in errors)
+    assert not (_saved(cfg).get("audio") or {}).get("input_device")
 
 
 def test_status_callback_from_worker_runs_on_gui_thread(app, cfg):

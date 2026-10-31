@@ -66,34 +66,6 @@ class AudioRouter:
                 logger.error(f"Failed to list devices: {e}")
                 raise
 
-    def set_default_source(self, source_name: str):
-        """Set default audio input source.
-        
-        Args:
-            source_name: Name of the source to set as default
-        """
-        with self._lock:
-            try:
-                self.pulse.source_default_set(source_name)
-                logger.info(f"Set default source to: {source_name}")
-            except Exception as e:
-                logger.error(f"Failed to set default source: {e}")
-                raise
-
-    def set_default_sink(self, sink_name: str):
-        """Set default audio output sink.
-        
-        Args:
-            sink_name: Name of the sink to set as default
-        """
-        with self._lock:
-            try:
-                self.pulse.sink_default_set(sink_name)
-                logger.info(f"Set default sink to: {sink_name}")
-            except Exception as e:
-                logger.error(f"Failed to set default sink: {e}")
-                raise
-
     def route_audio(self, source_name: str, sink_name: str):
         """Route audio from source to sink.
         

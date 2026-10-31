@@ -63,6 +63,7 @@ class DirectAdapter:
         self._monitor_running = False
         self._input_device: Optional[str] = None
         self._output_device: Optional[str] = None
+        self._monitor_device: Optional[str] = None
         # kill switch: True after standby() until resume()
         self.in_standby = False
         self._resume_pipeline = False
@@ -308,13 +309,25 @@ class DirectAdapter:
     def get_output_devices(self) -> List[Device]:
         return self._devices("outputs")
 
-    def set_input_device(self, device_id: str) -> bool:
-        if not device_id or device_id.lower() == "default":
-            return True
-        self._input_device = device_id
-        self.translation_system.set_devices(self._input_device, self._output_device)
-        if self.audio_router:
-            self.audio_router.set_default_source(device_id)
+    def _set_devices(self) -> None:
+        self.translation_system.set_devices(
+            self._input_device, self._output_device, self._monitor_device
+        )
+
+    def set_input_device(self, device_id: Optional[str]) -> bool:
+        """Source the app records (``None``/"" = the default source). The
+        app captures it directly - the system default mic stays, so other
+        apps' microphone never changes. A capture running now switches at
+        once; a failure keeps the old source and sets ``last_error``."""
+        old = self._input_device
+        self._input_device = device_id or None
+        try:
+            self._set_devices()
+        except Exception as e:
+            self._input_device = old
+            self.last_error = str(e)
+            logger.error("Cannot capture from {}: {}", device_id, e)
+            return False
         return True
 
     def set_output_device(self, device_id: Optional[str]) -> bool:
@@ -322,7 +335,14 @@ class DirectAdapter:
         sink). Only the app's own playback moves - the system default sink
         stays, so other apps' audio never ends up in the virtual mic."""
         self._output_device = device_id or None
-        self.translation_system.set_devices(self._input_device, self._output_device)
+        self._set_devices()
+        return True
+
+    def set_monitor_device(self, device_id: Optional[str]) -> bool:
+        """«Також чути в навушниках»: a second sink played in sync with the
+        output (``None`` = off)."""
+        self._monitor_device = device_id or None
+        self._set_devices()
         return True
 
     def get_audio_levels(self) -> Dict[str, float]:

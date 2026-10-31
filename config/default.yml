@@ -67,6 +67,10 @@ segmentation:
     keep_silence_ms: 2000
 
 audio:
+  input_device: null            # PipeWire source the app records (null = default mic)
+  output_device: null           # sink the translation is played into (null = default)
+  monitor_enabled: false        # «Також чути в навушниках»
+  monitor_device: null          # sink that also plays the translation (headphones)
   sample_rate: 16000
   chunk_size: 1024
   use_virtual_devices: true

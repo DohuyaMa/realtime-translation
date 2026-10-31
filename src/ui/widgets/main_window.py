@@ -25,6 +25,22 @@ from ...audio.routing import VIRTUAL_MIC_SOURCE, VIRTUAL_OUTPUT_SINK
 POWER_OFF_TEXT = "Зупинити все й звільнити пам'ять"
 POWER_ON_TEXT = "Запустити"
 DEFAULT_OUTPUT_TEXT = "Системний вихід (за замовчуванням)"
+DEFAULT_INPUT_TEXT = "Системний мікрофон (за замовчуванням)"
+MONITOR_TEXT = "Також чути в навушниках"
+# config.yml keys of the device choices (defaults in config/default.yml)
+INPUT_KEY = "audio.input_device"
+OUTPUT_KEY = "audio.output_device"
+MONITOR_KEY = "audio.monitor_device"
+MONITOR_ON_KEY = "audio.monitor_enabled"
+
+
+def _save_choice(key: str, value) -> None:
+    """Persist one device choice; ConfigManager writes only non-defaults."""
+    from ...core.config import get_config_manager
+
+    cfg = get_config_manager()
+    cfg.set(key, value)
+    cfg.save()
 
 
 class MainWindow(QMainWindow):
@@ -131,6 +147,13 @@ class MainWindow(QMainWindow):
         input_layout = QHBoxLayout()
         input_layout.addWidget(QLabel("Input Device:"))
         self.input_device_combo = QComboBox()
+        self.input_device_combo.setToolTip(
+            "Звідки застосунок записує мову; системний мікрофон інших"
+            " застосунків не змінюється"
+        )
+        self.input_device_combo.currentIndexChanged.connect(
+            self.on_input_device_changed
+        )
         input_layout.addWidget(self.input_device_combo)
         audio_layout.addLayout(input_layout)
         
@@ -148,6 +171,21 @@ class MainWindow(QMainWindow):
         )
         output_layout.addWidget(self.output_device_combo)
         audio_layout.addLayout(output_layout)
+
+        # Monitor: the translation also in the user's headphones, in sync
+        monitor_layout = QHBoxLayout()
+        self.monitor_check = QCheckBox(MONITOR_TEXT)
+        self.monitor_check.setToolTip(
+            "Переклад звучить і в «Output Device», і в цьому пристрої одночасно"
+        )
+        self.monitor_check.toggled.connect(self.on_monitor_changed)
+        monitor_layout.addWidget(self.monitor_check)
+        self.monitor_device_combo = QComboBox()
+        self.monitor_device_combo.currentIndexChanged.connect(
+            lambda _i: self.on_monitor_changed()
+        )
+        monitor_layout.addWidget(self.monitor_device_combo, 1)
+        audio_layout.addLayout(monitor_layout)
         
         audio_group.setLayout(audio_layout)
         upper_layout.addWidget(audio_group)
@@ -342,49 +380,63 @@ class MainWindow(QMainWindow):
                 )
 
     def refresh_device_lists(self):
-        """Refresh the audio device lists from the controller."""
+        """Fill the device lists, select the saved choices (config.yml) and
+        hand them to the backend; later changes are saved by the handlers."""
+        from ...core.config import get_config_manager
+
+        cfg = get_config_manager()
         try:
-            # Get input devices
-            input_devices = self.ui_controller.get_input_devices()
-            
-            # Store current selections to restore them if possible
-            current_input = self.input_device_combo.currentText()
-            
-            self.input_device_combo.clear()
-            for device in input_devices:
-                self.input_device_combo.addItem(device['description'], device['name'])
-            
-            # Restore previous selection if it still exists
-            if current_input:
-                index = self.input_device_combo.findText(current_input)
-                if index >= 0:
-                    self.input_device_combo.setCurrentIndex(index)
-            
-            # Get output devices
-            output_devices = self.ui_controller.get_output_devices()
-
-            # Store current selections to restore them if possible
-            current_output = self.output_device_combo.currentText()
-
-            self.output_device_combo.blockSignals(True)
-            self.output_device_combo.clear()
-            self.output_device_combo.addItem(DEFAULT_OUTPUT_TEXT, "")
-            for device in output_devices:
-                self.output_device_combo.addItem(device['description'], device['name'])
-
-            # Restore previous selection if it still exists
-            if current_output:
-                index = self.output_device_combo.findText(current_output)
-                if index >= 0:
-                    self.output_device_combo.setCurrentIndex(index)
-            self.output_device_combo.blockSignals(False)
-            
-            # Connect the input device selection to a handler
-            self.input_device_combo.currentTextChanged.connect(self.on_input_device_changed)
+            inputs = self.ui_controller.get_input_devices()
+            outputs = self.ui_controller.get_output_devices()
         except Exception as e:
             logger.error(f"Error refreshing device lists: {e}")
             self.status_manager.log_error(f"Error refreshing device lists: {e}")
-        
+            return
+        lists = (
+            (self.input_device_combo, DEFAULT_INPUT_TEXT, inputs, INPUT_KEY),
+            (self.output_device_combo, DEFAULT_OUTPUT_TEXT, outputs, OUTPUT_KEY),
+            (self.monitor_device_combo, None, outputs, MONITOR_KEY),
+        )
+        for combo, default_text, devices, key in lists:
+            combo.blockSignals(True)
+            combo.clear()
+            if default_text is not None:
+                combo.addItem(default_text, "")
+            for device in devices:
+                combo.addItem(device['description'], device['name'])
+            saved = cfg.get(key)
+            index = combo.findData(saved) if saved else -1
+            if saved and index < 0:
+                self.status_manager.log_warning(
+                    f"Збережений пристрій {saved} зараз недоступний"
+                )
+            combo.setCurrentIndex(max(index, 0))
+            combo.blockSignals(False)
+        self.monitor_check.blockSignals(True)
+        self.monitor_check.setChecked(bool(cfg.get(MONITOR_ON_KEY)))
+        self.monitor_check.blockSignals(False)
+        self.monitor_device_combo.setEnabled(self.monitor_check.isChecked())
+        self._apply_devices()
+
+    def _choice(self, combo) -> Optional[str]:
+        return combo.currentData() or None
+
+    def _monitor_choice(self) -> Optional[str]:
+        if not self.monitor_check.isChecked():
+            return None
+        return self._choice(self.monitor_device_combo)
+
+    def _apply_devices(self) -> None:
+        """Hand the selected devices to the backend (no saving)."""
+        ok = self.ui_controller.set_input_device(
+            self._choice(self.input_device_combo)
+        )
+        if not ok:
+            err = self.ui_controller.last_error() or "unknown error"
+            self.status_manager.log_error(f"Не вдалося вибрати мікрофон: {err}")
+        self.ui_controller.set_output_device(self._choice(self.output_device_combo))
+        self.ui_controller.set_monitor_device(self._monitor_choice())
+
     def _finish_task(self, done, result):
         self._busy = False
         done(result)
@@ -471,34 +523,40 @@ class MainWindow(QMainWindow):
             lambda: self.ui_controller.set_languages(lang_code), lambda _r: None
         )
     
-    def on_input_device_changed(self, text):
-        """Handle input device selection change."""
-        if not self.ui_controller or not text:
+    def on_input_device_changed(self, index):
+        """Capture straight from the chosen source; the system default
+        microphone is never changed."""
+        if not self.ui_controller or index < 0:
             return
-            
-        # Find the device name that corresponds to the selected description
-        input_devices = self.ui_controller.get_input_devices()
-        selected_device_name = None
-        
-        for device in input_devices:
-            if device['description'] == text:
-                selected_device_name = device['name']
-                break
-        
-        if selected_device_name:
-            try:
-                success = self.ui_controller.set_input_device(selected_device_name)
-                if success:
-                    self.status_manager.set_status(f'Input device changed to: {text}')
-                    self.status_manager.log_info(f'Input device changed to: {text}')
-                else:
-                    self.status_manager.set_status(f'Failed to change input device to: {text}')
-                    self.status_manager.log_error(f'Failed to change input device to: {text}')
-            except Exception as e:
-                logger.error(f"Failed to change input device: {e}")
-                self.status_manager.set_status(f"Failed to change input device: {e}")
-                self.status_manager.log_error(f"Failed to change input device: {e}")
-    
+        name = self.input_device_combo.itemData(index) or None
+        text = self.input_device_combo.itemText(index)
+        if not self.ui_controller.set_input_device(name):
+            err = self.ui_controller.last_error() or "unknown error"
+            self.status_manager.log_error(f"Не вдалося вибрати мікрофон {text}: {err}")
+            return
+        _save_choice(INPUT_KEY, name)
+        self.status_manager.set_status(f"Мікрофон: {text}")
+        self.status_manager.log_info(f"Мікрофон: {text}")
+
+    def on_monitor_changed(self, *_args):
+        """«Також чути в навушниках»: the translation also goes to the
+        chosen sink, in sync with «Output Device»."""
+        if not self.ui_controller:
+            return
+        on = self.monitor_check.isChecked()
+        self.monitor_device_combo.setEnabled(on)
+        name = self._monitor_choice()
+        if not self.ui_controller.set_monitor_device(name):
+            self.status_manager.log_error("Не вдалося вибрати навушники")
+            return
+        _save_choice(MONITOR_ON_KEY, on)
+        _save_choice(MONITOR_KEY, self._choice(self.monitor_device_combo))
+        if on:
+            text = self.monitor_device_combo.currentText()
+            self.status_manager.log_info(f"Переклад також звучить у: {text}")
+        else:
+            self.status_manager.log_info("Переклад у навушниках вимкнено")
+
     def on_output_device_changed(self, index):
         """Sink the translation is played into (None = the default sink)."""
         if not self.ui_controller or index < 0:
@@ -508,6 +566,7 @@ class MainWindow(QMainWindow):
         if not self.ui_controller.set_output_device(name):
             self.status_manager.log_error(f"Не вдалося вибрати вихід: {text}")
             return
+        _save_choice(OUTPUT_KEY, name)
         self.status_manager.log_info(f"Переклад звучить у: {text}")
         if name == VIRTUAL_OUTPUT_SINK:
             self.status_manager.log_info(
