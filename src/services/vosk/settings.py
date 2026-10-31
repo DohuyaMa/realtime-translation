@@ -1,9 +1,11 @@
 """rt-vosk settings from env.
 
-``model`` is a comma list of Vosk model aliases, one per language: Vosk
-models are single-language, and the language of each comes from the model
-registry. CPU only (Kaldi), so ``device`` and ``compute_type`` are not
-runtime fields.
+``model`` is ONE Vosk model alias: a Vosk model is single-language (its
+language comes from the model registry) and the service holds exactly one
+model at a time; a request in another language is refused (409
+``model_language_mismatch``), the model is switched explicitly via
+``POST /config``. CPU only (Kaldi), so ``device`` and ``compute_type`` are
+not runtime fields.
 """
 
 from __future__ import annotations
@@ -17,7 +19,7 @@ from ..common.model_registry import specs_for
 from ..common.settings import BaseSettings, FieldMeta, base_from_env
 
 VOSK_BACKENDS = ("vosk", "fake")
-DEFAULT_VOSK_MODELS = ("vosk-small-uk-v3-nano", "vosk-small-pl-0.22")
+DEFAULT_VOSK_MODEL = "vosk-small-uk-v3-nano"
 
 
 def vosk_languages() -> Dict[str, str]:
@@ -25,32 +27,14 @@ def vosk_languages() -> Dict[str, str]:
     return {s.alias: s.language or "" for s in specs_for("vosk")}
 
 
-def parse_models(key: str, raw: str) -> tuple[str, ...]:
-    """Comma list of registry aliases, at most one per language."""
+def parse_model(key: str, raw: str) -> str:
+    """One registry alias of a Vosk model."""
+    alias = raw.strip()
     known = vosk_languages()
-    out: list[str] = []
-    seen: Dict[str, str] = {}
-    for part in raw.split(","):
-        alias = part.strip()
-        if not alias:
-            continue
-        if alias not in known:
-            known_list = ", ".join(sorted(known))
-            raise SettingsError(
-                f"{key}: unknown Vosk model {alias!r}; known: {known_list}"
-            )
-        lang = known[alias]
-        if lang in seen and seen[lang] != alias:
-            raise SettingsError(
-                f"{key}: {seen[lang]!r} and {alias!r} are both {lang!r} models;"
-                " list one model per language"
-            )
-        if alias not in out:
-            out.append(alias)
-            seen[lang] = alias
-    if not out:
-        raise SettingsError(f"{key} must list at least one Vosk model")
-    return tuple(out)
+    if alias not in known:
+        known_list = ", ".join(sorted(known))
+        raise SettingsError(f"{key}: unknown Vosk model {alias!r}; known: {known_list}")
+    return alias
 
 
 @dataclass(frozen=True)
@@ -70,22 +54,17 @@ class VoskSettings(BaseSettings):
         **BaseSettings.FIELD_META,
         "backend": FieldMeta("choice", "ASR backend", VOSK_BACKENDS),
         "model": FieldMeta(
-            "text",
-            "Vosk models, comma list, one per language: "
-            + ", ".join(f"{a} ({lang})" for a, lang in vosk_languages().items()),
+            "model",
+            "Vosk model (one language; see GET /v1/models)",
+            tuple(vosk_languages()),
         ),
         "max_upload_mb": FieldMeta("int", "max upload, MB", min=1, max=1000),
     }
 
     @property
-    def models(self) -> tuple[str, ...]:
-        return tuple(self.model.split(","))
-
-    @property
-    def languages(self) -> Dict[str, str]:
-        """Language -> model alias of the configured models."""
-        known = vosk_languages()
-        return {known[alias]: alias for alias in self.models}
+    def language(self) -> str:
+        """Language of the configured model (from the registry)."""
+        return vosk_languages()[self.model]
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] = os.environ) -> "VoskSettings":
@@ -96,7 +75,7 @@ class VoskSettings(BaseSettings):
             service="rt-vosk",
             backends=VOSK_BACKENDS,
             default_backend="vosk",
-            default_model=",".join(DEFAULT_VOSK_MODELS),
+            default_model=DEFAULT_VOSK_MODEL,
             compute_cpu="float32",  # Kaldi's fixed precision; not configurable
             compute_gpu="float32",
         )
@@ -108,7 +87,7 @@ class VoskSettings(BaseSettings):
             raise SettingsError(
                 f"{keys['compute_type']}: Kaldi computes in float32 only"
             )
-        base["model"] = ",".join(parse_models(keys["model"], base["model"]))
+        base["model"] = parse_model(keys["model"], base["model"])
         return cls(
             **base,
             max_upload_mb=env_int(

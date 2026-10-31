@@ -356,7 +356,9 @@ class TranslationSystem:
 
         self._recognized: deque = deque(maxlen=PREVIOUS_WORDS_MAX)
         self._translation_context: deque = deque(maxlen=settings.llm.context_pairs)
-        self._pending_recognized: List[str] = []
+        # recognized phrases for the UI: {"text": whisper, "check": Vosk's
+        # text of the same audio, None = no Vosk check for this phrase}
+        self._pending_recognized: List[Dict[str, Optional[str]]] = []
         self._pending_translated: List[str] = []
         self._audio_level_input = 0.0
         self._segments_processed = 0
@@ -939,7 +941,7 @@ class TranslationSystem:
             return
         self._recognized.extend(text.split())
         with self._lock:
-            self._pending_recognized.append(text)
+            self._pending_recognized.append({"text": text, "check": None})
         self._emit({"status": "transcription_complete", "original_text": text})
 
     def _has_words(self, text: str) -> bool:
@@ -991,7 +993,9 @@ class TranslationSystem:
             return
         self._recognized.extend(text.split())
         with self._lock:
-            self._pending_recognized.append(text)
+            self._pending_recognized.append(
+                {"text": text, "check": None if vosk is None else vosk.text}
+            )
         phrase.src = src
         if not phrase.src:
             logger.warning("source language unknown - skipping translation")
@@ -1047,7 +1051,12 @@ class TranslationSystem:
                 )
                 result = self._call_vosk(audio, src)
         except ServiceError as e:
-            self._set_vosk_state("unavailable", f"{e.service}: {e.kind}: {e}")
+            if e.kind == "wrong_language":
+                # rt-vosk holds one model; switching it is the user's
+                # explicit action (settings, Vosk tab), never automatic
+                self._set_vosk_state("unavailable", f"немає моделі для «{src}»: {e}")
+            else:
+                self._set_vosk_state("unavailable", f"{e.service}: {e.kind}: {e}")
             return None
         self._set_vosk_state("on", None)
         return result

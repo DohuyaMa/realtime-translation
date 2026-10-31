@@ -11,7 +11,10 @@ from loguru import logger
 
 class ServiceError(Exception):
     """A request failed. kind: unreachable | timeout | auth | http | busy |
-    not_ready (HTTP 503 from rt-asr/rt-tts: the model is not loaded/ready)."""
+    not_ready (HTTP 503 from rt-asr/rt-tts: the model is not loaded/ready) |
+    wrong_language (HTTP 409 from rt-vosk: its single model is of another
+    language; never retried on another node - the model is switched only
+    explicitly)."""
 
     def __init__(
         self,
@@ -101,6 +104,10 @@ def raise_for_response(service: str, resp: httpx.Response) -> None:
         code, message = _error_detail(resp)
         if code.startswith("model_"):
             raise ServiceError(service, "not_ready", f"{code}: {message}", 503)
+    if resp.status_code == 409:
+        code, message = _error_detail(resp)
+        if code == "model_language_mismatch":
+            raise ServiceError(service, "wrong_language", message, 409)
     if resp.status_code >= 400:
         raise ServiceError(
             service,

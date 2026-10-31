@@ -179,13 +179,13 @@ def test_check_messages_carry_both_texts_only_in_the_user_message():
 
 
 def test_check_template_validation():
-    assert check_template_errors("t", "EXACT: {{text_check}} {{text}}", True) == []
-    assert check_template_errors("t", "{{text}}", True)  # no {{text_check}}
+    assert check_template_errors("t", "EXACT: {{vosk_text}} {{text}}", True) == []
+    assert check_template_errors("t", "{{text}}", True)  # no {{vosk_text}}
     assert check_template_errors("s", DEFAULT_CHECK_SYSTEM_PROMPT, False) == []
     bad = dataclasses.replace(
-        settings(), llm=LlmSettings(user_template="{{text}} {{text_check}}")
+        settings(), llm=LlmSettings(user_template="{{text}} {{vosk_text}}")
     )
-    assert any("text_check" in e for e in bad.validate())
+    assert any("vosk_text" in e for e in bad.validate())
 
 
 def test_config_keeps_defaults_and_parses_vosk_use():
@@ -434,3 +434,46 @@ def test_vosk_events_are_described_for_the_log():
         {"status": "vosk_state", "vosk": {"mode": "unavailable", "error": "down"}}
     )
     assert level == "WARN" and "лише з whisper" in msg
+
+
+def test_wrong_language_model_is_visible_and_never_retried():
+    """rt-vosk holds one model; 409 model_language_mismatch -> whisper-only,
+    the reason names the language; the model is never switched by the edge."""
+    import httpx as _httpx
+
+    from src.clients.base import raise_for_response
+
+    resp = _httpx.Response(
+        409,
+        json={
+            "error": {
+                "code": "model_language_mismatch",
+                "message": "loaded Vosk model vosk-small-uk-v3-nano is 'uk', not 'pl'",
+            }
+        },
+    )
+    with pytest.raises(ServiceError) as exc:
+        raise_for_response("vosk", resp)
+    err = exc.value
+    assert err.kind == "wrong_language" and err.status_code == 409
+    from src.clients.pool import is_retryable
+
+    assert not is_retryable(err)
+    asr = SlowAsr([AsrResult("Dzień dobry.", "pl")], 0)
+    vosk = FakeVosk([err])
+    ts, vads, capture, llm, _ = system(asr, vosk, source_language="pl")
+    stats = run(ts, vads, capture, [seg()], lambda: llm.calls)
+    assert llm.checks == [None]
+    assert stats["vosk"]["mode"] == "unavailable"
+    assert stats["vosk"]["error"].startswith("немає моделі для «pl»")
+    assert stats["pending_recognized"] == [{"text": "Dzień dobry.", "check": None}]
+
+
+def test_recognized_phrase_carries_vosk_text():
+    asr = SlowAsr([AsrResult("Добрий день.", "uk")], 0)
+    vosk = FakeVosk([VoskResult("добрий день", "uk", words("добрий день"))])
+    ts, vads, capture, llm, _ = system(asr, vosk)
+    stats = run(ts, vads, capture, [seg()], lambda: llm.calls)
+    assert stats["pending_recognized"] == [
+        {"text": "Добрий день.", "check": "добрий день"}
+    ]

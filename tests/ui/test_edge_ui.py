@@ -128,7 +128,7 @@ def test_settings_dialog_vosk_use_and_check_prompts_saved(app, cfg):
     assert dlg.vosk_tab.service.kind == "vosk"
     box = dlg.endpoints_tab.use["vosk"]
     box.setCurrentIndex(box.findData("off"))
-    tpl = "FLUENT: {{text}}\nEXACT: {{text_check}}"
+    tpl = "FLUENT: {{text}}\nEXACT: {{vosk_text}}"
     dlg.llm_tab.check_user_template.setPlainText(tpl)
     assert "EXACT: dzień dobry" in dlg.llm_tab.preview.toPlainText()
     dlg.accept()
@@ -137,9 +137,9 @@ def test_settings_dialog_vosk_use_and_check_prompts_saved(app, cfg):
     assert saved["llm"]["check_user_template"] == tpl
     assert "check_system_prompt" not in saved["llm"]  # default: not frozen
     dlg = SettingsDialog(current_settings(), services=[])
-    dlg.llm_tab.check_user_template.setPlainText("{{text}}")  # no {{text_check}}
+    dlg.llm_tab.check_user_template.setPlainText("{{text}}")  # no {{vosk_text}}
     dlg.accept()
-    assert "text_check" in dlg.error_label.text()
+    assert "vosk_text" in dlg.error_label.text()
     assert DEFAULT_CHECK_USER_TEMPLATE != tpl
 
 
@@ -1119,3 +1119,135 @@ def test_dialog_accept_writes_no_defaults(app, cfg):
 
     SettingsDialog(current_settings(), services=[]).accept()
     assert _saved(cfg) == {}
+
+
+class FakeVoskServiceClient(FakeServiceClient):
+    """rt-vosk admin API: one model of one language at a time."""
+
+    def __init__(self, model="vosk-small-uk-v3-nano"):
+        super().__init__()
+        from src.services.vosk.settings import VoskSettings
+
+        self.config = {
+            "schema": VoskSettings.field_schema(),
+            "values": {"model": model, "max_upload_mb": 100},
+            "source": {},
+            "version": 1,
+        }
+        self.model_state = {"id": model, "state": "ready", "error": None}
+
+    def models(self):
+        return {
+            "models": [
+                {
+                    "id": "vosk-small-uk-v3-nano",
+                    "cached": True,
+                    "size": 133 * 10**6,
+                    "language": "uk",
+                },
+                {
+                    "id": "vosk-small-uk-v3-small",
+                    "cached": False,
+                    "size": 436 * 10**6,
+                    "language": "uk",
+                },
+                {
+                    "id": "vosk-small-pl-0.22",
+                    "cached": False,
+                    "size": 96 * 10**6,
+                    "language": "pl",
+                },
+            ],
+            "current": self.config["values"]["model"],
+        }
+
+    def update_config(self, values, version, reset=(), *, timeout_s=None):
+        if "model" in values:  # the service reloads: one model at a time
+            self.model_state = {"id": values["model"], "state": "ready", "error": None}
+        return super().update_config(values, version, reset, timeout_s=timeout_s)
+
+
+def _vosk_tab(client, source_language):
+    from src.ui.widgets.service_tabs import Background, VoskTab
+
+    tab = VoskTab(
+        resolve_edge_settings({"services": {"source_language": source_language}}, {}),
+        [_ep("cyborg", "http://127.0.0.1:8092", True, "vosk")],
+        lambda e: client,
+        Background(sync=True),
+    )
+    _TABS.append(tab)
+    return tab
+
+
+def test_vosk_tab_picks_one_model_from_the_list_with_language(app):
+    client = FakeVoskServiceClient()
+    tab = _vosk_tab(client, "uk")
+    tab.service.load()
+    model = tab.service.editors["model"].widget
+    labels = [model.itemText(i) for i in range(model.count())]
+    assert labels[0] == "vosk-small-uk-v3-nano [uk] (кеш)"
+    assert labels[2] == "vosk-small-pl-0.22 [pl] (завантажити ~96 MB)"
+    assert "vosk-small-uk-v3-nano (мова «uk»)" in tab.language_hint.text()
+    assert not tab.switch_button.isVisible() and tab._target is None
+    model.setCurrentIndex(model.findData("vosk-small-uk-v3-small"))
+    tab.service.apply()
+    assert client.posted[0][0] == {"model": "vosk-small-uk-v3-small"}
+
+
+def test_vosk_tab_other_language_offers_explicit_switch(app):
+    client = FakeVoskServiceClient()
+    tab = _vosk_tab(client, "pl")
+    tab.service.load()
+    hint = tab.language_hint.text()
+    assert "«pl»: звірка Vosk недоступна" in hint
+    assert tab._target == "vosk-small-pl-0.22"
+    assert "Завантажити модель для «pl»" in tab.switch_button.text()
+    assert client.posted == []  # nothing switched by itself
+    tab.switch_model()
+    assert client.posted[0][0] == {"model": "vosk-small-pl-0.22"}
+    assert "мова «pl»" in tab.language_hint.text()  # re-read after apply
+    assert tab._target is None
+    # auto: no switch offered, the rule is explained
+    tab.set_source_language("auto")
+    assert "auto" in tab.language_hint.text() and tab._target is None
+    # a language without any Vosk model
+    tab.set_source_language("en")
+    assert "Моделі Vosk для «en» немає" in tab.language_hint.text()
+
+
+def test_recognized_panel_shows_vosk_line_and_toggle(app):
+    from src.ui.widgets.status_logger import StatusLogger
+
+    log = StatusLogger()
+    _TABS.append(log)
+    log.add_recognized("Добрий день.", "добрий день")
+    log.add_recognized("Раз.", None)
+    log.add_recognized("Тиша.", "")
+    text = log.recognized_view.toPlainText()
+    assert "Добрий день.\n    Vosk: добрий день" in text
+    assert "Раз.\n    Vosk: (без звірки)" in text
+    assert "Тиша.\n    Vosk: (нічого не почув)" in text
+    log.show_check.setChecked(False)
+    text = log.recognized_view.toPlainText()
+    assert "Vosk:" not in text and text.count("\n") == 2
+    log.show_check.setChecked(True)
+    assert log.recognized_view.toPlainText().count("Vosk:") == 3
+
+
+def test_llm_tab_lists_variables_and_active_prompt_pair(app, cfg):
+    from src.ui.widgets.service_tabs import PROMPT_VARIABLES_HELP
+    from src.ui.widgets.settings_dialog import current_settings
+
+    for var in ("{{text}}", "{{vosk_text}}", "{{source_lang}}", "{{target_lang}}"):
+        assert var in PROMPT_VARIABLES_HELP
+    dlg = SettingsDialog(current_settings(), services=[])
+    active = dlg.llm_tab.active_prompts
+    assert "«Зі звіркою Vosk»" in active.text()
+    box = dlg.endpoints_tab.use["vosk"]
+    box.setCurrentIndex(box.findData("off"))
+    assert "«Без Vosk»" in active.text() and "вимкнено" in active.text()
+    # the dialog's «Мова» re-checks the Vosk tab's hint
+    lang = dlg.endpoints_tab.source_language
+    lang.setCurrentText("pl")
+    assert dlg.vosk_tab.source_language == "pl"

@@ -14,7 +14,7 @@ from typing import Mapping
 
 PLACEHOLDERS = ("text", "source_lang", "target_lang")
 # two-text (Vosk cross-check) templates also get the Vosk transcript
-CHECK_PLACEHOLDERS = PLACEHOLDERS + ("text_check",)
+CHECK_PLACEHOLDERS = PLACEHOLDERS + ("vosk_text",)
 TARGET_LANG = "English"
 LANGUAGE_NAMES = {"pl": "Polish", "uk": "Ukrainian", "ru": "Russian", "en": "English"}
 
@@ -35,7 +35,7 @@ DEFAULT_SYSTEM_PROMPT = (
 DEFAULT_USER_TEMPLATE = "{{text}}"
 
 # TASK-SYS-12: two-text mode - the same audio recognized by whisper ({{text}},
-# FLUENT) and Vosk ({{text_check}}, EXACT). Prompt "B3" won the simulated
+# FLUENT) and Vosk ({{vosk_text}}, EXACT). Prompt "B3" won the simulated
 # test on the real LLM (swarm-nix system-conf/context/tasks.md, TASK-SYS-12
 # "Результат перевірки (2026-10-31)"): compact, Vosk first, neutral labels.
 # Silence is dropped by code before the LLM (gate), never by the model.
@@ -51,7 +51,7 @@ DEFAULT_CHECK_SYSTEM_PROMPT = (
     " into natural {{target_lang}}; short fragments are translated as-is."
     " Output only the translation - no comments, no {{source_lang}} words."
 )
-DEFAULT_CHECK_USER_TEMPLATE = "EXACT: {{text_check}}\nFLUENT: {{text}}"
+DEFAULT_CHECK_USER_TEMPLATE = "EXACT: {{vosk_text}}\nFLUENT: {{text}}"
 DEFAULT_WORDS_PER_REQUEST = 40
 
 _PLACEHOLDER = re.compile(r"\{\{\s*([A-Za-z_]+)\s*\}\}")
@@ -93,14 +93,14 @@ def template_errors(
 
 
 def check_template_errors(name: str, template: str, user: bool) -> list[str]:
-    """Two-text (Vosk cross-check) template: may use {{text_check}}; the user
+    """Two-text (Vosk cross-check) template: may use {{vosk_text}}; the user
     template must carry both transcripts."""
     return template_errors(
         name,
         template,
         require_text=user,
         allowed=CHECK_PLACEHOLDERS,
-        required=("text_check",) if user else (),
+        required=("vosk_text",) if user else (),
     )
 
 
@@ -138,14 +138,14 @@ def build_messages(
 ) -> list[dict]:
     """Chat messages for one request (``chunk`` = up to words_per_request).
 
-    ``check``: the Vosk transcript of the chunk ({{text_check}}, two-text
+    ``check``: the Vosk transcript of the chunk ({{vosk_text}}, two-text
     mode). Context items are ``(source, translation)`` or, in two-text mode,
     ``(source, translation, check)``."""
 
-    def values(text: str, text_check: str = "") -> dict:
+    def values(text: str, vosk_text: str = "") -> dict:
         return {
             "text": text,
-            "text_check": text_check,
+            "vosk_text": vosk_text,
             "source_lang": LANGUAGE_NAMES.get(source_lang, source_lang),
             "target_lang": TARGET_LANG,
         }

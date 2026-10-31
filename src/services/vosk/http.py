@@ -1,5 +1,6 @@
 """POST /v1/audio/transcriptions: the rt-asr request shape (multipart file +
-language), answered with Vosk's words and their per-word confidence."""
+language), answered with Vosk's words and their per-word confidence. The
+language must be the one of the single loaded model (else 409)."""
 
 from __future__ import annotations
 
@@ -17,24 +18,21 @@ from ..common.worker import Priority
 from .settings import VoskSettings
 
 
-def pick_language(requested: Optional[str], loaded: tuple[str, ...]) -> str:
-    """The request's language; may be omitted only with a single model.
+def pick_language(requested: Optional[str], model_id: str, loaded: str) -> str:
+    """The request's language; must be the loaded model's language.
 
-    Vosk cannot detect the language, so "auto" counts as omitted."""
+    Vosk cannot detect the language, so omitted / "auto" means the model's.
+    Another language is refused (409): the service never switches its model
+    by itself - that is an explicit ``POST /config``."""
     code = (requested or "").strip().lower()
     if code in ("", "auto"):
-        if len(loaded) == 1:
-            return loaded[0]
+        return loaded
+    if code != loaded:
         raise ApiError(
-            400,
-            "invalid_request",
-            f"language is required (loaded: {', '.join(loaded)})",
-        )
-    if code not in loaded:
-        raise ApiError(
-            400,
-            "unsupported_language",
-            f"no Vosk model for {code!r} (loaded: {', '.join(loaded)})",
+            409,
+            "model_language_mismatch",
+            f"loaded Vosk model {model_id} is {loaded!r}, not {code!r};"
+            " switch the model via POST /config",
         )
     return code
 
@@ -52,7 +50,7 @@ def build_http_router(
     ) -> dict:
         s = config.current()
         backend = await runtime.acquire()
-        lang = pick_language(language, backend.languages())
+        lang = pick_language(language, backend.model_id, backend.language)
         limit = s.max_upload_mb * 1024 * 1024
         data = await file.read(limit + 1)
         if len(data) > limit:

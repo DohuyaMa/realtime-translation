@@ -1,12 +1,18 @@
 """Status and logging component for the real-time translation system."""
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout,
+    QWidget, QVBoxLayout, QHBoxLayout, QCheckBox,
     QPushButton, QLabel, QSplitter, QPlainTextEdit, QGroupBox
 )
-from PySide6.QtCore import Qt, QTimer
-from typing import List, Tuple
+from PySide6.QtCore import Qt
+from typing import List, Optional, Tuple
 import datetime
 from loguru import logger
+
+
+SHOW_CHECK_TEXT = "Показувати текст Vosk"
+CHECK_PREFIX = "    Vosk: "
+CHECK_NONE = "(без звірки)"
+CHECK_EMPTY = "(нічого не почув)"
 
 
 class StatusLogger(QWidget):
@@ -16,6 +22,8 @@ class StatusLogger(QWidget):
         super().__init__(parent)
         self._messages: List[Tuple] = []
         self._max_messages = 1000
+        # (time, whisper text, Vosk text of the same audio or None)
+        self._recognized: List[Tuple[str, str, Optional[str]]] = []
         self.init_ui()
 
     def init_ui(self):
@@ -31,6 +39,14 @@ class StatusLogger(QWidget):
         self.recognized_view.setReadOnly(True)
         self.recognized_view.setPlaceholderText("Тут з'явиться розпізнана мова…")
         rec_layout.addWidget(self.recognized_view)
+        # Vosk's text of the same phrase under whisper's line, to compare
+        self.show_check = QCheckBox(SHOW_CHECK_TEXT)
+        self.show_check.setChecked(True)
+        self.show_check.setToolTip(
+            "Під кожною фразою whisper - що почув Vosk (звірка) у тому ж аудіо"
+        )
+        self.show_check.toggled.connect(lambda _on: self._render_recognized())
+        rec_layout.addWidget(self.show_check)
         text_splitter.addWidget(rec_box)
 
         tr_box = QGroupBox("Переклад (Translated)")
@@ -83,10 +99,34 @@ class StatusLogger(QWidget):
     def set_status(self, message: str):
         self.status_area.setText(message)
 
-    def add_recognized(self, text: str):
-        """Append a recognized speech segment to the top-left panel."""
+    def add_recognized(self, text: str, check: Optional[str] = None):
+        """Append a recognized phrase (whisper) and, when shown, Vosk's text
+        of the same audio (``check``; None = no Vosk check for it)."""
         ts = datetime.datetime.now().strftime("%H:%M:%S")
-        self.recognized_view.appendPlainText(f"[{ts}] {text}")
+        self._recognized.append((ts, text, check))
+        if len(self._recognized) > self._max_messages:
+            self._recognized = self._recognized[-self._max_messages:]
+            self._render_recognized()
+            return
+        self.recognized_view.appendPlainText(self._recognized_lines(ts, text, check))
+        self._scroll_recognized()
+
+    def _recognized_lines(self, ts: str, text: str, check: Optional[str]) -> str:
+        line = f"[{ts}] {text}"
+        if not self.show_check.isChecked():
+            return line
+        if check is None:
+            return f"{line}\n{CHECK_PREFIX}{CHECK_NONE}"
+        return f"{line}\n{CHECK_PREFIX}{check or CHECK_EMPTY}"
+
+    def _render_recognized(self) -> None:
+        """Rebuild the panel (the Vosk toggle changed)."""
+        self.recognized_view.setPlainText(
+            "\n".join(self._recognized_lines(*r) for r in self._recognized)
+        )
+        self._scroll_recognized()
+
+    def _scroll_recognized(self) -> None:
         self.recognized_view.verticalScrollBar().setValue(
             self.recognized_view.verticalScrollBar().maximum()
         )
@@ -125,6 +165,7 @@ class StatusLogger(QWidget):
         self.add_log_message(message, "DEBUG")
 
     def clear_all(self):
+        self._recognized.clear()
         self.recognized_view.clear()
         self.translated_view.clear()
         self.log_view.clear()
@@ -150,9 +191,9 @@ class StatusManager:
         if self.status_logger:
             self.status_logger.set_status(message)
 
-    def log_recognized(self, text: str):
+    def log_recognized(self, text: str, check: Optional[str] = None):
         if self.status_logger:
-            self.status_logger.add_recognized(text)
+            self.status_logger.add_recognized(text, check)
 
     def log_translated(self, text: str):
         if self.status_logger:

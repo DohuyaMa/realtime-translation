@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Protocol, Tuple
+from typing import List, Optional, Protocol, Tuple
 
 import numpy as np
 
@@ -31,6 +31,7 @@ class Transcript:
 class VoskBackend(Protocol):
     name: str
     model_id: str
+    language: str  # of the (single) model
 
     def fetch(self, progress: Optional[Progress] = None) -> None:
         """Provision the model files (may download; no timeout)."""
@@ -44,10 +45,6 @@ class VoskBackend(Protocol):
         """Free the models now."""
         ...
 
-    def languages(self) -> Tuple[str, ...]:
-        """Languages of the loaded models."""
-        ...
-
     def transcribe(self, audio: np.ndarray, language: str) -> Transcript:
         """float32 mono 16 kHz -> words with per-word confidence."""
         ...
@@ -58,12 +55,13 @@ class FakeVoskBackend:
 
     def __init__(
         self,
-        languages: Dict[str, str],
+        language: str,
+        model_id: str = "fake",
         load_delay: float = 0.0,
         fail_on_load: Optional[str] = None,
     ) -> None:
-        self._languages = dict(languages)
-        self.model_id = ",".join(languages.values())
+        self.language = language
+        self.model_id = model_id
         self._load_delay = load_delay
         self._fail_on_load = fail_on_load
         self.calls: List[Tuple[int, str]] = []
@@ -79,9 +77,6 @@ class FakeVoskBackend:
     def unload(self) -> None:
         pass  # holds no model
 
-    def languages(self) -> Tuple[str, ...]:
-        return tuple(self._languages)
-
     def transcribe(self, audio: np.ndarray, language: str) -> Transcript:
         self.calls.append((len(audio), language))
         if not np.any(audio):
@@ -96,7 +91,7 @@ class FakeVoskBackend:
 
 def make_backend(settings: VoskSettings) -> VoskBackend:
     if settings.backend == "fake":
-        return FakeVoskBackend(settings.languages)
+        return FakeVoskBackend(settings.language, settings.model)
     from .vosk_backend import KaldiVoskBackend
 
     return KaldiVoskBackend(settings)

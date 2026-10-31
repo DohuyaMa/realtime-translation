@@ -73,9 +73,9 @@ def test_fetch_load_transcribe_unload(fake_vosk, tmp_path):
     with pytest.raises(RuntimeError, match="before fetch"):
         backend.load()
     backend.fetch()
-    assert prepared == ["vosk-small-uk-v3-nano", "vosk-small-pl-0.22"]
+    assert prepared == ["vosk-small-uk-v3-nano"]  # exactly one model
     backend.load()
-    assert backend.languages() == ("uk", "pl")
+    assert (backend.model_id, backend.language) == ("vosk-small-uk-v3-nano", "uk")
     audio = np.zeros(FEED_BYTES, np.float32)  # 2 feed chunks of PCM16
     result = backend.transcribe(audio, "uk")
     assert result.text == "добрий день друзі"
@@ -85,7 +85,8 @@ def test_fetch_load_transcribe_unload(fake_vosk, tmp_path):
         ("друзі", 0.42, 1.234),
     ]
     backend.unload()
-    assert backend.languages() == ()
+    with pytest.raises(RuntimeError, match="before load"):
+        backend.transcribe(audio, "uk")
 
 
 def test_models_are_loaded_from_the_prepared_paths(fake_vosk, tmp_path):
@@ -95,4 +96,5 @@ def test_models_are_loaded_from_the_prepared_paths(fake_vosk, tmp_path):
     )
     backend.fetch()
     backend.load()
-    assert Path(backend._models["pl"].path) == tmp_path / "vosk-small-pl-0.22"
+    assert Path(backend._model.path) == tmp_path / "vosk-small-pl-0.22"
+    assert backend.language == "pl"

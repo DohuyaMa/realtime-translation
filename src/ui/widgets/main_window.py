@@ -32,6 +32,8 @@ INPUT_KEY = "audio.input_device"
 OUTPUT_KEY = "audio.output_device"
 MONITOR_KEY = "audio.monitor_device"
 MONITOR_ON_KEY = "audio.monitor_enabled"
+# «Показувати текст Vosk» under each recognized phrase
+SHOW_CHECK_KEY = "ui.show_vosk_text"
 
 
 def _save_choice(key: str, value) -> None:
@@ -59,6 +61,7 @@ class MainWindow(QMainWindow):
         # Status manager for separating status display from logging
         self.status_logger = StatusLogger()
         self.status_manager = StatusManager(self.status_logger)
+        self._restore_show_check()
         
         # Service status panel
         self.service_status_panel = ServiceStatusPanel()
@@ -379,6 +382,14 @@ class MainWindow(QMainWindow):
                     "LLM llama-воркера не вивантажено: він обслуговує чергу Django"
                 )
 
+    def _restore_show_check(self) -> None:
+        """«Показувати текст Vosk»: saved in config.yml, saved on toggle."""
+        from ...core.config import get_config_manager
+
+        box = self.status_logger.show_check
+        box.setChecked(bool(get_config_manager().get(SHOW_CHECK_KEY)))
+        box.toggled.connect(lambda on: _save_choice(SHOW_CHECK_KEY, on))
+
     def refresh_device_lists(self):
         """Fill the device lists, select the saved choices (config.yml) and
         hand them to the backend; later changes are saved by the handlers."""
@@ -591,8 +602,8 @@ class MainWindow(QMainWindow):
         self.input_level.setValue(input_level)
 
         # Recognized / translated text panels
-        for text in update_data.get('pending_recognized', []):
-            self.status_manager.log_recognized(text)
+        for phrase in update_data.get('pending_recognized', []):
+            self.status_manager.log_recognized(phrase["text"], phrase["check"])
         for text in update_data.get('pending_translated', []):
             self.status_manager.log_translated(text)
 

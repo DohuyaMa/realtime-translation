@@ -53,7 +53,7 @@ from .model_state import (
     format_memory,
     format_model_html,
 )
-from ...core.runtime import EdgeSettings
+from ...core.runtime import OFF, EdgeSettings
 
 PREVIEW_SAMPLE = (
     "Dzień dobry wszystkim. Dzisiaj omówimy wdrożenie klastra NixOS i"
@@ -72,6 +72,29 @@ PREVIEW_PREVIOUS = (
 )
 
 PAUSE_MIN_MS, PAUSE_MAX_MS = 200, 3000
+
+# LLM prompt variables (core/prompt.py PLACEHOLDERS / CHECK_PLACEHOLDERS)
+PROMPT_VARIABLES_HELP = (
+    "Змінні prompt і шаблону:\n"
+    "  {{text}} - текст whisper (обов'язкова в шаблоні запиту)\n"
+    "  {{vosk_text}} - текст Vosk того ж аудіо (лише зі звіркою; обов'язкова"
+    " в її шаблоні)\n"
+    "  {{source_lang}} - мова мовлення (Polish, Ukrainian, ...)\n"
+    "  {{target_lang}} - мова перекладу (English)"
+)
+
+
+def active_prompts_text(vosk_use: Optional[str]) -> str:
+    """Which prompt pair translates now (services.use.vosk; the runtime
+    Vosk state is in the status panel row «Звірка (rt-vosk)»)."""
+    if vosk_use == OFF:
+        return "Зараз активні: «Без Vosk» (звірку Vosk вимкнено в «Сервіси»)."
+    return (
+        "Зараз активні: «Зі звіркою Vosk» - для кожної фрази, яку Vosk"
+        " розпізнав; коли Vosk недоступний (див. «Звірка (rt-vosk)» на"
+        " головному вікні) - «Без Vosk»."
+    )
+
 
 # A model switch reloads the service and may download the model first.
 APPLY_TIMEOUT_S = 3600.0
@@ -135,10 +158,12 @@ class _Editor:
                 m = listed.get(mid)
                 if m is None:
                     label = mid
-                elif m["cached"]:
-                    label = f"{mid} (кеш)"
                 else:
-                    label = f"{mid} (завантажити ~{_size(m['size'])})"
+                    lang = f" [{m['language']}]" if m.get("language") else ""
+                    if m["cached"]:
+                        label = f"{mid}{lang} (кеш)"
+                    else:
+                        label = f"{mid}{lang} (завантажити ~{_size(m['size'])})"
                 if m and m.get("warning"):
                     label += f" ⚠ {m['warning']}"
                 box.addItem(label, mid)
@@ -236,6 +261,7 @@ class ServiceConfigPanel(QGroupBox):
     (``GET|POST /config``; a model change applies only via «Застосувати»)."""
 
     loaded = Signal(object)  # the chosen endpoint, after a successful load
+    state_changed = Signal()  # config, /v1/models or /status re-read
 
     def __init__(
         self,
@@ -251,6 +277,7 @@ class ServiceConfigPanel(QGroupBox):
         self._factory = client_factory
         self._bg = bg
         self.config: Optional[dict] = None
+        self.models: Optional[dict] = None  # GET /v1/models of the node
         self.editors: Dict[str, _Editor] = {}
         self.model_status: Optional[ModelStatus] = None
         self._in_flight: Optional[str] = None  # load | unload | apply
@@ -294,7 +321,7 @@ class ServiceConfigPanel(QGroupBox):
         self.apply_button.setToolTip(
             "Зміна моделі: вивантаження поточної, завантаження нової"
         )
-        self.apply_button.clicked.connect(self.apply)
+        self.apply_button.clicked.connect(lambda: self.apply())
         outer.addWidget(self.apply_button)
         self.status = QLabel(
             "" if self.endpoints else "сервісів цього типу не знайдено"
@@ -317,7 +344,7 @@ class ServiceConfigPanel(QGroupBox):
     def _clear(self) -> None:
         while self.form.rowCount():
             self.form.removeRow(0)
-        self.editors, self.config = {}, None
+        self.editors, self.config, self.models = {}, None, None
         self.model_status = None
         self.model_state.setText("модель: стан невідомий (натисніть «Оновити»)")
         self.memory.setText("")
@@ -390,6 +417,7 @@ class ServiceConfigPanel(QGroupBox):
             )
             self.memory.setText("; ".join(t for t in texts if t))
         self._update_buttons()
+        self.state_changed.emit()
 
     def _model_action(self, action: str) -> None:
         endpoint = self.endpoint()
@@ -455,7 +483,7 @@ class ServiceConfigPanel(QGroupBox):
             return
         config, models = result
         self._clear()
-        self.config = config
+        self.config, self.models = config, models
         self.refresh_state()
         schema = config.get("schema")
         for name, value in sorted(config.get("values", {}).items()):
@@ -490,10 +518,11 @@ class ServiceConfigPanel(QGroupBox):
                 out[name] = value
         return out
 
-    def apply(self) -> None:
+    def apply(self, changes: Optional[Dict[str, Any]] = None) -> None:
+        """POST /config with the edited fields (or exactly ``changes``)."""
         if self.config is None:
             return
-        changes = self.changes()
+        changes = self.changes() if changes is None else changes
         if not changes:
             self.status.setText("без змін")
             return
@@ -593,23 +622,100 @@ class AsrTab(QWidget):
 
 
 class VoskTab(QWidget):
-    """rt-vosk node: model state, load/unload and runtime config. Which
-    instance cross-checks whisper (or none): «Сервіси» / status panel."""
+    """rt-vosk node: its ONE model (language), load/unload, runtime config
+    and, when the session language differs from the model's, an explicit
+    one-click switch. Which instance cross-checks whisper (or none):
+    «Сервіси» / status panel."""
 
-    def __init__(self, endpoints, client_factory, bg, parent=None):
+    def __init__(
+        self, settings: EdgeSettings, endpoints, client_factory, bg, parent=None
+    ):
         super().__init__(parent)
+        self.source_language = settings.source_language
         layout = QVBoxLayout(self)
         note = QLabel(
             "Vosk розпізнає той самий звук, що й whisper, і не вигадує слів:"
             " LLM перекладає лише те, що чув Vosk (промпт звірки - вкладка"
             " «Переклад (LLM)»); сегмент без жодного слова у Vosk не"
-            " перекладається. Вимкнути звірку: «Сервіси» → «Звірка Vosk»."
+            " перекладається. На вузлі одночасно одна модель Vosk однієї мови;"
+            " фраза іншою мовою - без звірки (лише whisper). Вимкнути звірку:"
+            " «Сервіси» → «Звірка Vosk»."
         )
         note.setWordWrap(True)
         layout.addWidget(note)
         self.service = ServiceConfigPanel("vosk", endpoints, client_factory, bg)
         layout.addWidget(self.service)
+        self.language_hint = QLabel("")
+        self.language_hint.setWordWrap(True)
+        layout.addWidget(self.language_hint)
+        self.switch_button = QPushButton("")
+        self.switch_button.setVisible(False)
+        self.switch_button.clicked.connect(self.switch_model)
+        layout.addWidget(self.switch_button)
         layout.addStretch()
+        self._target: Optional[str] = None  # model the button would load
+        self.service.state_changed.connect(self.update_language_hint)
+
+    def _languages(self) -> Dict[str, str]:
+        """Model id -> language, from the node's GET /v1/models."""
+        models = (self.service.models or {}).get("models", [])
+        return {m["id"]: m.get("language") or "" for m in models}
+
+    def active_model(self) -> Optional[str]:
+        """The model the node actually holds (else the configured one)."""
+        ms = self.service.model_status
+        if ms is not None and ms.model_id:
+            return ms.model_id
+        return self.service.configured_model()
+
+    def model_for(self, language: str) -> Optional[str]:
+        """A model of ``language``: one already on the node first."""
+        models = (self.service.models or {}).get("models", [])
+        of_lang = [m for m in models if m.get("language") == language]
+        of_lang.sort(key=lambda m: not m.get("cached"))
+        return of_lang[0]["id"] if of_lang else None
+
+    def update_language_hint(self) -> None:
+        model = self.active_model()
+        langs = self._languages()
+        self._target = None
+        if model is None or model not in langs:
+            self.language_hint.setText("")
+            self.switch_button.setVisible(False)
+            return
+        lang = langs[model]
+        src = self.source_language
+        text = f"Модель Vosk на вузлі: {model} (мова «{lang}»)."
+        style = ""
+        if src == "auto":
+            text += (
+                " Мова мовлення - auto: звірка лише для фраз мовою"
+                f" «{lang}», решта - лише whisper."
+            )
+        elif src != lang:
+            style = "color: #b36b00;"
+            text += (
+                f" Мова мовлення - «{src}»: звірка Vosk недоступна, переклад"
+                " лише з whisper."
+            )
+            self._target = self.model_for(src)
+            if self._target is None:
+                text += f" Моделі Vosk для «{src}» немає в реєстрі."
+        self.language_hint.setText(text)
+        self.language_hint.setStyleSheet(style)
+        self.switch_button.setText(f"Завантажити модель для «{src}» ({self._target})")
+        self.switch_button.setVisible(self._target is not None)
+        self.switch_button.setEnabled(not self.service.busy())
+
+    def set_source_language(self, language: str) -> None:
+        """«Мова» changed in this dialog (not saved yet): re-check the hint."""
+        self.source_language = language
+        self.update_language_hint()
+
+    def switch_model(self) -> None:
+        """Explicit: POST /config model = a model of the session language."""
+        if self._target is not None:
+            self.service.apply({"model": self._target})
 
 
 class TtsTab(QWidget):
@@ -792,24 +898,26 @@ class LlmTab(QWidget):
         model_row.addWidget(self.models_button)
         form.addRow("Модель:", model_row)
         form.addRow("", self.models_status)
-        form.addRow("System prompt:", self.system_prompt)
-        form.addRow("Шаблон запиту:", self.user_template)
-        form.addRow("System prompt (звірка Vosk):", self.check_system_prompt)
-        form.addRow("Шаблон запиту (звірка Vosk):", self.check_user_template)
+        form.addRow(QLabel(PROMPT_VARIABLES_HELP))
+        plain = QGroupBox("Без Vosk (лише текст whisper)")
+        plain_form = QFormLayout(plain)
+        plain_form.addRow("System prompt:", self.system_prompt)
+        plain_form.addRow("Шаблон запиту:", self.user_template)
+        check = QGroupBox("Зі звіркою Vosk (текст whisper + текст Vosk)")
+        check_form = QFormLayout(check)
+        check_form.addRow("System prompt:", self.check_system_prompt)
+        check_form.addRow("Шаблон запиту:", self.check_user_template)
+        self.active_prompts = QLabel(active_prompts_text(settings.use.vosk))
+        self.active_prompts.setWordWrap(True)
+        self.active_prompts.setStyleSheet("font-weight: bold;")
+        form.addRow(self.active_prompts)
+        form.addRow(plain)
+        form.addRow(check)
         form.addRow("Слів у {{text}} (максимум):", self.words_per_request)
         pause_row = QHBoxLayout()
         pause_row.addWidget(self.end_silence_ms)
         pause_row.addWidget(self.end_silence_off)
         form.addRow("Пауза для перекладу, мс:", pause_row)
-        form.addRow(
-            "",
-            QLabel(
-                "Змінні: {{text}} - сюди вставляються слова (обов'язкова),"
-                " {{source_lang}}, {{target_lang}}; у шаблоні звірки ще"
-                " {{text_check}} - текст Vosk (обов'язкова). Звірка - для кожної"
-                " фрази, яку розпізнав Vosk; без Vosk - звичайний prompt"
-            ),
-        )
         form.addRow("", reset)
         form.addRow("Temperature:", self.temperature)
         form.addRow("Max tokens:", self.max_tokens_cap)

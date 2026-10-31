@@ -344,7 +344,14 @@ class SettingsDialog(QDialog):
         background=None,
     ):
         super().__init__(parent)
-        from .service_tabs import AsrTab, Background, LlmTab, TtsTab, VoskTab
+        from .service_tabs import (
+            AsrTab,
+            Background,
+            LlmTab,
+            TtsTab,
+            VoskTab,
+            active_prompts_text,
+        )
 
         self.setWindowTitle("Налаштування")
         self.setMinimumWidth(640)
@@ -361,6 +368,7 @@ class SettingsDialog(QDialog):
             self.bg,
         )
         self.vosk_tab = VoskTab(
+            settings,
             service_choices("vosk", settings, services),
             service_client_factory("vosk", settings),
             self.bg,
@@ -379,6 +387,14 @@ class SettingsDialog(QDialog):
             self.bg,
         )
         self.segmentation_tab = SegmentationTab(settings)
+        source = self.endpoints_tab.source_language
+        source.currentTextChanged.connect(self.vosk_tab.set_source_language)
+        vosk_use = self.endpoints_tab.use["vosk"]
+        vosk_use.currentIndexChanged.connect(
+            lambda _i: self.llm_tab.active_prompts.setText(
+                active_prompts_text(vosk_use.currentData())
+            )
+        )
         tabs.addTab(self.endpoints_tab, "Сервіси")
         tabs.addTab(self.asr_tab, "Розпізнавання (ASR)")
         tabs.addTab(self.vosk_tab, "Звірка (Vosk)")

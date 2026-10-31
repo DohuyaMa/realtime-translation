@@ -50,9 +50,9 @@ services:
     # rejected with a WARNING and the default template is used.
     system_prompt: ""           # "" = built-in interpreter prompt
     user_template: ""           # "" = "{{text}}"
-    # Phrases Vosk also recognized (TASK-SYS-12): {{text}} = whisper, {{text_check}} =
+    # Phrases Vosk also recognized (TASK-SYS-12): {{text}} = whisper, {{vosk_text}} =
     # Vosk (both required in check_user_template). "" = built-in ("B3" prompt,
-    # "EXACT: {{text_check}}\nFLUENT: {{text}}").
+    # "EXACT: {{vosk_text}}\nFLUENT: {{text}}").
     check_system_prompt: ""
     check_user_template: ""
 
@@ -85,6 +85,7 @@ audio:
 ui:
   minimize_to_tray: false
   start_minimized: false
+  show_vosk_text: true          # «Показувати текст Vosk» under each recognized phrase
 
 logging:
   level: "INFO"

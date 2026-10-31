@@ -46,7 +46,7 @@ let
         example = [ "cpu" "cuda" ];
         description = "Devices the service may switch between at runtime (RT_DEVICES; the `device` choices of GET /config, POST /config reloads the model). At most one GPU kind; it selects the bundle variant (the GPU bundle also runs on cpu) and opens the GPU sandbox even while running on cpu.";
       };
-      model = mkOption { type = types.nullOr types.str; default = null; description = "Model id/path (RT_MODEL; rt-vosk: comma list of Vosk model aliases, one per language). null = service default."; };
+      model = mkOption { type = types.nullOr types.str; default = null; description = "Model id/path (RT_MODEL; rt-vosk: one Vosk model alias, its language is the only one served). null = service default."; };
       configState = mkOption { type = types.nullOr types.str; default = "${svc.stateDir}/runtime-config.json"; description = "Runtime config state file (RT_CONFIG_STATE); null = not emitted."; };
       modelDir = mkOption { type = types.str; default = "${svc.stateDir}/models"; description = "Model cache (RT_MODEL_DIR; HF_HOME=<modelDir>/hf)."; };
       apiTokenFile = mkOption {

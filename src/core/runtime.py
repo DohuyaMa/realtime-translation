@@ -78,7 +78,7 @@ class LlmSettings:
     system_prompt: str = DEFAULT_SYSTEM_PROMPT
     user_template: str = DEFAULT_USER_TEMPLATE
     # two-text mode (whisper + Vosk cross-check, TASK-SYS-12): {{text}} =
-    # whisper, {{text_check}} = Vosk; used for every phrase Vosk recognized
+    # whisper, {{vosk_text}} = Vosk; used for every phrase Vosk recognized
     check_system_prompt: str = DEFAULT_CHECK_SYSTEM_PROMPT
     check_user_template: str = DEFAULT_CHECK_USER_TEMPLATE
     # words of recognized text per LLM call; longer text is split (sentence

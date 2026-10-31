@@ -24,7 +24,7 @@
 
 Сервіси доступні лише через HTTP (OpenAI-сумісний стиль): `POST /audio/transcriptions`, `POST /audio/speech`, `GET /audio/voices`, `GET /models` (pinned моделі сервісу: `cached`, `size`, `warning` для великих моделей на CPU-вузлі), `GET /health`, `GET /status`, `GET|POST /config` (`GET` віддає також `schema`: для кожного поля тип `bool|int|float|choice|multichoice|model|text`, `choices`, `min`/`max`, опис, `reload` - з неї діалог будує випадаючі списки, лічильники й прапорці). Опційний токен: `RT_API_TOKEN_FILE` (заголовок `Authorization: Bearer <token>` або `Token <token>`; edge шле `Token`).
 
-`rt-vosk` (порт 8092, TASK-SYS-12: другий незалежний ASR як звірка для whisper у режимі `translate`, див. «Звірка Vosk» нижче) - той самий runtime (`/health`, `/status`, `/config`, `POST /model/{load,unload}`, токен, `listenAddresses`, вивантаження за простоєм) і той самий запит, що й `rt-asr`: `POST /v1/audio/transcriptions` (multipart `file` + `language`) -> `{"text", "language", "words": [{"word", "conf", "start", "end"}]}`, де `conf` - впевненість Kaldi для слова (0..1). `RT_MODEL` - список моделей через кому, по одній на мову (default `vosk-small-uk-v3-nano,vosk-small-pl-0.22`); мову Vosk не визначає, тож `language` обов'язкова, якщо завантажено більше однієї моделі (інакше 400; мова без моделі - 400 `unsupported_language`). `GET /v1/models` показує `language` кожної моделі. Лише CPU; `MemoryDenyWriteExecute` увімкнено.
+`rt-vosk` (порт 8092, TASK-SYS-12: другий незалежний ASR як звірка для whisper у режимі `translate`, див. «Звірка Vosk» нижче) - той самий runtime (`/health`, `/status`, `/config`, `POST /model/{load,unload}`, токен, `listenAddresses`, вивантаження за простоєм) і той самий запит, що й `rt-asr`: `POST /v1/audio/transcriptions` (multipart `file` + `language`) -> `{"text", "language", "words": [{"word", "conf", "start", "end"}]}`, де `conf` - впевненість Kaldi для слова (0..1). `RT_MODEL` - ОДНА модель Vosk (default `vosk-small-uk-v3-nano`): сервіс тримає в пам'яті рівно одну модель однієї мови. Мову Vosk не визначає: `language` порожня / `auto` - мова моделі; інша мова - 409 `model_language_mismatch` (модель запитом ніколи не перемикається; перемикання - явне `POST /config {"values": {"model": ...}}`, у UI - вкладка «Звірка (Vosk)»). `GET /v1/models` показує `language` кожної моделі. Лише CPU; `MemoryDenyWriteExecute` увімкнено.
 
 Пакети flake: `rt-edge` (default package, `nix run .`), `rt-asr-{cpu,gpu}`, `rt-vosk-cpu`, `rt-tts-{cpu,gpu}` (також ROCm-варіант ASR, якщо не `broken`), `nixosModules.rt-speech`, `nixosModules.virtual-sinks`, `overlays.default` (`pkgs.rtSpeech.{asr,vosk,tts}.<variant>`), `lib.rtSpeech`.
 
@@ -45,7 +45,7 @@ RT_VOSK_BACKEND=fake python -m src.services.vosk
 # реальні backend-и
 RT_ASR_BACKEND=faster-whisper python -m src.services.asr
 python -m src.services.tts          # kokoro за замовчуванням
-python -m src.services.vosk         # vosk, моделі uk + pl
+python -m src.services.vosk         # vosk, модель uk (RT_MODEL - інша)
 ```
 
 Edge:
@@ -126,7 +126,7 @@ rt-models --model-dir /var/lib/rt-asr/models list
 | `RT_LISTEN_ADDRESSES` | `127.0.0.1` | BOOTSTRAP |
 | `RT_LOG_LEVEL` | `info` | TUNABLE |
 | `RT_MAX_PENDING` | `16` | BOOTSTRAP |
-| `RT_MODEL` | `vosk-small-uk-v3-nano,vosk-small-pl-0.22` | RELOAD |
+| `RT_MODEL` | `vosk-small-uk-v3-nano` | RELOAD |
 | `RT_MODEL_DIR` | `(не задано)` | BOOTSTRAP |
 | `RT_PORT` | `8092` | BOOTSTRAP |
 | `RT_VOSK_BACKEND` | `vosk` | RELOAD |
@@ -200,9 +200,10 @@ curl -s -X POST http://127.0.0.1:8091/model/load -H "$H"     # завантаж�
 
 **Звірка Vosk (режим `translate`).** Стадія ASR шле той самий аудіосегмент у whisper і `rt-vosk` паралельно (затримка = довший із двох). Vosk не вигадує слів (але спотворює їх, без пунктуації), whisper пише грамотно, але може вигадати фразу («Дякую за перегляд!»). Тому:
 - **гейт у коді**: у тексті Vosk немає жодного слова з >= 2 літер (тиша, філер «е») - сегмент не йде в LLM (лог, подія в журналі UI, лічильник `vosk_gate_dropped`); те саме для частини фрази, на яку після розрізу по реченнях не припало жодного слова Vosk;
-- **LLM отримує обидва тексти**: system prompt звірки (`services.llm.check_system_prompt`, типовий - «B3» з перевірки 2026-10-31: Vosk першим як EXACT, whisper як FLUENT) і шаблон `services.llm.check_user_template` (типовий `EXACT: {{text_check}}\nFLUENT: {{text}}`); інструкції лише в system prompt, повідомлення користувача - лише тексти з мітками. Незавершені речення склеюються/ріжуться для обох текстів разом (слова Vosk розподіляються за часом відносно сегментів whisper);
-- **мова**: Vosk мову не визначає. `source_language` задана - вона ж для Vosk. `auto` - Vosk паралельно в мові, яку whisper визначив для попередньої фрази; перша фраза сесії або зміна мови - Vosk після whisper у щойно визначеній мові (лічильник `vosk_after_whisper`);
+- **LLM отримує обидва тексти**: system prompt звірки (`services.llm.check_system_prompt`, типовий - «B3» з перевірки 2026-10-31: Vosk першим як EXACT, whisper як FLUENT) і шаблон `services.llm.check_user_template` (типовий `EXACT: {{vosk_text}}\nFLUENT: {{text}}`); інструкції лише в system prompt, повідомлення користувача - лише тексти з мітками. Незавершені речення склеюються/ріжуться для обох текстів разом (слова Vosk розподіляються за часом відносно сегментів whisper);
+- **мова**: Vosk мову не визначає, а на вузлі одна модель однієї мови. `source_language` задана - вона ж для Vosk; модель іншої мови - сервіс відповідає 409, фраза йде лише з whisper, рядок «Звірка (rt-vosk)» показує `недоступний (немає моделі для «pl»: ...)`; вкладка «Звірка (Vosk)» показує мову моделі вузла і кнопку «Завантажити модель для «<мова>»» (явна дія, автоматично модель не перемикається). `auto` - Vosk паралельно в мові, яку whisper визначив для попередньої фрази; перша фраза сесії або зміна мови - Vosk після whisper у щойно визначеній мові (лічильник `vosk_after_whisper`);
 - **вимкнено / недоступний**: `services.use.vosk = off` (панель «Сервіси» або діалог) або rt-vosk не знайдено / помилка запиту - фраза перекладається лише з whisper зі звичайним prompt. Режим видно в панелі «Сервіси» (рядок «Звірка (rt-vosk)»: `звірка увімкнена` / `вимкнено` / `недоступний (причина)`), у `get_stats()["vosk"]` (`mode`: `on`/`off`/`unavailable`, `error`), зміна стану - WARNING у лозі; фрази без звірки через недоступність рахує `vosk_whisper_only`.
+- **порівняння текстів**: у вікні «Розпізнаний текст» під кожною фразою whisper - рядок `Vosk: …` (що почув Vosk у тому ж аудіо; `(без звірки)` / `(нічого не почув)`), прапорець «Показувати текст Vosk» (`ui.show_vosk_text`, default `true`).
 
 ## 5. Конфіг edge
 
@@ -225,7 +226,7 @@ curl -s -X POST http://127.0.0.1:8091/model/load -H "$H"     # завантаж�
 | `services.llm.{max_tokens_cap,temperature,context_pairs,timeout_s}` | - | 512 / 0.1 / 3 / 15 |
 | `services.llm.system_prompt` | - | system prompt перекладу; змінні `{{source_lang}}`, `{{target_lang}}`; `""` = вбудований |
 | `services.llm.user_template` | - | шаблон запиту до LLM: `{{text}}` (обов'язкова - куди вставляються слова), `{{source_lang}}`, `{{target_lang}}`; `""` = `{{text}}`. Старий синтаксис `{lang}`/`{text}` - WARNING, використовується типовий шаблон (видно в діалозі) |
-| `services.llm.{check_system_prompt,check_user_template}` | - | prompt і шаблон для фраз зі звіркою Vosk: `{{text}}` - whisper, `{{text_check}}` - Vosk (у шаблоні обидві обов'язкові), `{{source_lang}}`, `{{target_lang}}`; `""` = вбудовані (B3). У вкладці «Переклад» поряд зі звичайними, з попереднім переглядом |
+| `services.llm.{check_system_prompt,check_user_template}` | - | prompt і шаблон для фраз зі звіркою Vosk: `{{text}}` - whisper, `{{vosk_text}}` - Vosk (у шаблоні обидві обов'язкові), `{{source_lang}}`, `{{target_lang}}`; `""` = вбудовані (B3). У вкладці «Переклад» - дві групи («Без Vosk» і «Зі звіркою Vosk»), список змінних з описом і рядок, яка пара активна зараз (за `services.use.vosk`), з попереднім переглядом |
 | `services.llm.words_per_request` | - | («Слів у {{text}} (максимум)» поряд із шаблоном) МАКСИМУМ слів; неповний запит ніколи не чекає: фраза йде в переклад, щойно після останнього слова пауза `segmentation.translate.end_silence_ms` («Пауза для перекладу, мс» у вкладці «Переклад», 200-3000, default 700) або досягнуто soft/hard max. Скільки слів розпізнаного тексту в одному запиті до LLM (default 40, >= 1); довший текст ділиться по кінцях речень (якщо вміщаються, інакше по словах), кожна частина йде через шаблон, результати з'єднуються по порядку. Вкладка «Переклад» показує попередній перегляд запитів для зразкового речення |
 | `services.asr.prompt` | - | шаблон Whisper prompt (словник, імена, стиль); необов'язкові змінні `{{previous_text}}` (останні `previous_words` розпізнаних слів) і `{{source_lang}}`. Без змінних текст іде як є, попередні слова не додаються; `""` - без prompt; `null` = `{{previous_text}}`. Обрізається до ~300 символів (найстаріші слова цілими). Невідомі змінні - помилка збереження; у вкладці «Розпізнавання» попередній перегляд |
 | `services.asr.previous_words` | - | скільки останніх розпізнаних слів іде в `{{previous_text}}` (default 30, 0 = жодних); в UI - «Слів у {{previous_text}}» поряд із шаблоном, перегляд показує фактично підставлену кількість |

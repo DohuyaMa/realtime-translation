@@ -1,10 +1,10 @@
-"""Vosk (Kaldi) backend: one model per language, CPU only."""
+"""Vosk (Kaldi) backend: one single-language model, CPU only."""
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional
 
 import numpy as np
 
@@ -38,37 +38,34 @@ class KaldiVoskBackend:
     ) -> None:
         self._settings = settings
         self.model_id = settings.model
+        self.language = settings.language
         self._prepare = prepare
-        self._paths: Dict[str, Path] = {}
-        self._models: Dict[str, Any] = {}
+        self._path: Optional[Path] = None
+        self._model: Optional[Any] = None
 
     def fetch(self, progress: Optional[Progress] = None) -> None:
-        # one model after another; the download progress restarts per model
-        model_settings = ModelSettings.from_env()
-        self._paths = {
-            lang: self._prepare(alias, model_settings, progress)
-            for lang, alias in self._settings.languages.items()
-        }
+        self._path = self._prepare(
+            self._settings.model, ModelSettings.from_env(), progress
+        )
 
     def load(self) -> None:
-        if not self._paths:
+        if self._path is None:
             raise RuntimeError("load() before fetch()")
         from vosk import Model, SetLogLevel
 
         SetLogLevel(0 if self._settings.log_level in ("trace", "debug") else -1)
-        self._models = {lang: Model(str(path)) for lang, path in self._paths.items()}
+        self._model = Model(str(self._path))
 
     def unload(self) -> None:
         # vosk.Model frees the Kaldi model when the last reference goes
-        self._models = {}
-
-    def languages(self) -> Tuple[str, ...]:
-        return tuple(self._models)
+        self._model = None
 
     def transcribe(self, audio: np.ndarray, language: str) -> Transcript:
         from vosk import KaldiRecognizer
 
-        rec = KaldiRecognizer(self._models[language], TARGET_RATE)
+        if self._model is None:
+            raise RuntimeError("transcribe() before load()")
+        rec = KaldiRecognizer(self._model, TARGET_RATE)
         rec.SetWords(True)
         pcm = float_to_pcm16(audio)
         results: List[Dict[str, Any]] = []
