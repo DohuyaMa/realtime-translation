@@ -153,6 +153,11 @@ class DirectAdapter:
     def get_status(self) -> Dict:
         return self.translation_system.get_stats()
 
+    def set_event_callback(self, cb: Optional[Callable[[Dict], None]]) -> None:
+        """Pipeline status events (errors, rejected translations...); called
+        from pipeline threads."""
+        self.translation_system.set_status_callback(cb)
+
     # -- languages ------------------------------------------------
     def set_languages(self, source_lang: str, target_lang: str = "en") -> bool:
         self.source_lang, self.target_lang = source_lang, target_lang

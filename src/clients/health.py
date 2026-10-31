@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional
 from loguru import logger
 
 from .llm import LlmClient
+from .model_status import parse_status
 from .pool import SpeechPools
 from .session import WorkerSessions
 
@@ -21,6 +22,10 @@ def _entry(service: str, url: Optional[str], **kw: Any) -> Dict[str, Any]:
         "ready": False,
         "pending": None,
         "model": None,
+        "state": None,
+        "model_error": None,
+        "download": None,
+        "memory": None,
         "device": None,
         "error": "unreachable",
     }
@@ -29,18 +34,27 @@ def _entry(service: str, url: Optional[str], **kw: Any) -> Dict[str, Any]:
 
 
 def _from_status(service: str, url: str, status: dict) -> Dict[str, Any]:
-    model = status.get("model")
-    if isinstance(model, dict):
-        model = model.get("id")
+    """Entry from rt-asr/rt-tts /status: the ACTUAL model and its state."""
+    ms = parse_status(status)
     pending = status.get("pending")
+    download = (
+        {"done_mb": ms.download_done_mb, "total_mb": ms.download_total_mb}
+        if ms.download_total_mb is not None
+        else None
+    )
+    memory = {"rss_mb": ms.rss_mb, "swap_mb": ms.swap_mb, "vram_mb": ms.vram_mb}
     return _entry(
         service,
         url,
         connected=True,
-        ready=bool(status.get("ready", True)),
+        ready=ms.ready,
         pending=pending if isinstance(pending, int) else None,
-        model=model,
-        device=status.get("device"),
+        model=ms.model_id,
+        state=ms.state,
+        model_error=ms.error,
+        download=download,
+        memory=memory if any(v is not None for v in memory.values()) else None,
+        device=ms.device,
         error=None,
     )
 

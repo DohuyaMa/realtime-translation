@@ -1,6 +1,6 @@
 """Concrete implementation of the TranslatorController using adapters."""
 
-from typing import Dict, List
+from typing import Callable, Dict, List, Optional
 
 from .controller import TranslatorController, Device
 from ..adapters.direct_adapter import DirectAdapter
@@ -32,6 +32,10 @@ class ConcreteTranslatorController(TranslatorController):
     def get_status(self) -> Dict:
         """Get system status."""
         return self._adapter.get_status()
+
+    def set_event_callback(self, cb: Optional[Callable[[Dict], None]]) -> None:
+        """Subscribe to pipeline status events (from pipeline threads)."""
+        self._adapter.set_event_callback(cb)
 
     def set_languages(self, source_lang: str, target_lang: str = "en") -> bool:
         """Set source and target languages."""

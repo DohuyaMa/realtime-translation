@@ -304,9 +304,32 @@ class FakeServiceClient:
             "version": 3,
         }
         self.posted = []
+        self.actions = []
+        self.model_state = {"id": "whisper-small", "state": "ready", "error": None}
 
     def get_config(self):
         return self.config
+
+    def get_status(self):
+        return {
+            "ready": self.model_state["state"] == "ready",
+            "model": dict(self.model_state, device="cpu"),
+            "memory": {"rss_mb": 2800, "swap_mb": 5700, "vram_mb": None},
+        }
+
+    def load_model(self, *, timeout_s=None):
+        self.actions.append("load")
+        self.model_state = dict(
+            self.model_state,
+            state="downloading",
+            download={"done_mb": 1, "total_mb": 4},
+        )
+        return {"state": "downloading"}
+
+    def unload_model(self, *, timeout_s=None):
+        self.actions.append("unload")
+        self.model_state = dict(self.model_state, state="unloaded")
+        return {"state": "unloaded"}
 
     def models(self):
         return {
@@ -726,3 +749,154 @@ def test_status_panel_shows_stage_timing(app):
     assert "Фраза #7: ASR 3800 мс · LLM 400 мс (усього 900) · TTS 4700 мс" in text
     assert "кінець мовлення → звук 8900 мс" in text
     assert "черги: llm 1, tts 2" in text and "не встигає: tts ×3" in text
+
+
+_TABS = []  # keep the tabs alive: the panel's widgets die with them
+
+
+def _asr_panel(client):
+    from src.ui.widgets.service_tabs import AsrTab, Background
+
+    tab = AsrTab(
+        resolve_edge_settings({}, {}),
+        [_ep("cyborg", "http://127.0.0.1:8091", True)],
+        lambda e: client,
+        Background(sync=True),
+    )
+    _TABS.append(tab)
+    return tab.service
+
+
+def test_service_panel_shows_actual_model_not_configured(app):
+    client = FakeServiceClient()
+    # owner picked large-v3, the service still runs turbo after a failed load
+    client.config["values"]["model"] = "whisper-large-v3"
+    client.model_state = {
+        "id": "whisper-large-v3-turbo",
+        "state": "error",
+        "error": "CUDA failed with error out of memory",
+    }
+    panel = _asr_panel(client)
+    assert not panel.load_model_button.isEnabled()  # state unknown yet
+    panel.load()
+    text = panel.model_state.text()
+    assert "<b>whisper-large-v3-turbo</b>" in text
+    assert "CUDA failed with error out of memory" in text and "#c00000" in text
+    assert "у налаштуваннях: whisper-large-v3, але фактично" in text
+    assert panel.memory.text() == "RAM 2.7 ГБ · swap 5.6 ГБ · VRAM немає"
+    # error: both explicit actions available
+    assert panel.load_model_button.isEnabled()
+    assert panel.unload_model_button.isEnabled()
+
+
+def test_service_panel_load_unload_buttons_and_polling(app):
+    client = FakeServiceClient()
+    panel = _asr_panel(client)
+    panel.load()
+    assert panel.unload_model_button.isEnabled()
+    assert not panel.load_model_button.isEnabled()  # ready already
+    panel.unload_model()
+    assert client.actions == ["unload"]
+    assert "не завантажена" in panel.model_state.text()
+    assert panel.load_model_button.isEnabled()
+    assert not panel.poll_timer.isActive()
+    panel.load_model()
+    assert client.actions == ["unload", "load"]
+    # downloading: progress shown, everything disabled, /status polled
+    assert "завантажується з мережі 1/4 МБ (25%)" in panel.model_state.text()
+    assert panel.busy() and panel.poll_timer.isActive()
+    for b in (panel.load_model_button, panel.unload_model_button, panel.apply_button):
+        assert not b.isEnabled()
+    client.model_state = {"id": "whisper-small", "state": "ready", "error": None}
+    panel.refresh_state()  # the timer's tick
+    assert "готова (cpu)" in panel.model_state.text()
+    assert not panel.poll_timer.isActive() and panel.apply_button.isEnabled()
+
+
+def test_service_panel_status_failure_is_shown(app):
+    client = FakeServiceClient()
+
+    def boom():
+        raise RuntimeError("asr: unreachable")
+
+    client.get_status = boom
+    panel = _asr_panel(client)
+    panel.load()
+    assert "стан моделі недоступний: asr: unreachable" in panel.model_state.text()
+    assert not panel.load_model_button.isEnabled()
+
+
+def test_status_panel_per_instance_model_state_and_counters(app):
+    panel = ServiceStatusPanel()
+    panel.update_status(
+        {
+            "choices": {
+                "asr": [{"node": "cyborg", "url": "http://c:8091", "local": False}]
+            },
+            "health": {
+                "asr": [
+                    {
+                        "url": "http://c:8091",
+                        "connected": True,
+                        "ready": False,
+                        "model": "whisper-distil-large-v3.5",
+                        "state": "error",
+                        "model_error": "CUDA out of memory",
+                        "memory": {"rss_mb": 2800, "swap_mb": 5700, "vram_mb": 1600},
+                    },
+                    {"url": "http://x:8091", "connected": False, "error": "timeout"},
+                ],
+            },
+            "llm_rejected": 2,
+            "asr_no_words": 5,
+        }
+    )
+    asr = panel._details["asr"].text()
+    assert "cyborg: модель: <b>whisper-distil-large-v3.5</b>" in asr
+    assert "помилка: CUDA out of memory" in asr
+    assert "VRAM 1.6 ГБ" in asr
+    assert "http://x:8091" in asr and "недоступний (timeout)" in asr
+    stats = panel._timing.text()
+    assert "відкинуто LLM-відповідей (не переклад): 2" in stats
+    assert "ASR без слів: 5" in stats
+
+
+def test_pipeline_events_described_and_deduplicated():
+    from src.ui.controller.ui_controller import PipelineEventLog
+
+    now = [0.0]
+    log = PipelineEventLog(clock=lambda: now[0])
+    rejected = {
+        "status": "translation_rejected",
+        "reason": "length",
+        "original_text": "Dzień dobry",
+        "output": "I don't see any transcript",
+    }
+    level, msg = log.lines(rejected)
+    assert level == "WARN"
+    assert msg == (
+        "Переклад відкинуто (length): «Dzień dobry» → «I don't see any transcript»"
+    )
+    err = {"status": "error", "service": "asr", "kind": "not_ready", "error": "x"}
+    level, msg = log.lines(err)
+    assert level == "ERROR" and msg.startswith("ASR: модель не завантажена")
+    assert log.lines(err) is None  # repeated within the window: counted
+    now[0] = 11.0
+    assert log.lines(err)[1].endswith("(ще ×1 за 10 с)")
+    assert log.lines({"status": "timing", "timing": {}}) is None
+
+
+def test_main_window_logs_pipeline_events(app, cfg):
+    from unittest.mock import MagicMock
+
+    ctl = MagicMock()
+    ctl.get_input_devices.return_value = []
+    ctl.get_output_devices.return_value = []
+    win = _window(ctl)
+    ctl.set_pipeline_event_callback.assert_called_once()
+    emit = ctl.set_pipeline_event_callback.call_args[0][0]
+    emit({"status": "error", "service": "tts", "kind": "not_ready"})
+    app.processEvents()
+    assert (
+        "ERROR: TTS: модель не завантажена" in win.status_logger.log_view.toPlainText()
+    )

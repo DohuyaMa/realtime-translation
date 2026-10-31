@@ -29,7 +29,7 @@ T = TypeVar("T")
 
 def is_retryable(err: ServiceError) -> bool:
     # "auth": the client already re-fetched the token once; try the next node
-    return err.kind in ("unreachable", "timeout", "auth") or (
+    return err.kind in ("unreachable", "timeout", "auth", "not_ready") or (
         err.kind == "http" and err.status_code == 503
     )
 

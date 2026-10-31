@@ -10,7 +10,8 @@ from loguru import logger
 
 
 class ServiceError(Exception):
-    """A request failed. kind: unreachable | timeout | auth | http | busy."""
+    """A request failed. kind: unreachable | timeout | auth | http | busy |
+    not_ready (HTTP 503 from rt-asr/rt-tts: the model is not loaded/ready)."""
 
     def __init__(
         self,
@@ -96,6 +97,10 @@ def raise_for_response(service: str, resp: httpx.Response) -> None:
         raise ServiceError(
             service, "auth", f"HTTP {resp.status_code}", resp.status_code
         )
+    if resp.status_code == 503:
+        code, message = _error_detail(resp)
+        if code.startswith("model_"):
+            raise ServiceError(service, "not_ready", f"{code}: {message}", 503)
     if resp.status_code >= 400:
         raise ServiceError(
             service,
@@ -103,6 +108,17 @@ def raise_for_response(service: str, resp: httpx.Response) -> None:
             f"HTTP {resp.status_code}: {resp.text[:200]}",
             resp.status_code,
         )
+
+
+def _error_detail(resp: httpx.Response) -> tuple:
+    """(code, message) of an OpenAI-style error body; ("", "") otherwise."""
+    try:
+        err = resp.json().get("error")
+    except (ValueError, AttributeError):
+        return "", ""
+    if not isinstance(err, dict):
+        return "", ""
+    return str(err.get("code") or ""), str(err.get("message") or "")
 
 
 def json_body(service: str, resp: httpx.Response) -> dict:
@@ -175,9 +191,14 @@ class ServiceClient:
             return False
         return True
 
+    def get_status(self) -> dict:
+        """GET /status; raises ServiceError (the UI shows why)."""
+        return self._json(self._request("GET", "/status"))
+
     def status(self) -> Optional[dict]:
+        """GET /status for the health poller: None when unavailable."""
         try:
-            return self._json(self._request("GET", "/status"))
+            return self.get_status()
         except ServiceError:
             return None
 
@@ -200,6 +221,15 @@ class ServiceClient:
         return self._json(
             self._request("POST", "/config", json=body, timeout_s=timeout_s)
         )
+
+    def load_model(self, *, timeout_s: Optional[float] = None) -> dict:
+        """POST /model/load: start loading the configured model (async on
+        the service; poll ``get_status`` for download/load progress)."""
+        return self._json(self._request("POST", "/model/load", timeout_s=timeout_s))
+
+    def unload_model(self, *, timeout_s: Optional[float] = None) -> dict:
+        """POST /model/unload: free the model's RAM/VRAM."""
+        return self._json(self._request("POST", "/model/unload", timeout_s=timeout_s))
 
     def models(self) -> dict:
         """GET /v1/models: pinned models, ``cached`` flag, ``current``."""

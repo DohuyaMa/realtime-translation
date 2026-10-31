@@ -1,8 +1,9 @@
 """Status panel for the remote services: ASR, LLM worker and TTS (serving node)."""
 
+from html import escape
 from typing import Dict, List, Optional
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QComboBox,
     QGridLayout,
@@ -12,6 +13,9 @@ from PySide6.QtWidgets import (
     QPushButton,
     QVBoxLayout,
 )
+
+from ...clients.model_status import ModelStatus
+from .model_state import ERROR_STYLE, format_memory, format_model_html
 
 SERVICES = {
     "asr": "ASR (rt-asr)",
@@ -61,8 +65,55 @@ def format_llm_detail(entry: Optional[Dict], session: Optional[Dict]) -> str:
     return ", ".join(parts)
 
 
-def format_timing(status: Dict) -> str:
-    """Last phrase's per-stage latency, queue depths, backpressure counters."""
+def _entry_status(entry: Dict) -> ModelStatus:
+    memory = entry.get("memory") or {}
+    download = entry.get("download") or {}
+    return ModelStatus(
+        model_id=entry.get("model"),
+        state=entry.get("state") or "unknown",
+        error=entry.get("model_error"),
+        download_done_mb=download.get("done_mb"),
+        download_total_mb=download.get("total_mb"),
+        device=entry.get("device"),
+        rss_mb=memory.get("rss_mb"),
+        swap_mb=memory.get("swap_mb"),
+        vram_mb=memory.get("vram_mb"),
+        ready=bool(entry.get("ready")),
+    )
+
+
+def format_instances(entries: List[Dict], nodes: Dict[str, str]) -> str:
+    """Rich text, one line per rt-asr/rt-tts instance: its ACTUAL model and
+    state (download progress, error in red) and memory."""
+    lines = []
+    for e in entries:
+        url = e.get("url") or "?"
+        name = escape(nodes.get(url) or url)
+        if not e.get("connected"):
+            lines.append(
+                f"{name}: "
+                + f'<span style="{ERROR_STYLE}">'
+                + escape(f"недоступний ({e.get('error') or 'unreachable'})")
+                + "</span>"
+            )
+            continue
+        ms = _entry_status(e)
+        lines.append(f"{name}: {format_model_html(ms)}; {escape(format_memory(ms))}")
+    return "<br>".join(lines)
+
+
+# get_stats() counters shown under the services: key -> label
+PIPELINE_COUNTERS = {
+    "llm_rejected": "відкинуто LLM-відповідей (не переклад)",
+    "asr_no_words": "ASR без слів",
+    "pipeline_errors": "помилок сервісів",
+    "dropped_segments": "відкинуто фраз",
+}
+
+
+def format_pipeline_stats(status: Dict) -> str:
+    """Last phrase's per-stage latency, queue depths, backpressure and
+    problem counters (rejected translations, ASR output without words...)."""
     t = status.get("timing") or {}
     parts = []
     if t:
@@ -82,8 +133,13 @@ def format_timing(status: Dict) -> str:
     behind = {k: v for k, v in (status.get("backpressure") or {}).items() if v}
     if behind:
         parts.append("не встигає: " + ", ".join(f"{k} ×{v}" for k, v in behind.items()))
-    if status.get("dropped_segments"):
-        parts.append(f"відкинуто фраз: {status['dropped_segments']}")
+    counters = [
+        f"{label}: {status[key]}"
+        for key, label in PIPELINE_COUNTERS.items()
+        if status.get(key)
+    ]
+    if counters:
+        parts.append(", ".join(counters))
     return "; ".join(parts)
 
 
@@ -128,6 +184,7 @@ class ServiceStatusPanel(QGroupBox):
             grid.addWidget(use, row, 3)
             detail = QLabel("")
             detail.setWordWrap(True)
+            detail.setTextFormat(Qt.TextFormat.RichText)
             grid.addWidget(detail, row, 4)
             self._dots[key], self._texts[key], self._details[key] = dot, text, detail
             self._use[key] = use
@@ -176,7 +233,7 @@ class ServiceStatusPanel(QGroupBox):
 
     def update_status(self, status: Dict):
         """Apply a status dict (get_status() plus optional ``health``)."""
-        self._timing.setText(format_timing(status))
+        self._timing.setText(format_pipeline_stats(status))
         choices = status.get("choices") or {}
         use = status.get("use") or {}
         for kind in SERVICES:
@@ -193,12 +250,15 @@ class ServiceStatusPanel(QGroupBox):
         for key in ("asr", "tts"):
             entries = health.get(key) or []
             ok = any(e.get("ready") for e in entries)
-            self._set(
-                key, ok, _aggregate(entries), format_node(active.get(key)) + suffix
-            )
+            nodes = {i["url"]: i["node"] for i in choices.get(key) or ()}
+            detail = escape(format_node(active.get(key)) + suffix)
+            instances = format_instances(entries, nodes)
+            if instances:
+                detail = f"{detail}<br>{instances}" if detail else instances
+            self._set(key, ok, _aggregate(entries), detail)
         llm = (health.get("llm") or [None])[0]
         session = status.get("session")
         has_session = bool(session and session.get("active"))
         ok = bool(llm and llm.get("ready")) or has_session
         text = "сесія" if has_session else ("готовий" if ok else "Offline")
-        self._set("llm", ok, text, format_llm_detail(llm, session))
+        self._set("llm", ok, text, escape(format_llm_detail(llm, session)))

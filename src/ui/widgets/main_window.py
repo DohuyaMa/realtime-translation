@@ -12,6 +12,7 @@ from loguru import logger
 from typing import Optional, Dict
 
 from ..controller import UIController
+from ..controller.ui_controller import PipelineEventLog
 from ...controller.translator_controller import ConcreteTranslatorController
 from ...adapters import DirectAdapter
 from .status_logger import StatusLogger, StatusManager
@@ -25,6 +26,7 @@ class MainWindow(QMainWindow):
     _update_signal = Signal(object)
     _task_done = Signal(object, object)  # callback, result
     _status_signal = Signal(str)
+    _pipeline_event = Signal(object)  # TranslationSystem status event
 
     def __init__(self, controller: Optional[UIController] = None):
         super().__init__()
@@ -50,6 +52,9 @@ class MainWindow(QMainWindow):
         self._busy = False
         self.ui_controller.set_status_callback(self.handle_status_update)
         self.ui_controller.set_update_callback(self.update_ui_from_controller)
+        self._event_log = PipelineEventLog()
+        self._pipeline_event.connect(self._apply_pipeline_event)
+        self.ui_controller.set_pipeline_event_callback(self._pipeline_event.emit)
         
         self.init_ui()
         self.setup_tray_icon()
@@ -403,10 +408,19 @@ class MainWindow(QMainWindow):
 
         # Service status indicators
         self.service_status_panel.update_status(update_data)
-        err = update_data.get('last_error')
-        if err and err != getattr(self, '_last_shown_error', None):
-            self.status_manager.log_error(str(err))
-        self._last_shown_error = err
+
+    def _apply_pipeline_event(self, event: Dict):
+        """Pipeline problems (rejected translations, service errors incl. a
+        model not ready) in the log - GUI thread (marshalled by signal)."""
+        line = self._event_log.lines(event)
+        if line is None:
+            return
+        level, message = line
+        if level == "ERROR":
+            self.status_manager.log_error(message)
+            self.status_manager.set_status(message)
+        else:
+            self.status_manager.log_warning(message)
     
     def on_refresh_requested(self):
         """Force a health poll of the remote services (off the GUI thread)."""

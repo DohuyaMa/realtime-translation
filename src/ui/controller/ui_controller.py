@@ -1,5 +1,5 @@
 """UI Controller for managing UI-specific logic and connecting to the backend controller."""
-from typing import Callable, Dict, Optional
+from typing import Callable, Dict, Optional, Tuple
 from loguru import logger
 import threading
 import time
@@ -8,6 +8,65 @@ from ...controller.translator_controller import ConcreteTranslatorController
 from ...controller.controller import Device
 
 HEALTH_INTERVAL_S = 5.0
+# the same pipeline problem repeats per phrase: log it again only after this
+REPEAT_LOG_S = 10.0
+
+SERVICE_NAMES = {"asr": "ASR", "tts": "TTS", "llm": "LLM"}
+
+
+def describe_pipeline_event(event: Dict) -> Optional[Tuple[str, str]]:
+    """(level, message) for the log widget, None for events it doesn't show.
+
+    Pipeline problems that otherwise stay silent: service errors (incl. a
+    model that is not loaded/ready - HTTP 503) and LLM replies rejected as
+    not a translation."""
+    status = event.get("status")
+    if status == "translation_rejected":
+        msg = (
+            f"Переклад відкинуто ({event.get('reason') or '?'}):"
+            f" «{event.get('original_text') or ''}»"
+        )
+        if event.get("output"):
+            msg += f" → «{event['output']}»"
+        return "WARN", msg
+    if status == "error":
+        service = SERVICE_NAMES.get(event.get("service"), event.get("service") or "?")
+        kind = event.get("kind")
+        if kind == "not_ready":
+            return "ERROR", (
+                f"{service}: модель не завантажена/не готова - фразу пропущено"
+                " (стан моделі: панель «Сервіси» / Налаштування)"
+            )
+        if kind:
+            return "ERROR", f"{service}: {kind} - фразу пропущено"
+        return "ERROR", str(event.get("error") or f"{service}: помилка")
+    return None
+
+
+class PipelineEventLog:
+    """Turns pipeline events into log lines; an identical line repeated
+    within REPEAT_LOG_S is counted, not logged again."""
+
+    def __init__(self, clock: Callable[[], float] = time.monotonic):
+        self._clock = clock
+        self._last: Dict[str, float] = {}
+        self._repeats: Dict[str, int] = {}
+
+    def lines(self, event: Dict) -> Optional[Tuple[str, str]]:
+        described = describe_pipeline_event(event)
+        if described is None:
+            return None
+        level, msg = described
+        now = self._clock()
+        last = self._last.get(msg)
+        if last is not None and now - last < REPEAT_LOG_S:
+            self._repeats[msg] = self._repeats.get(msg, 0) + 1
+            return None
+        self._last[msg] = now
+        repeats = self._repeats.pop(msg, 0)
+        if repeats:
+            msg += f" (ще ×{repeats} за {REPEAT_LOG_S:.0f} с)"
+        return level, msg
 
 
 class UIController:
@@ -18,7 +77,6 @@ class UIController:
         self._controller = controller
         self._status_callback: Optional[Callable] = None
         self._update_callback: Optional[Callable] = None
-        self._event_callbacks: Dict[str, Callable] = {}
         self._last_status = {}
         self._last_health: Dict = {}
         self._last_health_at = float('-inf')
@@ -35,10 +93,10 @@ class UIController:
         """Set callback for UI updates."""
         self._update_callback = callback
     
-    def register_event_callback(self, event_type: str, callback: Callable):
-        """Register a callback for a specific event type."""
-        self._event_callbacks[event_type] = callback
-    
+    def set_pipeline_event_callback(self, callback: Optional[Callable[[Dict], None]]):
+        """Pipeline status events (called from pipeline threads)."""
+        self._controller.set_event_callback(callback)
+
     def start_event_polling(self, interval: float = 0.5):
         """Start a background thread to poll for status changes and trigger events."""
         if self._polling_active:

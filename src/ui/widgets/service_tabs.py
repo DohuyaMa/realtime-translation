@@ -11,9 +11,10 @@ Two kinds of settings, two owners:
 from __future__ import annotations
 
 import threading
+from html import escape
 from typing import Any, Callable, Dict, List, Optional
 
-from PySide6.QtCore import QObject, Qt, Signal
+from PySide6.QtCore import QObject, Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -41,7 +42,9 @@ from ...core.prompt import (
     split_words,
     template_errors,
 )
+from ...clients.model_status import ModelStatus, parse_status
 from ...translation_system import PREVIOUS_WORDS_MAX
+from .model_state import ERROR_STYLE, format_memory, format_model_html
 from ...core.runtime import EdgeSettings
 
 PREVIEW_SAMPLE = (
@@ -59,6 +62,10 @@ PAUSE_MIN_MS, PAUSE_MAX_MS = 200, 3000
 
 # A model switch reloads the service and may download the model first.
 APPLY_TIMEOUT_S = 3600.0
+# POST /model/load|unload only start the transition; progress is polled.
+MODEL_ACTION_TIMEOUT_S = 60.0
+# /status polling while a model downloads/loads or a request is in flight
+STATE_POLL_MS = 1000
 
 
 class Background(QObject):
@@ -211,7 +218,9 @@ def _type_of(value: Any) -> str:
 
 
 class ServiceConfigPanel(QGroupBox):
-    """Runtime config of one rt-asr / rt-tts node (``GET|POST /config``)."""
+    """One rt-asr / rt-tts node: its ACTUAL model (state, download progress,
+    error, memory) with explicit load/unload, and its runtime config
+    (``GET|POST /config``; a model change applies only via «Застосувати»)."""
 
     loaded = Signal(object)  # the chosen endpoint, after a successful load
 
@@ -230,6 +239,9 @@ class ServiceConfigPanel(QGroupBox):
         self._bg = bg
         self.config: Optional[dict] = None
         self.editors: Dict[str, _Editor] = {}
+        self.model_status: Optional[ModelStatus] = None
+        self._in_flight: Optional[str] = None  # load | unload | apply
+        self._polling = False  # a /status request is out
         outer = QVBoxLayout(self)
         bar = QHBoxLayout()
         self.node = QComboBox()
@@ -238,15 +250,37 @@ class ServiceConfigPanel(QGroupBox):
             self.node.addItem(label)
         bar.addWidget(QLabel("Вузол:"))
         bar.addWidget(self.node, 1)
-        self.load_button = QPushButton("Завантажити")
+        self.load_button = QPushButton("Оновити")
+        self.load_button.setToolTip("Прочитати стан моделі і налаштування вузла")
         self.load_button.clicked.connect(self.load)
         bar.addWidget(self.load_button)
         outer.addLayout(bar)
+        self.model_state = QLabel("модель: стан невідомий (натисніть «Оновити»)")
+        self.model_state.setTextFormat(Qt.TextFormat.RichText)
+        self.model_state.setWordWrap(True)
+        outer.addWidget(self.model_state)
+        self.memory = QLabel("")
+        outer.addWidget(self.memory)
+        actions = QHBoxLayout()
+        self.load_model_button = QPushButton("Завантажити модель")
+        self.load_model_button.setToolTip(
+            "Завантажити в пам'ять модель з налаштувань вузла"
+        )
+        self.load_model_button.clicked.connect(self.load_model)
+        self.unload_model_button = QPushButton("Вивантажити модель")
+        self.unload_model_button.setToolTip("Звільнити RAM/VRAM, які тримає модель")
+        self.unload_model_button.clicked.connect(self.unload_model)
+        actions.addWidget(self.load_model_button)
+        actions.addWidget(self.unload_model_button)
+        actions.addStretch()
+        outer.addLayout(actions)
         self.form_host = QWidget()
         self.form = QFormLayout(self.form_host)
         outer.addWidget(self.form_host)
         self.apply_button = QPushButton("Застосувати на сервісі")
-        self.apply_button.setEnabled(False)
+        self.apply_button.setToolTip(
+            "Зміна моделі: вивантаження поточної, завантаження нової"
+        )
         self.apply_button.clicked.connect(self.apply)
         outer.addWidget(self.apply_button)
         self.status = QLabel(
@@ -254,8 +288,11 @@ class ServiceConfigPanel(QGroupBox):
         )
         self.status.setWordWrap(True)
         outer.addWidget(self.status)
-        self.load_button.setEnabled(bool(self.endpoints))
+        self.poll_timer = QTimer(self)
+        self.poll_timer.setInterval(STATE_POLL_MS)
+        self.poll_timer.timeout.connect(self.refresh_state)
         self.node.currentIndexChanged.connect(lambda _i: self._clear())
+        self._update_buttons()
 
     def endpoint(self):
         i = self.node.currentIndex()
@@ -268,12 +305,123 @@ class ServiceConfigPanel(QGroupBox):
         while self.form.rowCount():
             self.form.removeRow(0)
         self.editors, self.config = {}, None
-        self.apply_button.setEnabled(False)
+        self.model_status = None
+        self.model_state.setText("модель: стан невідомий (натисніть «Оновити»)")
+        self.memory.setText("")
+        self._update_buttons()
+
+    # -- actual model: state, memory, load / unload -------------------------
+
+    def configured_model(self) -> Optional[str]:
+        values = (self.config or {}).get("values") or {}
+        model = values.get("model")
+        return str(model) if model else None
+
+    def busy(self) -> bool:
+        """A request is in flight or the model is downloading/loading."""
+        return self._in_flight is not None or bool(
+            self.model_status and self.model_status.transitional
+        )
+
+    def _update_buttons(self) -> None:
+        busy = self.busy()
+        state = self.model_status.state if self.model_status else None
+        self.load_model_button.setEnabled(not busy and state in ("unloaded", "error"))
+        self.unload_model_button.setEnabled(not busy and state in ("ready", "error"))
+        self.apply_button.setEnabled(not busy and self.config is not None)
+        self.load_button.setEnabled(bool(self.endpoints) and self._in_flight is None)
+        if busy and not self.poll_timer.isActive():
+            self.poll_timer.start()
+        elif not busy:
+            self.poll_timer.stop()
+
+    def refresh_state(self) -> None:
+        """GET /status of the chosen node (also the poll timer's tick)."""
+        endpoint = self.endpoint()
+        if endpoint is None or self._polling:
+            return
+        self._polling = True
+        client = self._factory(endpoint)
+
+        def fetch():
+            try:
+                return client.get_status()
+            finally:
+                client.close()
+
+        def done(ok: bool, result: Any) -> None:
+            self._polling = False
+            if endpoint is not self.endpoint():
+                return  # node switched meanwhile
+            self._state_loaded(ok, result)
+
+        self._bg.run(fetch, done)
+
+    def _state_loaded(self, ok: bool, result: Any) -> None:
+        if not ok:
+            self.model_status = None
+            self.model_state.setText(
+                f'<span style="{ERROR_STYLE}">'
+                + escape(f"стан моделі недоступний: {result}")
+                + "</span>"
+            )
+            self.memory.setText("")
+        else:
+            self.model_status = parse_status(result)
+            self.model_state.setText(
+                format_model_html(self.model_status, self.configured_model())
+            )
+            self.memory.setText(format_memory(self.model_status))
+        self._update_buttons()
+
+    def _model_action(self, action: str) -> None:
+        endpoint = self.endpoint()
+        if endpoint is None or self.busy():
+            return
+        client = self._factory(endpoint)
+        call = client.load_model if action == "load" else client.unload_model
+        self._in_flight = action
+        self.status.setText(
+            "завантажую модель…" if action == "load" else "вивантажую модель…"
+        )
+        self._update_buttons()
+
+        def post():
+            try:
+                return call(timeout_s=MODEL_ACTION_TIMEOUT_S)
+            finally:
+                client.close()
+
+        def done(ok: bool, result: Any) -> None:
+            self._in_flight = None
+            if ok:
+                self.status.setText(
+                    "запит на завантаження моделі прийнято"
+                    if action == "load"
+                    else "модель вивантажено"
+                )
+            else:
+                what = "завантажити" if action == "load" else "вивантажити"
+                self.status.setText(f"не вдалося {what} модель: {result}")
+            self._update_buttons()
+            self.refresh_state()
+
+        self._bg.run(post, done)
+
+    def load_model(self) -> None:
+        """POST /model/load: the configured model; progress via polling."""
+        self._model_action("load")
+
+    def unload_model(self) -> None:
+        """POST /model/unload: free RAM/VRAM of this node's model."""
+        self._model_action("unload")
+
+    # -- runtime config ------------------------------------------------------
 
     def load(self) -> None:
         if self.endpoint() is None:
             return
-        self.status.setText("завантаження…")
+        self.status.setText("читаю налаштування…")
         client = self.client()
 
         def fetch():
@@ -291,6 +439,7 @@ class ServiceConfigPanel(QGroupBox):
         config, models = result
         self._clear()
         self.config = config
+        self.refresh_state()
         schema = config.get("schema")
         for name, value in sorted(config.get("values", {}).items()):
             meta = (schema or {}).get(name)
@@ -301,7 +450,7 @@ class ServiceConfigPanel(QGroupBox):
             source = config.get("source", {}).get(name)
             label = f"{name}{' *' if source == 'override' else ''}:"
             self.form.addRow(label, editor.widget)
-        self.apply_button.setEnabled(True)
+        self._update_buttons()
         note = (
             ""
             if schema
@@ -333,10 +482,11 @@ class ServiceConfigPanel(QGroupBox):
             return
         version = int(self.config.get("version", 0)) + 1
         self.status.setText(
-            "застосовую… (зміна моделі перезавантажує сервіс і може"
-            " завантажувати модель)"
+            "застосовую… (зміна моделі: вивантаження поточної, завантаження"
+            " нової, можливо з мережі)"
         )
-        self.apply_button.setEnabled(False)
+        self._in_flight = "apply"
+        self._update_buttons()  # polls /status: download progress meanwhile
         client = self.client()
 
         def post():
@@ -346,9 +496,11 @@ class ServiceConfigPanel(QGroupBox):
                 client.close()
 
         def done(ok: bool, result: Any) -> None:
-            self.apply_button.setEnabled(True)
+            self._in_flight = None
+            self._update_buttons()
             if not ok:
                 self.status.setText(f"не застосовано: {result}")
+                self.refresh_state()
                 return
             reloaded = " (модель перезавантажено)" if result.get("reloaded") else ""
             self.load()

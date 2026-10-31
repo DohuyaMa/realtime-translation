@@ -46,8 +46,19 @@ def test_monitor_llm_entry_from_session_and_worker_status():
 
 def test_monitor_updates_pool_health_and_skips_unhealthy_first():
     st = {
-        "a": {"ready": False, "pending": 0, "model": {"id": "x"}, "device": "cuda"},
-        "b": {"ready": True, "pending": 1, "model": {"id": "x"}, "device": "cpu"},
+        "a": {
+            "ready": False,
+            "pending": 0,
+            "model": {"id": "x", "state": "loading"},
+            "device": "cuda",
+        },
+        "b": {
+            "ready": True,
+            "pending": 1,
+            "model": {"id": "x", "state": "ready"},
+            "device": "cpu",
+            "memory": {"rss_mb": 900, "swap_mb": 0, "vram_mb": None},
+        },
     }
     p = pools(st)
     m = ServiceHealthMonitor(p, None, None)
@@ -59,6 +70,10 @@ def test_monitor_updates_pool_health_and_skips_unhealthy_first():
         "ready": True,
         "pending": 1,
         "model": "x",
+        "state": "ready",
+        "model_error": None,
+        "download": None,
+        "memory": {"rss_mb": 900.0, "swap_mb": 0.0, "vram_mb": None},
         "device": "cpu",
         "error": None,
     }

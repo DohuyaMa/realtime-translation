@@ -1,6 +1,6 @@
 """Controller interface for the real-time translation system."""
 
-from typing import Protocol, Dict, List
+from typing import Callable, Dict, List, Optional, Protocol
 
 
 class Device:
@@ -32,6 +32,10 @@ class TranslatorController(Protocol):
 
     def get_status(self) -> Dict:
         """Get system status."""
+        ...
+
+    def set_event_callback(self, cb: Optional[Callable[[Dict], None]]) -> None:
+        """Subscribe to pipeline status events (from pipeline threads)."""
         ...
 
     def set_languages(self, source_lang: str, target_lang: str = "en") -> bool:
