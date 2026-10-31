@@ -108,6 +108,9 @@ PIPELINE_COUNTERS = {
     "asr_no_words": "ASR без слів",
     "pipeline_errors": "помилок сервісів",
     "dropped_segments": "відкинуто фраз",
+    "playback_short": "відтворень, коротших за аудіо",
+    "asr_merged": "незавершених фраз склеєно з наступними",
+    "asr_held_flushed": "незавершених фраз надіслано окремо",
 }
 
 

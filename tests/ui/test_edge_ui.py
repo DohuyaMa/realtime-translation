@@ -849,6 +849,7 @@ def test_status_panel_per_instance_model_state_and_counters(app):
             },
             "llm_rejected": 2,
             "asr_no_words": 5,
+            "playback_short": 1,
         }
     )
     asr = panel._details["asr"].text()
@@ -859,6 +860,7 @@ def test_status_panel_per_instance_model_state_and_counters(app):
     stats = panel._timing.text()
     assert "відкинуто LLM-відповідей (не переклад): 2" in stats
     assert "ASR без слів: 5" in stats
+    assert "відтворень, коротших за аудіо: 1" in stats
 
 
 def test_pipeline_events_described_and_deduplicated():
@@ -884,6 +886,8 @@ def test_pipeline_events_described_and_deduplicated():
     now[0] = 11.0
     assert log.lines(err)[1].endswith("(ще ×1 за 10 с)")
     assert log.lines({"status": "timing", "timing": {}}) is None
+    warm = {"status": "llm_warmup", "warmup": {"url": "http://w", "error": "x"}}
+    assert log.lines(warm) == ("WARN", "Прогрів LLM на http://w не вдався: x")
 
 
 def test_main_window_logs_pipeline_events(app, cfg):

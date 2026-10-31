@@ -29,6 +29,12 @@ def describe_pipeline_event(event: Dict) -> Optional[Tuple[str, str]]:
         if event.get("output"):
             msg += f" → «{event['output']}»"
         return "WARN", msg
+    if status == "llm_warmup":
+        w = event.get("warmup") or {}
+        where = w.get("url") or "?"
+        if w.get("error"):
+            return "WARN", f"Прогрів LLM на {where} не вдався: {w['error']}"
+        return "INFO", f"LLM прогріто на {where}: {w.get('ms')} мс"
     if status == "error":
         service = SERVICE_NAMES.get(event.get("service"), event.get("service") or "?")
         kind = event.get("kind")

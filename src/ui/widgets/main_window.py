@@ -419,8 +419,10 @@ class MainWindow(QMainWindow):
         if level == "ERROR":
             self.status_manager.log_error(message)
             self.status_manager.set_status(message)
-        else:
+        elif level == "WARN":
             self.status_manager.log_warning(message)
+        else:
+            self.status_manager.log_info(message)
     
     def on_refresh_requested(self):
         """Force a health poll of the remote services (off the GUI thread)."""
