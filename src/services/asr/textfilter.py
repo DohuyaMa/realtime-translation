@@ -64,31 +64,30 @@ def filter_repetitions(text: str) -> str:
 # dropped when its decoding confidence is low or its text is a known
 # hallucination; every drop is logged (INFO) and counted in /status.
 
-# faster-whisper's own thresholds. faster-whisper only uses them to retry at a
-# higher temperature (keeping the last try) and to skip silence when BOTH
-# no_speech and logprob are bad; here each one alone drops the segment.
+# faster-whisper's own thresholds and rule: a segment is silence only when BOTH
+# no_speech and logprob are bad (either alone drops real fast/accented speech);
+# a repetitive (highly compressible) segment is a decoding loop on its own.
 NO_SPEECH_PROB_MAX = 0.6
 AVG_LOGPROB_MIN = -1.0
 COMPRESSION_RATIO_MAX = 2.4
 
 # Whole-segment phrases (normalized: lowercase words joined by one space).
+# Only video outros/credits - not phrases people really say live ("дякую за
+# увагу" ends a talk).
 KNOWN_HALLUCINATIONS = frozenset(
     {
         # uk
         "дякую за перегляд",
-        "дякую за увагу",
         "дякую що дивилися",
         "підписуйтесь на канал",
         "субтитри зроблені спільнотою amara org",
         # ru
         "спасибо за просмотр",
-        "спасибо за внимание",
         "продолжение следует",
         "подписывайтесь на канал",
         "субтитры сделал dimatorzok",
         "субтитры создавал dimatorzok",
         # pl
-        "dziękuję za uwagę",
         "dzięki za obejrzenie",
         "dziękuję za obejrzenie",
         "napisy stworzone przez społeczność amara org",
@@ -113,8 +112,10 @@ def normalize_phrase(text: str) -> str:
 def drop_reason(text: str, stats: Optional[SegmentStats]) -> Optional[str]:
     """``HALLUCINATION`` / ``LOW_CONFIDENCE`` if the segment must go, else None."""
     if stats is not None and (
-        stats.no_speech_prob > NO_SPEECH_PROB_MAX
-        or stats.avg_logprob < AVG_LOGPROB_MIN
+        (
+            stats.no_speech_prob > NO_SPEECH_PROB_MAX
+            and stats.avg_logprob < AVG_LOGPROB_MIN
+        )
         or stats.compression_ratio > COMPRESSION_RATIO_MAX
     ):
         return LOW_CONFIDENCE

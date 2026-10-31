@@ -56,4 +56,4 @@ Release is git-only: infra consumes this repo through a `github:` flake input (n
 
 ### Runtime config of services
 
-`GET/POST /config` changes fields at runtime: TUNABLE without model reload, RELOAD with reload (rollback on failure), BOOTSTRAP only via env. Overrides persist in `RT_CONFIG_STATE`.
+`GET/POST /config` changes fields at runtime: TUNABLE without model reload, RELOAD with reload (old model unloaded first; a failed load leaves state `error`, no rollback; `POST /model/{load,unload}` are the explicit buttons), BOOTSTRAP only via env. Overrides persist in `RT_CONFIG_STATE`.

@@ -443,7 +443,7 @@ def test_hallucinated_and_low_confidence_segments_dropped_and_counted():
     segments = [
         Segment(0.0, 1.0, "Дякую за перегляд!", good),
         Segment(1.0, 2.0, "що можна зробити", good),
-        Segment(2.0, 3.0, "шум", SegmentStats(0.9, -0.2, 1.0)),
+        Segment(2.0, 3.0, "шум", SegmentStats(0.9, -1.2, 1.0)),
         Segment(3.0, 4.0, "Napisy stworzone przez społeczność Amara.org", None),
     ]
 
