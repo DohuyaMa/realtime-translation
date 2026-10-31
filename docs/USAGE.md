@@ -297,6 +297,8 @@ curl -s -X DELETE -H "$AUTH" $D/api/llm/leases/<uuid>/
 - heartbeat-потік кожні ~10 с пробує взяти lease; щойно вдалося - WARNING `leaving no-lease mode`, UI знову показує `lease`;
 - якщо Django відповів відмовою (409 - воркер зайнятий, 503 - немає воркера), режим «без lease» **не** вмикається: це відмова, а не збій.
 
+Рекомендовані локальні значення (llama-воркер на тому ж хості): `llm.direct_url = http://127.0.0.1:8080`, `llm.direct_token_file = /run/llama/local-token` (env `RT_EDGE_LLM_DIRECT_URL` / `RT_EDGE_LLM_DIRECT_TOKEN_FILE`); користувач edge має бути в групі `llama-clients`. Воркер перезаписує токен при кожному старті; на 401 edge один раз перечитує файл і повторює запит, повторний 401 - явна помилка `auth` у статусі.
+
 Без lease воркер не на паузі й паралельно бере WorkItem - переклад може бути повільнішим.
 
 **Dev-режим без Django:** `services.llm.django_urls: []`, `direct_url: "http://127.0.0.1:8080"`, `direct_token_file: <файл з --api-key-file>`; `llama-server` - див. розділ 2.

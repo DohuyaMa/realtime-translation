@@ -354,6 +354,12 @@ class LeaseKeeper:
                 return
             with self._lock:
                 no_lease = self._no_lease
+            if kind == "auth" and no_lease is not None:
+                if no_lease.source == "direct_url":
+                    # the host-local token rotates on every worker restart
+                    self._reload_direct_token(no_lease)
+                    return
+            with self._lock:
                 if no_lease is not None and no_lease.source != "direct_url":
                     # the cached worker failed: fall through to direct_url
                     self._last_lease = None
@@ -370,6 +376,24 @@ class LeaseKeeper:
                 with self._lock:
                     self._no_lease = None
                 logger.warning("re-acquire after {} failed: {}", kind, e)
+
+    def _reload_direct_token(self, target: NoLeaseTarget) -> None:
+        token = read_token(self._settings.direct_token_file) or ""
+        if token == target.token:
+            logger.warning(
+                "no-lease: worker {} rejected the token and {} is unchanged",
+                target.base_url,
+                self._settings.direct_token_file,
+            )
+            return
+        logger.warning(
+            "no-lease: worker {} rejected the token, re-read {}",
+            target.base_url,
+            self._settings.direct_token_file,
+        )
+        with self._lock:
+            if self._no_lease == target:
+                self._no_lease = NoLeaseTarget(target.base_url, token, target.source)
 
     def snapshot(self) -> dict:
         with self._lock:

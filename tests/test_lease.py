@@ -348,3 +348,33 @@ def test_django_lost_mid_session_uses_last_leased_worker(tmp_path):
     assert k.current() == ("http://127.0.0.1:8080", "sha256:local")
     assert k.snapshot()["no_lease_source"] == "direct_url"
     finish(k)
+
+
+def test_no_lease_401_rereads_rotated_local_token(tmp_path):
+    from src.clients import LlmClient
+
+    k = make_with_direct(tmp_path, httpx.MockTransport(FakeDjango()))
+    k.start()
+    django_calls = []
+    k._api = lambda u: django_calls.append(u)  # auth must not touch django
+    seen = []
+    valid = {"token": "sha256:rotated"}
+
+    def worker(req):
+        seen.append(req.headers["authorization"])
+        if req.headers["authorization"] != f"Bearer {valid['token']}":
+            return httpx.Response(401)
+        return httpx.Response(200, json={"choices": [{"message": {"content": "Hi"}}]})
+
+    (tmp_path / "wt").write_text("sha256:rotated\n")  # worker restarted
+    client = LlmClient(k, k._settings, transport=httpx.MockTransport(worker))
+    assert client.translate("a", "pl") == "Hi"
+    assert seen == ["Bearer sha256:local", "Bearer sha256:rotated"]
+    assert django_calls == []
+    # still 401 after the re-read -> explicit auth error, no loop
+    valid["token"] = "sha256:other"  # worker restarted, file not updated
+    seen.clear()
+    with pytest.raises(ServiceError) as ei:
+        client.translate("a", "pl")
+    assert ei.value.kind == "auth" and len(seen) == 2
+    finish(k)
