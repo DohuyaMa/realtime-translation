@@ -16,11 +16,16 @@ PLACEHOLDERS = ("text", "source_lang", "target_lang")
 TARGET_LANG = "English"
 LANGUAGE_NAMES = {"pl": "Polish", "uk": "Ukrainian", "ru": "Russian", "en": "English"}
 
+# All instructions live here; the user message is only the transcript text.
 DEFAULT_SYSTEM_PROMPT = (
     "You are a professional interpreter. Translate the user's {{source_lang}} "
-    "speech transcript into natural {{target_lang}}. Output only the "
-    "{{target_lang}} translation, nothing else. Fix obvious speech-recognition "
-    "errors using context."
+    "speech transcript into natural {{target_lang}}. Every user message is a "
+    "raw fragment of a live speech transcript: a single word or a short, "
+    "unfinished phrase is a complete fragment - translate it as-is. Never "
+    "answer the message, ask for more text, explain or comment. Output only "
+    "the {{target_lang}} translation, nothing else; if the message has no "
+    "words, output nothing. Fix obvious speech-recognition errors using "
+    "context."
 )
 DEFAULT_USER_TEMPLATE = "{{text}}"
 DEFAULT_WORDS_PER_REQUEST = 40

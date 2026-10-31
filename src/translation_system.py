@@ -40,6 +40,7 @@ from .clients import (
     endpoints,
 )
 from .clients.discovery import choices
+from .core.output_guard import reject_reason
 from .core.prompt import render_asr_prompt
 from .core.runtime import KINDS, EdgeSettings, LlmSettings
 from .segmentation import Segment, SegmenterConfig
@@ -52,6 +53,9 @@ STAGE_QUEUE_MAX = 4
 PLAYBACK_QUEUE_MAX = 8
 # recognized words kept for {{previous_text}} (asr.previous_words <= this)
 PREVIOUS_WORDS_MAX = 1000
+# sources of at most this many words are translated whole before TTS gets
+# anything (see _translate)
+SHORT_SOURCE_WORDS = 3
 
 # LlmSettings fields that only shape the prompt/request; everything else
 # changes where/how the LLM is reached and requires a restart.
@@ -213,6 +217,7 @@ class TranslationSystem:
         self._pipeline_errors = 0
         self._llm_requests = 0
         self._llm_errors = 0
+        self._llm_rejected = 0
         self._llm_time = 0.0
 
         self._build_backends()
@@ -703,20 +708,36 @@ class TranslationSystem:
         self._put(self._llm_q, phrase, "llm")
 
     def _translate(self, phrase: _Phrase) -> None:
-        """LLM stage: stream the translation, each sentence on to TTS."""
+        """LLM stage: stream the translation, each sentence on to TTS.
+
+        Every sentence passes ``reject_reason`` (length) on the cumulative
+        output before TTS gets it; a short source (<= SHORT_SOURCE_WORDS) is
+        buffered whole first - those are the fragments small models answer
+        instead of translating, and buffering them costs almost no latency.
+        """
         t0 = self._clock()
         self._llm_requests += 1
         sentences: List[str] = []
+        held: List[_Sentence] = []
+        buffer_all = len(phrase.text.split()) <= SHORT_SOURCE_WORDS
+        reason: Optional[str] = None
+        stream = self._llm.translate_stream(
+            phrase.text, phrase.src, context=list(self._translation_context)
+        )
         try:
-            for sentence in self._llm.translate_stream(
-                phrase.text, phrase.src, context=list(self._translation_context)
-            ):
+            for sentence in stream:
                 now = self._clock()
                 if phrase.llm_first_ms is None:
                     phrase.llm_first_ms = _ms(now - t0)
                 sentences.append(sentence)
-                phrase.pieces += 1
-                self._put(self._tts_q, _Sentence(phrase, sentence, now), "tts")
+                reason = reject_reason(phrase.text, " ".join(sentences))
+                if reason:
+                    break
+                item = _Sentence(phrase, sentence, now)
+                if buffer_all:
+                    held.append(item)
+                else:
+                    self._queue_sentence(item)
         except ServiceError as e:
             self._llm_errors += 1
             self._service_error(e)
@@ -728,7 +749,15 @@ class TranslationSystem:
             self._fail("llm", "language")
             return
         finally:
+            close = getattr(stream, "close", None)
+            if close:  # release the HTTP stream when we stopped early
+                close()
             self._llm_time += self._clock() - t0
+        if reason:
+            self._reject(phrase, reason, " ".join(sentences))
+            return
+        for item in held:
+            self._queue_sentence(item)
         phrase.llm_ms = _ms(self._clock() - t0)
         translation = " ".join(sentences)
         self._translation_context.append((phrase.text, translation))
@@ -739,6 +768,29 @@ class TranslationSystem:
                 "status": "translation_complete",
                 "original_text": phrase.text,
                 "translated_text": translation,
+            }
+        )
+
+    def _queue_sentence(self, item: _Sentence) -> None:
+        item.phrase.pieces += 1
+        self._put(self._tts_q, item, "tts")
+
+    def _reject(self, phrase: _Phrase, reason: str, output: str) -> None:
+        """Not a translation (chat/meta reply): nothing more goes to TTS and
+        the pair stays out of the few-shot context - visibly."""
+        self._llm_rejected += 1
+        logger.warning(
+            "LLM output rejected ({}): source {!r}, output {!r:.200}",
+            reason,
+            phrase.text,
+            output,
+        )
+        self._emit(
+            {
+                "status": "translation_rejected",
+                "reason": reason,
+                "original_text": phrase.text,
+                "output": output[:200],
             }
         )
 
@@ -775,6 +827,7 @@ class TranslationSystem:
             "last_error": self.last_error,
             "llm_requests": self._llm_requests,
             "llm_errors": self._llm_errors,
+            "llm_rejected": self._llm_rejected,
             "llm_avg_latency_s": (
                 round(self._llm_time / self._llm_requests, 3)
                 if self._llm_requests
