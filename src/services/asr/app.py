@@ -52,6 +52,7 @@ def create_app(
         settings.service,
         backend_factory or (lambda: make_backend(config.current())),
         settings.max_pending,
+        idle_unload_s=settings.idle_unload_minutes * 60.0,
     )
     return create_service_app(
         settings=settings,

@@ -58,6 +58,14 @@ let
       expr = builtins.elemAt (rtLib.envLines "asr" (asr // { configState = "/s.json"; })) 7;
       expected = "RT_CONFIG_STATE=/s.json";
     };
+    testIdleUnloadMinutes = {
+      expr = [
+        (builtins.filter (lib.hasPrefix "RT_IDLE_") (rtLib.envLines "tts" (tts // { idleUnloadMinutes = 0; })))
+        (builtins.filter (lib.hasPrefix "RT_IDLE_") (rtLib.envLines "asr" (asr // { idleUnloadMinutes = 30; })))
+        (builtins.filter (lib.hasPrefix "RT_IDLE_") (rtLib.envLines "asr" asr))
+      ];
+      expected = [ [ "RT_IDLE_UNLOAD_MINUTES=0" ] [ "RT_IDLE_UNLOAD_MINUTES=30" ] [ ] ];
+    };
     testRocmGfxOnlyOnRocm = {
       expr = builtins.filter (lib.hasPrefix "HSA_") (rtLib.envLines "asr" (asr // { device = "rocm"; rocmGfxVersion = "9.0.0"; }))
         ++ builtins.filter (lib.hasPrefix "HSA_") (rtLib.envLines "asr" (asr // { device = "cuda"; rocmGfxVersion = "9.0.0"; }));

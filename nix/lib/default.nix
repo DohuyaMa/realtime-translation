@@ -34,6 +34,7 @@ let
     ++ lib.optional ((cfg.configState or null) != null) (kv "RT_CONFIG_STATE" cfg.configState)
     ++ lib.optional (cfg.model != null) (kv "RT_MODEL" cfg.model)
     ++ lib.optional ((cfg.computeType or null) != null) (kv "RT_COMPUTE_TYPE" cfg.computeType)
+    ++ lib.optional ((cfg.idleUnloadMinutes or null) != null) (kv "RT_IDLE_UNLOAD_MINUTES" cfg.idleUnloadMinutes)
     ++ lib.optional (cfg.device == "rocm" && cfg.rocmGfxVersion != "") (kv "HSA_OVERRIDE_GFX_VERSION" cfg.rocmGfxVersion)
     ++ lib.optionals (service == "asr") (
       lib.optional (cfg.language != null) (kv "RT_ASR_LANGUAGE" cfg.language)

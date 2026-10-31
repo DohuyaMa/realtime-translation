@@ -41,6 +41,12 @@ let
       };
       openFirewall = mkOption { type = types.bool; default = false; description = "Open port on firewallInterfaces only."; };
       firewallInterfaces = mkOption { type = types.listOf types.str; default = [ "tailscale0" ]; description = "Interfaces on which openFirewall opens the port."; };
+      idleUnloadMinutes = mkOption {
+        type = types.nullOr types.ints.unsigned;
+        default = null;
+        example = 15;
+        description = "RT_IDLE_UNLOAD_MINUTES: load the model on the first request, unload it after this many minutes without requests (0 = load at start, never unload). null = not emitted (service default 15).";
+      };
       logLevel = mkOption { type = types.enum [ "debug" "info" "warning" "error" ]; default = "info"; description = "RT_LOG_LEVEL."; };
       rocmGfxVersion = mkOption { type = types.str; default = ""; example = "9.0.0"; description = "HSA_OVERRIDE_GFX_VERSION for device = rocm (empty = unset)."; };
       memoryDenyWriteExecute = mkOption {

@@ -102,7 +102,10 @@ def test_health_ok_while_loading_and_status_transitions():
     gate = threading.Event()
     app, runtime = _app(GatedBackend(gate))
     with TestClient(app) as client:
-        assert client.get("/health").json() == {"status": "ok"}
+        assert client.get("/health").json() == {
+            "status": "ok",
+            "model": {"loaded": False, "state": "loading"},
+        }
         status = client.get("/status").json()
         assert status["ready"] is False and status["model"]["state"] == "loading"
         r = client.get("/v1/echo", params={"x": "a"})
@@ -433,3 +436,108 @@ def test_run_service_runs_uvicorn(monkeypatch):
     assert calls[0] == "info"
     assert calls[1][0] is app
     assert calls[1][1]["port"] == 9999 and calls[1][1]["workers"] == 1
+
+
+# -- lazy load / idle unload (RT_IDLE_UNLOAD_MINUTES) ---------------------
+
+
+class Clock:
+    def __init__(self):
+        self.t = 1000.0
+
+    def __call__(self):
+        return self.t
+
+
+def _lazy_app(clock, loads):
+    def factory():
+        loads.append(1)
+        return GatedBackend(gate=None)
+
+    runtime = ServiceRuntime("rt-asr", factory, 4, idle_unload_s=900, clock=clock)
+    router = APIRouter()
+
+    @router.get("/echo")
+    async def echo(x: str):
+        b = await runtime.acquire()
+        return {"x": await runtime.run(b.echo, x)}
+
+    app = create_service_app(
+        settings=_settings(), runtime=runtime, token=None, routers=[router]
+    )
+    return app, runtime
+
+
+def test_lazy_load_on_first_request_and_health_never_loads():
+    clock, loads = Clock(), []
+    app, runtime = _lazy_app(clock, loads)
+    with TestClient(app) as client:
+        for _ in range(3):
+            health = client.get("/health").json()
+            assert health["model"] == {"loaded": False, "state": "unloaded"}
+        status = client.get("/status").json()
+        assert status["ready"] is True and status["model"]["state"] == "unloaded"
+        assert loads == []
+        assert client.get("/v1/echo", params={"x": "a"}).json() == {"x": "a"}
+        assert loads == [1]
+        assert client.get("/health").json()["model"] == {
+            "loaded": True,
+            "state": "ready",
+        }
+
+
+def test_idle_unload_after_timeout_then_reload_on_demand():
+    clock, loads = Clock(), []
+    app, runtime = _lazy_app(clock, loads)
+    with TestClient(app) as client:
+        client.get("/v1/echo", params={"x": "a"})
+        clock.t += 899
+        assert runtime.check_idle() is False  # not idle long enough
+        client.get("/v1/echo", params={"x": "b"})  # usage resets the timer
+        clock.t += 899
+        assert runtime.check_idle() is False
+        clock.t += 2
+        assert runtime.check_idle() is True
+        assert runtime.backend is None and runtime.state.value == "unloaded"
+        assert client.get("/health").json()["model"]["loaded"] is False
+        assert client.get("/v1/echo", params={"x": "c"}).json() == {"x": "c"}
+        assert loads == [1, 1]
+
+
+def test_idle_unload_zero_loads_at_start_and_never_unloads(started):
+    clock = Clock()
+    runtime = ServiceRuntime(
+        "rt-asr", lambda: GatedBackend(gate=None), 4, idle_unload_s=0, clock=clock
+    )
+    runtime.start()
+    try:
+        assert runtime.wait_ready(5)
+        clock.t += 10**6
+        assert runtime.check_idle() is False and runtime.backend is not None
+    finally:
+        runtime.stop()
+
+
+def test_idle_unload_skips_while_jobs_pending():
+    clock, loads = Clock(), []
+    app, runtime = _lazy_app(clock, loads)
+    with TestClient(app):
+        assert runtime.wait_ready(5)
+        gate = threading.Event()
+        fut = runtime.submit_threadsafe(gate.wait, 5)
+        clock.t += 10**4
+        assert runtime.check_idle() is False
+        gate.set()
+        fut.result(5)
+        clock.t += 10**4
+        assert runtime.check_idle() is True
+
+
+def test_idle_unload_setting_from_env():
+    from src.services.asr.settings import AsrSettings
+    from src.services.tts.settings import TtsSettings
+
+    assert AsrSettings.from_env({}).idle_unload_minutes == 15
+    assert (
+        TtsSettings.from_env({"RT_IDLE_UNLOAD_MINUTES": "0"}).idle_unload_minutes == 0
+    )

@@ -42,7 +42,7 @@ def build_http_router(
     @router.post("/audio/speech")
     async def speech(req: SpeechRequest):
         s = config.current()
-        backend = runtime.require_ready()
+        backend = await runtime.acquire()
         text = req.input.strip()
         if not text:
             raise ApiError(400, "invalid_request", "input must not be empty")
@@ -117,7 +117,7 @@ def build_http_router(
 
     @router.get("/audio/voices")
     async def voices() -> dict:
-        backend = runtime.require_ready()
+        backend = await runtime.acquire()
         return {
             "voices": [
                 {"id": v.id, "language": v.language, "gender": v.gender}

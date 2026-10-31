@@ -31,11 +31,19 @@ def build_health_router(
 
     @router.get("/health")
     async def health() -> dict:
-        return {"status": "ok"}
+        # never triggers a load: reports the model state as is
+        return {
+            "status": "ok",
+            "model": {
+                "loaded": runtime.backend is not None,
+                "state": runtime.state.value,
+            },
+        }
 
     @router.get("/status")
     async def status() -> dict:
-        ready = runtime.state is ModelState.READY
+        # an idle-unloaded model is ready: the next request loads it
+        ready = runtime.state in (ModelState.READY, ModelState.UNLOADED)
         live = config.current() if config is not None else settings
         return {
             "service": settings.service,

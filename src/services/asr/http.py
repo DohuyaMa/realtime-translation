@@ -71,7 +71,7 @@ def build_http_router(
         except SettingsError as exc:
             raise ApiError(400, "invalid_request", str(exc)) from exc
 
-        backend = runtime.require_ready()
+        backend = await runtime.acquire()
         limit = s.max_upload_mb * 1024 * 1024
         data = await file.read(limit + 1)
         if len(data) > limit:

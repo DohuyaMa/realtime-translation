@@ -46,6 +46,7 @@ class BaseSettings:
     log_level: str
     max_pending: int
     config_state: Optional[str] = None
+    idle_unload_minutes: int = 15
 
     # field -> env key, except "backend": its key is service specific, so
     # subclasses set BACKEND_ENV (e.g. "RT_ASR_BACKEND"). Always read the full
@@ -61,6 +62,7 @@ class BaseSettings:
         "log_level": "RT_LOG_LEVEL",
         "max_pending": "RT_MAX_PENDING",
         "config_state": "RT_CONFIG_STATE",
+        "idle_unload_minutes": "RT_IDLE_UNLOAD_MINUTES",
     }
     # Changeable at runtime without reloading the model.
     BACKEND_ENV: ClassVar[Optional[str]] = None
@@ -139,6 +141,9 @@ def base_from_env(
         log_level=env_choice(env, keys["log_level"], "info", LOG_LEVELS),
         max_pending=env_int(env, keys["max_pending"], 16, min_value=1),
         config_state=env_str(env, keys["config_state"], None),
+        idle_unload_minutes=env_int(
+            env, keys["idle_unload_minutes"], 15, min_value=0, max_value=10080
+        ),
     )
 
 

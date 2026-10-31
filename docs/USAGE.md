@@ -80,6 +80,8 @@ rt-models --model-dir /var/lib/rt-asr/models list
 Класи: **BOOTSTRAP** - лише через env/рестарт; **TUNABLE** - змінюється через `/config` без перезавантаження моделі; **RELOAD** - змінюється через `/config`, але модель перезавантажується (при помилці - автоматичний rollback). Default-и нижче - для `RT_DEVICE=cpu` (на `cuda` default `RT_MODEL` для ASR - `whisper-large-v3-turbo`, beam 3, compute `int8_float16`).
 Таблиця згенерована (виконувати всередині `nix develop`): `python -m scripts.gen_env_table`.
 
+`RT_IDLE_UNLOAD_MINUTES` (NixOS: `services.rtSpeech.{asr,tts}.idleUnloadMinutes`): модель вантажиться першим запитом і вивантажується після N хвилин без запитів (кожне завантаження/вивантаження - у лозі); `0` - завантажити на старті й не вивантажувати. `/health` модель не вантажить, показує `model.loaded`/`model.state`; `/status` вважає вивантажену модель `ready` (перший запит після простою чекає завантаження).
+
 **rt-asr**
 
 | Ключ | Default | Клас |
@@ -98,6 +100,7 @@ rt-models --model-dir /var/lib/rt-asr/models list
 | `RT_CONFIG_STATE` | `(не задано)` | BOOTSTRAP |
 | `RT_DEVICE` | `cpu` | RELOAD |
 | `RT_HOST` | `127.0.0.1` | BOOTSTRAP |
+| `RT_IDLE_UNLOAD_MINUTES` | `15` | BOOTSTRAP |
 | `RT_LOG_LEVEL` | `info` | TUNABLE |
 | `RT_MAX_PENDING` | `16` | BOOTSTRAP |
 | `RT_MODEL` | `whisper-small` | RELOAD |
@@ -113,6 +116,7 @@ rt-models --model-dir /var/lib/rt-asr/models list
 | `RT_CONFIG_STATE` | `(не задано)` | BOOTSTRAP |
 | `RT_DEVICE` | `cpu` | RELOAD |
 | `RT_HOST` | `127.0.0.1` | BOOTSTRAP |
+| `RT_IDLE_UNLOAD_MINUTES` | `15` | BOOTSTRAP |
 | `RT_LOG_LEVEL` | `info` | TUNABLE |
 | `RT_MAX_PENDING` | `16` | BOOTSTRAP |
 | `RT_MODEL` | `kokoro-82m-v1.0-onnx` | RELOAD |

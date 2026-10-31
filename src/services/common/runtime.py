@@ -1,9 +1,16 @@
-"""Model lifecycle (background load, hot reload) + access to the inference worker."""
+"""Model lifecycle (background load, hot reload, idle unload) + inference worker.
+
+With ``idle_unload_s > 0`` (``RT_IDLE_UNLOAD_MINUTES``) the model is loaded
+lazily by the first request (``acquire``) and dropped after that many seconds
+without requests; every load and unload is logged. ``0`` keeps the old
+behaviour: load at start, never unload.
+"""
 
 from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import gc
 import threading
 import time
 from enum import Enum
@@ -21,6 +28,11 @@ class ModelState(str, Enum):
     LOADING = "loading"
     READY = "ready"
     FAILED = "failed"
+    UNLOADED = "unloaded"  # idle-unloaded or not loaded yet; loads on demand
+
+
+# How long a request waits for a lazy (on-demand) model load.
+LAZY_LOAD_WAIT_S = 600.0
 
 
 def _describe(exc: BaseException) -> str:
@@ -46,12 +58,20 @@ class ServiceRuntime:
         service: str,
         backend_factory: Callable[[], Any],
         max_pending: int,
+        *,
+        idle_unload_s: float = 0.0,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.service = service
         self._factory = backend_factory
         self.worker = InferenceWorker(max_pending, name=f"{service}-inference")
         self.backend: Any = None
-        self.state = ModelState.LOADING
+        self.idle_unload_s = idle_unload_s
+        self._clock = clock
+        self.last_used = clock()
+        self._state_lock = threading.Lock()  # lazy load vs idle unload
+        self._idle_stop = threading.Event()
+        self.state = ModelState.UNLOADED if idle_unload_s > 0 else ModelState.LOADING
         self.error: Optional[str] = None
         self.load_seconds: Optional[float] = None
         self._settled = threading.Event()
@@ -67,10 +87,97 @@ class ServiceRuntime:
             return
         self._started = True
         self.worker.start()
+        if self.idle_unload_s > 0:
+            logger.info(
+                "{}: lazy model load, idle unload after {:.0f}s",
+                self.service,
+                self.idle_unload_s,
+            )
+            threading.Thread(
+                target=self._idle_loop, name=f"{self.service}-idle", daemon=True
+            ).start()
+            return
         self._load_lock.acquire()  # released by _initial_load
         threading.Thread(
             target=self._initial_load, name=f"{self.service}-loader", daemon=True
         ).start()
+
+    # --- lazy load / idle unload -------------------------------------------
+
+    def touch(self) -> None:
+        self.last_used = self._clock()
+
+    def ensure_loading(self) -> None:
+        """Start a background load if the model is unloaded (never blocks)."""
+        with self._state_lock:
+            if self.state is not ModelState.UNLOADED or not self._started:
+                return
+            if not self._load_lock.acquire(blocking=False):
+                return  # a reload is running; it brings a model anyway
+            self.state = ModelState.LOADING
+            self._settled.clear()
+        logger.info("{}: loading model on demand", self.service)
+        threading.Thread(
+            target=self._initial_load, name=f"{self.service}-loader", daemon=True
+        ).start()
+
+    async def acquire(self) -> Any:
+        """Backend for a request: marks usage, loads on demand (lazy mode)."""
+        self.touch()
+        if self.backend is None and self.idle_unload_s > 0:
+            self.ensure_loading()
+            if self.state is ModelState.LOADING:
+                await asyncio.to_thread(self._settled.wait, LAZY_LOAD_WAIT_S)
+        return self.require_ready()
+
+    def check_idle(self) -> bool:
+        """Unload the model if idle long enough; True if it was unloaded."""
+        if self.idle_unload_s <= 0:
+            return False
+        idle = self._clock() - self.last_used
+        if (
+            self.state is not ModelState.READY
+            or self.backend is None
+            or self.worker.pending
+            or idle < self.idle_unload_s
+        ):
+            return False
+        if not self._load_lock.acquire(blocking=False):
+            return False  # a load/reload is running
+        try:
+            with self._state_lock:
+                if self.worker.pending or self._clock() - self.last_used < (
+                    self.idle_unload_s
+                ):
+                    return False
+                model_id = getattr(self.backend, "model_id", "?")
+
+                def drop() -> None:
+                    self.backend = None
+
+                self.worker.submit(
+                    drop, priority=Priority.FINAL, bypass_limit=True
+                ).result()
+                self.state = ModelState.UNLOADED
+                self.load_seconds = None
+        finally:
+            self._load_lock.release()
+        gc.collect()
+        logger.info(
+            "{}: model {} unloaded after {:.0f}s without requests",
+            self.service,
+            model_id,
+            idle,
+        )
+        return True
+
+    def _idle_loop(self) -> None:
+        period = min(30.0, max(self.idle_unload_s / 4, 0.05))
+        while not self._idle_stop.wait(period):
+            try:
+                self.check_idle()
+            except Exception:  # noqa: BLE001 — keep the watchdog alive
+                logger.exception("{}: idle unload check failed", self.service)
 
     def _build(self, factory: Callable[[], Any]) -> Any:
         backend = factory()
@@ -95,15 +202,19 @@ class ServiceRuntime:
             self.backend = backend
             self.load_seconds = round(time.monotonic() - t0, 3)
             self.state = ModelState.READY
+            self.touch()
             logger.info("{}: model ready in {:.1f}s", self.service, self.load_seconds)
         finally:
             self._load_lock.release()
             self._settled.set()
 
     def stop(self) -> None:
+        self._idle_stop.set()
         self.worker.stop()
 
     def wait_ready(self, timeout: float) -> bool:
+        """Wait for a loaded model; in lazy mode this triggers the load."""
+        self.ensure_loading()
         self._settled.wait(timeout)
         return self.state is ModelState.READY
 
@@ -236,9 +347,11 @@ class ServiceRuntime:
         **kwargs: Any,
     ) -> concurrent.futures.Future:
         """Thread-safe entry into the inference queue (HTTP, WS, workers)."""
-        return self.worker.submit(
+        fut = self.worker.submit(
             fn, *args, priority=priority, bypass_limit=bypass_limit, **kwargs
         )
+        fut.add_done_callback(lambda _f: self.touch())  # idle counts from the end
+        return fut
 
     async def run(
         self,
@@ -261,7 +374,7 @@ class ServiceRuntime:
         **kwargs: Any,
     ) -> concurrent.futures.Future[list[T]]:
         """Stepped generator job (see ``InferenceWorker.submit_iter``)."""
-        return self.worker.submit_iter(
+        fut = self.worker.submit_iter(
             gen_factory,
             *args,
             priority=priority,
@@ -269,6 +382,8 @@ class ServiceRuntime:
             cancel=cancel,
             **kwargs,
         )
+        fut.add_done_callback(lambda _f: self.touch())
+        return fut
 
     async def run_iter(
         self,

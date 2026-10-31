@@ -145,6 +145,7 @@ def test_bootstrap_fields():
         "model_dir",
         "config_state",
         "max_pending",
+        "idle_unload_minutes",
     }
 
 
