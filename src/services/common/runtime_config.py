@@ -40,6 +40,12 @@ class RuntimeConfig(Generic[S]):
         self._runtime_fields = settings_cls.TUNABLE_FIELDS | settings_cls.RELOAD_FIELDS
         self._bootstrap_fields = settings_cls.bootstrap_fields()
         self._bootstrap = self._build({})
+        # Switchable devices are a property of the node, not of the current
+        # device: pin them so a device override cannot widen them.
+        self._bootstrap_env.setdefault(
+            settings_cls.env_keys()["devices"],
+            render_env_value(self._bootstrap.devices),
+        )
         self._current: S = self._bootstrap
         self._overrides: Dict[str, object] = {}
         self._version = 0
@@ -70,7 +76,7 @@ class RuntimeConfig(Generic[S]):
                 },
                 "bootstrap": self._values(self._bootstrap),
                 "version": self._version,
-                "schema": self._cls.field_schema(),
+                "schema": self._cls.field_schema(self._bootstrap),
             }
 
     def apply(

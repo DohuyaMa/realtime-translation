@@ -99,6 +99,7 @@ rt-models --model-dir /var/lib/rt-asr/models list
 | `RT_COMPUTE_TYPE` | `int8` | RELOAD |
 | `RT_CONFIG_STATE` | `(не задано)` | BOOTSTRAP |
 | `RT_DEVICE` | `cpu` | RELOAD |
+| `RT_DEVICES` | `cpu` | BOOTSTRAP |
 | `RT_IDLE_UNLOAD_MINUTES` | `15` | BOOTSTRAP |
 | `RT_LISTEN_ADDRESSES` | `127.0.0.1` | BOOTSTRAP |
 | `RT_LOG_LEVEL` | `info` | TUNABLE |
@@ -115,6 +116,7 @@ rt-models --model-dir /var/lib/rt-asr/models list
 | `RT_COMPUTE_TYPE` | `float32` | RELOAD |
 | `RT_CONFIG_STATE` | `(не задано)` | BOOTSTRAP |
 | `RT_DEVICE` | `cpu` | RELOAD |
+| `RT_DEVICES` | `cpu` | BOOTSTRAP |
 | `RT_IDLE_UNLOAD_MINUTES` | `15` | BOOTSTRAP |
 | `RT_LISTEN_ADDRESSES` | `127.0.0.1` | BOOTSTRAP |
 | `RT_LOG_LEVEL` | `info` | TUNABLE |
@@ -228,7 +230,7 @@ HM-модуль edge: `homeManagerModules.rt-translator` (також `default`),
 }
 ```
 
-Спільні опції: `enable, package, deployRsPath, listenAddresses, port, device (cpu|cuda|rocm), model, configState, modelDir, apiTokenFile, openFirewall, firewallInterfaces, logLevel, rocmGfxVersion, memoryDenyWriteExecute, extraEnv`. ASR: `computeType, language, languages, beamSize, vad, chunkSeconds`. TTS: `voice, speed, sampleRate`. Потрібен overlay: `nixpkgs.overlays = [ inputs.realtime-translation.overlays.default ];` і `nixosModules.rt-speech` в `imports`.
+Спільні опції: `enable, package, deployRsPath, listenAddresses, port, device (cpu|cuda|rocm), devices, model, configState, modelDir, apiTokenFile, openFirewall, firewallInterfaces, logLevel, rocmGfxVersion, memoryDenyWriteExecute, extraEnv`. ASR: `computeType, language, languages, beamSize, vad, chunkSeconds`. TTS: `voice, speed, sampleRate`. `devices` (default `[ device ]`, env `RT_DEVICES`) - між якими пристроями сервіс перемикається без redeploy: `devices = [ "cpu" "cuda" ]` ставить GPU-бандл (він працює і на cpu) і GPU-sandbox навіть при старті на cpu; `device` - стартовий. Перемикання - поле `device` у діалозі налаштувань вузла (`POST /config`, модель перезавантажується; default-и моделі/beam/compute переобчислюються для нового пристрою, якщо не задані явно). Помилка (напр. CUDA OOM) - явна: `POST /config` 500 з текстом, `/status` `model.reload_error`, стара модель лишається на старому пристрої; тихого відкату на cpu немає. Потрібен overlay: `nixpkgs.overlays = [ inputs.realtime-translation.overlays.default ];` і `nixosModules.rt-speech` в `imports`.
 
 ### (b) deploy-rs (покроково, в інфрі swarm-nix)
 

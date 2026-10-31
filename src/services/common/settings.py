@@ -81,6 +81,8 @@ class BaseSettings:
     max_pending: int
     config_state: Optional[str] = None
     idle_unload_minutes: int = 15
+    # Devices ``device`` may switch to at runtime (RT_DEVICES); () = (device,).
+    devices: tuple[str, ...] = ()
 
     # field -> env key, except "backend": its key is service specific, so
     # subclasses set BACKEND_ENV (e.g. "RT_ASR_BACKEND"). Always read the full
@@ -97,6 +99,7 @@ class BaseSettings:
         "max_pending": "RT_MAX_PENDING",
         "config_state": "RT_CONFIG_STATE",
         "idle_unload_minutes": "RT_IDLE_UNLOAD_MINUTES",
+        "devices": "RT_DEVICES",
     }
     # Schema of the runtime (TUNABLE | RELOAD) fields; subclasses extend it.
     FIELD_META: ClassVar[Mapping[str, FieldMeta]] = {
@@ -135,14 +138,20 @@ class BaseSettings:
         return keys - cls.TUNABLE_FIELDS - cls.RELOAD_FIELDS
 
     @classmethod
-    def field_schema(cls) -> Dict[str, dict]:
-        """Runtime fields -> FieldMeta dict + ``reload`` flag (GET /config)."""
+    def field_schema(cls, settings: Optional["BaseSettings"] = None) -> Dict[str, dict]:
+        """Runtime fields -> FieldMeta dict + ``reload`` flag (GET /config).
+
+        With ``settings`` the ``device`` choices are that node's switchable
+        devices (RT_DEVICES), not every device the code knows.
+        """
         out = {}
         for name in sorted(cls.TUNABLE_FIELDS | cls.RELOAD_FIELDS):
             meta = cls.FIELD_META.get(name)
             if meta is None:
                 raise TypeError(f"{cls.__name__}: no FIELD_META for {name!r}")
             out[name] = meta.as_dict() | {"reload": name in cls.RELOAD_FIELDS}
+        if settings is not None and "device" in out:
+            out["device"]["choices"] = settings.devices
         return out
 
     @property
@@ -174,6 +183,26 @@ def parse_listen_addresses(key: str, raw: Optional[str]) -> tuple[str, ...]:
             out.append(addr)
     if not out:
         raise SettingsError(f"{key} must list at least one address")
+    return tuple(out)
+
+
+def parse_devices(key: str, raw: Optional[str], device: str) -> tuple[str, ...]:
+    """RT_DEVICES: comma list of switchable devices; must contain ``device``."""
+    if raw is None or not raw.strip():
+        return (device,)
+    out: list[str] = []
+    for part in raw.split(","):
+        part = part.strip().lower()
+        if not part:
+            continue
+        if part not in DEVICES:
+            raise SettingsError(f"{key} entries must be one of {DEVICES}, got {part!r}")
+        if part not in out:
+            out.append(part)
+    if device not in out:
+        raise SettingsError(
+            f"device {device!r} is not available on this node ({key}={','.join(out)})"
+        )
     return tuple(out)
 
 
@@ -220,6 +249,9 @@ def base_from_env(
         config_state=env_str(env, keys["config_state"], None),
         idle_unload_minutes=env_int(
             env, keys["idle_unload_minutes"], 15, min_value=0, max_value=10080
+        ),
+        devices=parse_devices(
+            keys["devices"], env_str(env, keys["devices"], None), device
         ),
     )
 

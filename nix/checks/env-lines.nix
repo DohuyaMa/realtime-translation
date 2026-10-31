@@ -71,6 +71,14 @@ let
         ++ builtins.filter (lib.hasPrefix "HSA_") (rtLib.envLines "asr" (asr // { device = "cuda"; rocmGfxVersion = "9.0.0"; }));
       expected = [ "HSA_OVERRIDE_GFX_VERSION=9.0.0" ];
     };
+    testDevicesOnlyWhenSwitchable = {
+      expr = [
+        (builtins.filter (lib.hasPrefix "RT_DEVICES") (rtLib.envLines "asr" (asr // { devices = [ "cpu" "cuda" ]; })))
+        (builtins.filter (lib.hasPrefix "RT_DEVICES") (rtLib.envLines "asr" (asr // { devices = [ "cpu" ]; })))
+        (builtins.filter (lib.hasPrefix "RT_DEVICES") (rtLib.envLines "asr" asr))
+      ];
+      expected = [ [ "RT_DEVICES=cpu,cuda" ] [ ] [ ] ];
+    };
     testExtraEnvSortedAndLast = {
       expr = lib.takeEnd 2 (rtLib.envLines "asr" (asr // { extraEnv = { ZED = "1"; ALPHA = "a b"; }; }));
       expected = [ "ALPHA=a b" "ZED=1" ];

@@ -341,7 +341,7 @@ def test_client_disconnect_stops_batch_between_chunks():
 
 
 def test_config_device_change_rederives_device_defaults():
-    app, _ = make()
+    app, _ = make(RT_DEVICES="cpu,cuda")
     with running(app) as client:
         body = set_config(client, device="cuda")
     assert body["values"]["model"] == default_model("asr", "cuda")
@@ -349,6 +349,47 @@ def test_config_device_change_rederives_device_defaults():
     assert body["values"]["beam_size"] == default_beams("asr", "cuda")
     assert body["bootstrap"]["model"] == default_model("asr", "cpu")
     assert app.state.runtime.backend.model_id == default_model("asr", "cuda")
+
+
+def test_config_device_choices_are_the_node_devices():
+    app, _ = make(RT_DEVICES="cpu,cuda")
+    with running(app) as client:
+        assert client.get("/config").json()["schema"]["device"]["choices"] == [
+            "cpu",
+            "cuda",
+        ]
+    app, _ = make()  # no RT_DEVICES: only the start device
+    with running(app) as client:
+        assert client.get("/config").json()["schema"]["device"]["choices"] == ["cpu"]
+        r = client.post("/config", json={"version": 1, "values": {"device": "cuda"}})
+        assert r.status_code == 422 and "not available on this node" in r.text
+        assert client.get("/status").json()["device"] == "cpu"
+
+
+def test_config_device_switch_failure_is_explicit(monkeypatch):
+    """CUDA OOM on switch: 500 + /status reload_error, old model keeps serving
+    on cpu; no silent fallback. The next good switch clears the error."""
+    import src.services.asr.app as asr_app
+
+    real = asr_app.make_backend
+
+    def make_backend(settings):
+        if settings.device == "cuda":
+            raise RuntimeError("CUDA failed with error out of memory")
+        return real(settings)
+
+    monkeypatch.setattr(asr_app, "make_backend", make_backend)
+    app, _ = make(RT_DEVICES="cpu,cuda")
+    with running(app) as client:
+        r = client.post("/config", json={"version": 1, "values": {"device": "cuda"}})
+        assert r.status_code == 500 and "out of memory" in r.text
+        status = client.get("/status").json()
+        assert status["device"] == "cpu" and status["ready"] is True
+        assert "out of memory" in status["model"]["reload_error"]
+        assert client.get("/config").json()["values"]["device"] == "cpu"
+        assert post(client).status_code == 200
+        set_config(client, model="whisper-base")
+        assert client.get("/status").json()["model"]["reload_error"] is None
 
 
 def spy_runtime(runtime):

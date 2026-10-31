@@ -10,15 +10,19 @@ let
   # Environment= needs quoting (spaces split assignments) and %-escaping (specifiers).
   quoteEnv = line: "\"" + lib.escape [ "\\" "\"" ] (lib.replaceStrings [ "%" ] [ "%%" ] line) + "\"";
 
+  # The single GPU kind of `devices` ("cpu" when there is none): bundle variant + sandbox.
+  gpuDevice = cfg: lib.findFirst (d: d != "cpu") "cpu" cfg.devices;
+  hasGpu = cfg: gpuDevice cfg != "cpu";
+
   commonOptions = service: svc:
     let cfg = config.services.rtSpeech.${service}; in
     {
       enable = mkEnableOption "rt-${service} speech service";
       package = mkOption {
         type = types.package;
-        default = rtPkgs.${service}.${rtLib.variantForDevice.${cfg.device}}
-          or (throw "services.rtSpeech.${service}: no prebuilt bundle for device '${cfg.device}' (spec D2: rt-tts has no ROCm variant yet); set `package` or `deployRsPath`");
-        defaultText = lib.literalExpression "rtSpeech.${service}.<variant matching device>";
+        default = rtPkgs.${service}.${rtLib.variantForDevice.${gpuDevice cfg}}
+          or (throw "services.rtSpeech.${service}: no prebuilt bundle for device '${gpuDevice cfg}' (spec D2: rt-tts has no ROCm variant yet); set `package` or `deployRsPath`");
+        defaultText = lib.literalExpression "rtSpeech.${service}.<variant matching the GPU entry of devices, else cpu>";
         description = "Bundle providing bin/rt-${service}. Used only when deployRsPath is empty.";
       };
       deployRsPath = mkOption {
@@ -34,7 +38,14 @@ let
         description = "IP addresses to listen on, one socket each (RT_LISTEN_ADDRESSES). Keep 127.0.0.1 for clients on this host and add the cluster (e.g. tailscale) address for remote edges; addresses not configured yet are bound anyway (IP_FREEBIND).";
       };
       port = mkOption { type = types.port; default = svc.port; description = "Listen port (RT_PORT)."; };
-      device = mkOption { type = types.enum [ "cpu" "cuda" "rocm" ]; default = "cpu"; description = "Compute device (RT_DEVICE); also selects the bundle variant and GPU sandbox rules."; };
+      device = mkOption { type = types.enum [ "cpu" "cuda" "rocm" ]; default = "cpu"; description = "Compute device at start (RT_DEVICE); must be one of `devices`."; };
+      devices = mkOption {
+        type = types.nonEmptyListOf (types.enum [ "cpu" "cuda" "rocm" ]);
+        default = [ cfg.device ];
+        defaultText = lib.literalExpression "[ device ]";
+        example = [ "cpu" "cuda" ];
+        description = "Devices the service may switch between at runtime (RT_DEVICES; the `device` choices of GET /config, POST /config reloads the model). At most one GPU kind; it selects the bundle variant (the GPU bundle also runs on cpu) and opens the GPU sandbox even while running on cpu.";
+      };
       model = mkOption { type = types.nullOr types.str; default = null; description = "Model id/path (RT_MODEL). null = service default."; };
       configState = mkOption { type = types.nullOr types.str; default = "${svc.stateDir}/runtime-config.json"; description = "Runtime config state file (RT_CONFIG_STATE); null = not emitted."; };
       modelDir = mkOption { type = types.str; default = "${svc.stateDir}/models"; description = "Model cache (RT_MODEL_DIR; HF_HOME=<modelDir>/hf)."; };
@@ -56,8 +67,8 @@ let
       rocmGfxVersion = mkOption { type = types.str; default = ""; example = "9.0.0"; description = "HSA_OVERRIDE_GFX_VERSION for device = rocm (empty = unset)."; };
       memoryDenyWriteExecute = mkOption {
         type = types.bool;
-        default = cfg.device == "cpu" && service != "tts";
-        defaultText = lib.literalExpression ''device == "cpu" && service != "tts"'';
+        default = !(hasGpu cfg) && service != "tts";
+        defaultText = lib.literalExpression ''devices == [ "cpu" ] && service != "tts"'';
         description = "systemd MemoryDenyWriteExecute. GPU runtimes and torch/oneDNN JIT need W+X memory.";
       };
       extraEnv = mkOption { type = types.attrsOf types.str; default = { }; description = "Extra environment, appended last."; };
@@ -86,13 +97,24 @@ let
       cfg = config.services.rtSpeech.${service};
       unit = svc.unit;
       binRoot = if cfg.deployRsPath != "" then cfg.deployRsPath else cfg.package;
-      isGpu = cfg.device != "cpu";
+      isGpu = hasGpu cfg;
+      gpu = gpuDevice cfg;
     in
     lib.mkIf cfg.enable {
-      assertions = [{
-        assertion = cfg.apiTokenFile == null || !(lib.hasPrefix builtins.storeDir cfg.apiTokenFile);
-        message = "services.rtSpeech.${service}.apiTokenFile must not point into the Nix store";
-      }];
+      assertions = [
+        {
+          assertion = cfg.apiTokenFile == null || !(lib.hasPrefix builtins.storeDir cfg.apiTokenFile);
+          message = "services.rtSpeech.${service}.apiTokenFile must not point into the Nix store";
+        }
+        {
+          assertion = lib.elem cfg.device cfg.devices;
+          message = "services.rtSpeech.${service}.device '${cfg.device}' is not in devices ${builtins.toJSON cfg.devices}";
+        }
+        {
+          assertion = !(lib.elem "cuda" cfg.devices && lib.elem "rocm" cfg.devices);
+          message = "services.rtSpeech.${service}.devices: cuda and rocm need different bundles; list at most one GPU kind";
+        }
+      ];
       warnings = lib.optional (cfg.openFirewall && lib.all (a: a == "127.0.0.1" || a == "::1") cfg.listenAddresses)
         "services.rtSpeech.${service}: openFirewall is set but listenAddresses are loopback only, so nothing listens on ${lib.concatStringsSep ", " cfg.firewallInterfaces}";
 
@@ -149,14 +171,14 @@ let
           PrivateDevices = !isGpu;
           SupplementaryGroups = lib.optionals isGpu [ "video" "render" ];
           DeviceAllow =
-            lib.optionals (cfg.device == "cuda") [
+            lib.optionals (gpu == "cuda") [
               "/dev/nvidiactl rw"
               "/dev/nvidia0 rw"
               "/dev/nvidia-modeset rw"
               "/dev/nvidia-uvm rw"
               "/dev/nvidia-uvm-tools rw"
             ]
-            ++ lib.optionals (cfg.device == "rocm") [ "/dev/kfd rw" "char-drm rw" ];
+            ++ lib.optionals (gpu == "rocm") [ "/dev/kfd rw" "char-drm rw" ];
 
           LimitNOFILE = 65536; # no LimitNPROC: it counts threads of the user (CT2/torch pools)
           Restart = "on-failure";

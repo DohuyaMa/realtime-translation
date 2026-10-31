@@ -17,6 +17,9 @@ let
 
   cpu = evalWith { asr = { enable = true; package = fake "rt-asr"; extraEnv.NOTE = ''say "hi" 100%''; apiTokenFile = "/run/secrets/rt"; }; };
   cuda = evalWith { asr = { enable = true; device = "cuda"; package = fake "rt-asr"; }; };
+  # Runtime cpu<->cuda switch: starts on cpu, GPU bundle + GPU sandbox.
+  switchable = evalWith { asr = { enable = true; device = "cpu"; devices = [ "cpu" "cuda" ]; }; };
+  deviceNotListed = evalWith { asr = { enable = true; device = "cuda"; devices = [ "cpu" ]; package = fake "rt-asr"; }; };
   rocm = evalWith { asr = { enable = true; device = "rocm"; rocmGfxVersion = "9.0.0"; package = fake "rt-asr"; }; };
   deployed = evalWith { asr = { enable = true; deployRsPath = "/var/lib/rt-asr/current"; }; };
   ttsCpuNoMdwe = evalWith { tts = { enable = true; package = fake "rt-tts"; }; };
@@ -55,6 +58,24 @@ let
         MemoryDenyWriteExecute = false;
         PrivateDevices = false;
       };
+    };
+    testSwitchableCpuCuda = {
+      expr = {
+        inherit (sc switchable "rt-asr") DeviceAllow MemoryDenyWriteExecute PrivateDevices;
+        package = switchable.services.rtSpeech.asr.package.name;
+        env = builtins.filter (s: lib.hasInfix "RT_DEVICE" s) (sc switchable "rt-asr").Environment;
+      };
+      expected = {
+        DeviceAllow = [ "/dev/nvidiactl rw" "/dev/nvidia0 rw" "/dev/nvidia-modeset rw" "/dev/nvidia-uvm rw" "/dev/nvidia-uvm-tools rw" ];
+        MemoryDenyWriteExecute = false;
+        PrivateDevices = false;
+        package = (import ../packages { inherit pkgs lib; }).asr.gpu.name;
+        env = [ ''"RT_DEVICE=cpu"'' ''"RT_DEVICES=cpu,cuda"'' ];
+      };
+    };
+    testDeviceMustBeListed = {
+      expr = failedAssertions deviceNotListed;
+      expected = [ "services.rtSpeech.asr.device 'cuda' is not in devices [\"cpu\"]" ];
     };
     testRocmDevicesAndGfx = {
       expr = {

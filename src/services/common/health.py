@@ -56,6 +56,7 @@ def build_health_router(
                 "state": runtime.state.value,
                 "load_seconds": runtime.load_seconds,
                 "error": runtime.error,
+                "reload_error": runtime.reload_error,
             },
             "ready": ready,
             "vram_mb": await asyncio.to_thread(vram.read),

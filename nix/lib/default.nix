@@ -32,10 +32,13 @@ let
       (kv "RT_LOG_LEVEL" cfg.logLevel)
     ]
     ++ lib.optional ((cfg.configState or null) != null) (kv "RT_CONFIG_STATE" cfg.configState)
+    # Runtime-switchable devices; omitted when only `device` itself (service default).
+    ++ lib.optional ((cfg.devices or [ cfg.device ]) != [ cfg.device ])
+      (kv "RT_DEVICES" (lib.concatStringsSep "," cfg.devices))
     ++ lib.optional (cfg.model != null) (kv "RT_MODEL" cfg.model)
     ++ lib.optional ((cfg.computeType or null) != null) (kv "RT_COMPUTE_TYPE" cfg.computeType)
     ++ lib.optional ((cfg.idleUnloadMinutes or null) != null) (kv "RT_IDLE_UNLOAD_MINUTES" cfg.idleUnloadMinutes)
-    ++ lib.optional (cfg.device == "rocm" && cfg.rocmGfxVersion != "") (kv "HSA_OVERRIDE_GFX_VERSION" cfg.rocmGfxVersion)
+    ++ lib.optional (lib.elem "rocm" (cfg.devices or [ cfg.device ]) && cfg.rocmGfxVersion != "") (kv "HSA_OVERRIDE_GFX_VERSION" cfg.rocmGfxVersion)
     ++ lib.optionals (service == "asr") (
       lib.optional (cfg.language != null) (kv "RT_ASR_LANGUAGE" cfg.language)
       ++ [ (kv "RT_ASR_LANGUAGES" (lib.concatStringsSep "," cfg.languages)) ]

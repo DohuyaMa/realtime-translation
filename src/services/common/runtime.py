@@ -73,6 +73,9 @@ class ServiceRuntime:
         self._idle_stop = threading.Event()
         self.state = ModelState.UNLOADED if idle_unload_s > 0 else ModelState.LOADING
         self.error: Optional[str] = None
+        # Last failed reload (POST /config: model/device change, e.g. CUDA OOM);
+        # the previous model keeps serving. Cleared by the next good reload.
+        self.reload_error: Optional[str] = None
         self.load_seconds: Optional[float] = None
         self._settled = threading.Event()
         # One model load at a time (initial load and reloads). Released by
@@ -266,10 +269,12 @@ class ServiceRuntime:
             )
             if previous is ModelState.FAILED:
                 self.error = _describe(exc)
+            self.reload_error = _describe(exc)
             self.state = previous
             raise
         else:
             self.error = None
+            self.reload_error = None
             self.load_seconds = round(time.monotonic() - t0, 3)
             self.state = ModelState.READY
             logger.info(

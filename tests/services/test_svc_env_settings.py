@@ -146,7 +146,21 @@ def test_bootstrap_fields():
         "config_state",
         "max_pending",
         "idle_unload_minutes",
+        "devices",
     }
+
+
+def test_devices_must_contain_device():
+    from src.services.asr.settings import AsrSettings
+
+    env = {"RT_ASR_BACKEND": "fake"}
+    assert AsrSettings.from_env(env).devices == ("cpu",)
+    got = AsrSettings.from_env({**env, "RT_DEVICES": "cpu, CUDA,cpu"})
+    assert got.devices == ("cpu", "cuda")
+    with pytest.raises(SettingsError):
+        AsrSettings.from_env({**env, "RT_DEVICE": "cuda", "RT_DEVICES": "cpu"})
+    with pytest.raises(SettingsError):
+        AsrSettings.from_env({**env, "RT_DEVICES": "cpu,tpu"})
 
 
 def test_base_without_backend_env_is_rejected():
