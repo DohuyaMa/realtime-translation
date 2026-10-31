@@ -143,20 +143,17 @@ def test_settings_dialog_vosk_use_and_check_prompts_saved(app, cfg):
     assert DEFAULT_CHECK_USER_TEMPLATE != tpl
 
 
-def test_endpoints_dialog_values_and_segmentation(app):
+def test_endpoints_dialog_values(app):
     s = resolve_edge_settings({"services": {"local": {"tts": "http://t:2"}}}, {})
     dlg = SettingsDialog(s, services=[])
     dlg.endpoints_tab.django_urls.setPlainText("http://a:1\nhttp://b:2")
     dlg.endpoints_tab.local["asr"].setText("http://x:1")
-    dlg.segmentation_tab.chunk_min_s.setValue(120)
-    dlg.llm_tab.end_silence_ms.setValue(400)
     v = dlg.values()
     assert v["services.django_urls"] == ["http://a:1", "http://b:2"]
     assert v["services.local.asr"] == "http://x:1"
     assert v["services.local.tts"] == "http://t:2"
     assert v["services.allowed_services"] is None
-    assert v["segmentation.transcribe.chunk_min_s"] == 120
-    assert v["segmentation.translate.end_silence_ms"] == 400
+    assert not any(k.startswith("segmentation.") for k in v)  # S5: no segmenter
     assert v["services.mode"] == "auto"
 
 
@@ -196,10 +193,8 @@ def test_accept_persists_and_emits(app, cfg):
     got = []
     dlg.settings_changed.connect(got.append)
     dlg.endpoints_tab.local["asr"].setText("http://a:1")
-    dlg.llm_tab.end_silence_off.setChecked(True)
     dlg.accept()
     assert got and got[0].local.asr == "http://a:1"
-    assert got[0].segmentation.translate.end_silence_ms is None
     assert _saved(cfg)["services"]["local"]["asr"] == "http://a:1"
 
 
@@ -564,10 +559,7 @@ def test_asr_panel_lists_cached_models_and_applies_changes(app):
         lambda e: client,
         Background(sync=True),
     )
-    assert tab.values() == {
-        "services.asr.prompt": "Kubernetes, NixOS",
-        "services.asr.previous_words": 30,
-    }
+    assert tab.values() == {"services.asr.prompt": "Kubernetes, NixOS"}
     panel = tab.service
     panel.load()
     model = panel.editors["model"].widget
@@ -743,7 +735,10 @@ def test_llm_tab_preview_and_words_per_request(app):
     tab = LlmTab(s)
     assert tab.words_per_request.value() == 40
     text = tab.preview.toPlainText()
-    assert "[system] You are a professional simultaneous interpreter" in text and "Polish" in text
+    assert (
+        "[system] You are a professional simultaneous interpreter" in text
+        and "Polish" in text
+    )
     assert (
         "[запит 1/1, {{text}} = 16 слів] [Polish->English] Dzień dobry wszystkim."
         in text
@@ -825,32 +820,21 @@ def test_llm_model_read_only_only_when_set_by_env(app):
     assert not tab.model.isEnabled() and tab.use.isEnabled()
 
 
-def test_asr_tab_template_previous_words_and_preview(app):
+def test_asr_tab_template_and_preview(app):
     from src.ui.widgets.service_tabs import AsrTab, Background
 
     s = resolve_edge_settings({"services": {"source_language": "uk"}}, {})
-    assert s.asr.prompt == "{{previous_text}}" and s.asr.previous_words == 30
+    assert s.asr.prompt == ""
     tab = AsrTab(s, [], lambda e: None, Background(sync=True))
-    tab.previous_words.setValue(3)
-    assert tab.preview.toPlainText() == (
-        "сервісів розпізнавання мовлення\n[у {{previous_text}} підставлено 3 слів]"
-    )
-    tab.prompt.setPlainText("NixOS, Kubernetes ({{source_lang}}). {{previous_text}}")
-    assert tab.preview.toPlainText().splitlines()[0] == (
-        "NixOS, Kubernetes (Ukrainian). сервісів розпізнавання мовлення"
-    )
-    tab.prompt.setPlainText("Тільки словник")  # no variables: sent as-is
-    assert tab.preview.toPlainText() == (
-        "Тільки словник\n[у {{previous_text}} підставлено 0 слів]"
-    )
-    tab.prompt.setPlainText("{{previous}}")
-    assert "unknown placeholder(s) previous" in tab.preview.toPlainText()
-    tab.prompt.setPlainText("")
     assert tab.preview.toPlainText().startswith("(без prompt)")
-    assert tab.values() == {
-        "services.asr.prompt": "",
-        "services.asr.previous_words": 3,
-    }
+    tab.prompt.setPlainText("NixOS, Kubernetes ({{source_lang}}).")
+    assert tab.preview.toPlainText() == (
+        "NixOS, Kubernetes (Ukrainian).\n[+ уже розпізнаний текст стріму]"
+    )
+    tab.prompt.setPlainText("{{previous_text}}")  # rt-asr adds it itself now
+    assert "unknown placeholder(s) previous_text" in tab.preview.toPlainText()
+    tab.prompt.setPlainText("")
+    assert tab.values() == {"services.asr.prompt": ""}
 
 
 def test_node_editor_controls_follow_schema(app):
@@ -899,15 +883,13 @@ def test_node_editor_without_schema_says_so(app):
     assert "не публікує схему" in panel.status.text()
 
 
-def test_llm_tab_pause_setting(app):
+def test_llm_tab_has_no_pause_setting(app):
     from src.ui.widgets.service_tabs import LlmTab
 
     tab = LlmTab(resolve_edge_settings({}, {}))
-    assert tab.end_silence_ms.value() == 700
-    assert (tab.end_silence_ms.minimum(), tab.end_silence_ms.maximum()) == (200, 3000)
-    tab.end_silence_ms.setValue(450)
-    assert "пауза 450 мс" in tab.preview.toPlainText()
-    assert tab.values()["segmentation.translate.end_silence_ms"] == 450
+    assert not hasattr(tab, "end_silence_ms")
+    assert "одиниця йде в переклад одразу" in tab.preview.toPlainText()
+    assert not any(k.startswith("segmentation.") for k in tab.values())
 
 
 def test_status_panel_shows_stage_timing(app):
@@ -1114,7 +1096,6 @@ def test_save_values_persists_only_overrides(app, cfg):
     from src.ui.widgets.settings_dialog import save_values
 
     default = resolve_edge_settings({}, {})
-    hard_max = default.segmentation.translate.hard_max_ms
     # a stale copy of a default in the user file is dropped on the next save
     cfg.set("services.llm.temperature", default.llm.temperature)
     cfg.save()
@@ -1122,13 +1103,11 @@ def test_save_values_persists_only_overrides(app, cfg):
         {
             "services.llm.temperature": default.llm.temperature,
             "services.llm.system_prompt": DEFAULT_SYSTEM_PROMPT,
-            "segmentation.translate.hard_max_ms": hard_max,
             "services.llm.model": "m2",
         }
     )
     assert _saved(cfg) == {"services": {"llm": {"model": "m2"}}}
     assert settings.llm.model == "m2"
-    assert settings.segmentation.translate.hard_max_ms == hard_max
     save_values({"services.llm.model": default.llm.model})
     assert _saved(cfg) == {}
 

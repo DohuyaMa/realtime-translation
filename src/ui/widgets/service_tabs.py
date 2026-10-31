@@ -42,7 +42,7 @@ from ...core.prompt import (
     asr_prompt_errors,
     build_messages,
     check_template_errors,
-    render_asr_prompt_counted,
+    render_asr_prompt,
     parse_terms,
     split_words,
     system_prompt_errors,
@@ -57,9 +57,6 @@ from .model_state import (
 )
 from ...core.runtime import OFF, EdgeSettings
 
-# upper bound of «Слів у {{previous_text}}»
-PREVIOUS_WORDS_MAX = 1000
-
 PREVIEW_SAMPLE = (
     "Dzień dobry wszystkim. Dzisiaj omówimy wdrożenie klastra NixOS i"
     " konfigurację usług rozpoznawania mowy na każdym węźle."
@@ -70,13 +67,6 @@ PREVIEW_CHECK = (
     " konfiguracje usług rozpoznawania mowy na każdym węźle"
 )
 
-# recognized words of the stream so far, for the Whisper prompt preview
-PREVIEW_PREVIOUS = (
-    "Добрий день усім. Сьогодні говоримо про розгортання кластера NixOS"
-    " і налаштування сервісів розпізнавання мовлення"
-)
-
-PAUSE_MIN_MS, PAUSE_MAX_MS = 200, 3000
 
 # LLM prompt variables (core/prompt.py PLACEHOLDERS / CHECK_PLACEHOLDERS)
 PROMPT_VARIABLES_HELP = (
@@ -577,29 +567,20 @@ class AsrTab(QWidget):
             "Whisper prompt: словник, імена, терміни, стиль. Порожньо = без prompt"
         )
         self.prompt.setFixedHeight(80)
-        self.previous_words = QSpinBox()
-        self.previous_words.setRange(0, PREVIOUS_WORDS_MAX)
-        self.previous_words.setValue(settings.asr.previous_words)
-        self.previous_words.setToolTip(
-            "Скільки останніх розпізнаних слів підставляється в {{previous_text}}"
-            " (0 = жодних); без змінної в шаблоні нічого не додається"
-        )
         self.preview = QPlainTextEdit()
         self.preview.setReadOnly(True)
         self.preview.setFixedHeight(80)
         form.addRow("Шаблон prompt:", self.prompt)
-        form.addRow("Слів у {{previous_text}}:", self.previous_words)
         form.addRow(
             "",
             QLabel(
-                "Змінні (необов'язкові): {{previous_text}} - попередні слова"
-                " (0 = жодних), {{source_lang}}; без змінних текст іде як є"
+                "Змінна (необов'язкова): {{source_lang}}. Уже розпізнаний текст"
+                " rt-asr сам додає до prompt"
             ),
         )
         form.addRow("Попередній перегляд:", self.preview)
         self._source_lang = settings.source_language
         self.prompt.textChanged.connect(self.update_preview)
-        self.previous_words.valueChanged.connect(self.update_preview)
         self.update_preview()
         layout.addWidget(user)
         self.service = ServiceConfigPanel("asr", endpoints, client_factory, bg)
@@ -613,18 +594,14 @@ class AsrTab(QWidget):
             self.preview.setPlainText("\n".join(errors))
             return
         lang = None if self._source_lang == "auto" else self._source_lang
-        prompt, used = render_asr_prompt_counted(
-            template, PREVIEW_PREVIOUS.split(), self.previous_words.value(), lang
-        )
+        prompt = render_asr_prompt(template, lang)
         self.preview.setPlainText(
-            f"{prompt or '(без prompt)'}\n[у {{{{previous_text}}}} підставлено"
-            f" {used} слів]"
+            f"{prompt or '(без prompt)'}\n[+ уже розпізнаний текст стріму]"
         )
 
     def values(self) -> Dict[str, Any]:
         return {
             "services.asr.prompt": self.prompt.toPlainText().strip(),
-            "services.asr.previous_words": self.previous_words.value(),
         }
 
 
@@ -891,17 +868,6 @@ class LlmTab(QWidget):
             " текст ділиться (по кінцях речень, якщо вміщаються) і кожна частина"
             " підставляється в шаблон замість {{text}}"
         )
-        # phrase boundary: a pause this long after the last word sends the
-        # phrase to translation (segmentation.translate.end_silence_ms); the
-        # word count above is only a maximum per request, never awaited
-        pause = settings.segmentation.translate.end_silence_ms
-        self.end_silence_ms = QSpinBox()
-        self.end_silence_ms.setRange(PAUSE_MIN_MS, PAUSE_MAX_MS)
-        self.end_silence_ms.setSingleStep(50)
-        self.end_silence_ms.setValue(min(max(pause or 700, PAUSE_MIN_MS), PAUSE_MAX_MS))
-        self.end_silence_off = QCheckBox("вимкнено (лише soft/hard max)")
-        self.end_silence_off.setChecked(pause is None)
-        self.end_silence_ms.setEnabled(pause is not None)
         self.notice = QLabel("\n".join(settings.notices))
         self.notice.setStyleSheet("color: #b36b00;")
         self.notice.setWordWrap(True)
@@ -933,10 +899,6 @@ class LlmTab(QWidget):
         form.addRow(check)
         form.addRow("Словник термінів:", self.terms)
         form.addRow("Слів у {{text}} (максимум):", self.words_per_request)
-        pause_row = QHBoxLayout()
-        pause_row.addWidget(self.end_silence_ms)
-        pause_row.addWidget(self.end_silence_off)
-        form.addRow("Пауза для перекладу, мс:", pause_row)
         form.addRow("", reset)
         form.addRow("Temperature:", self.temperature)
         form.addRow("Max tokens:", self.max_tokens_cap)
@@ -951,16 +913,10 @@ class LlmTab(QWidget):
         ):
             w.textChanged.connect(self.update_preview)
         self.words_per_request.valueChanged.connect(self.update_preview)
-        self.end_silence_ms.valueChanged.connect(self.update_preview)
-        self.end_silence_off.toggled.connect(self._on_pause_off)
         self.update_preview()
         if "llm.model" in settings.managed:
             self.model.setEnabled(False)
             self.model.setToolTip("Задано через RT_EDGE_* (лише читання)")
-
-    def _on_pause_off(self, off: bool) -> None:
-        self.end_silence_ms.setEnabled(not off)
-        self.update_preview()
 
     def model_endpoint(self):
         """Chosen worker, or the first one (auto order) for the model list."""
@@ -1018,14 +974,10 @@ class LlmTab(QWidget):
         chunks = split_words(PREVIEW_SAMPLE, self.words_per_request.value())
         terms = parse_terms(self.terms.toPlainText())
         head = build_messages(system, template, "", "pl", terms=terms)[0]["content"]
-        pause = (
-            "без паузи (лише soft/hard max)"
-            if self.end_silence_off.isChecked()
-            else f"пауза {self.end_silence_ms.value()} мс"
-        )
         lines = [
-            f"[фраза йде в переклад: до {self.words_per_request.value()} слів"
-            f" у {{{{text}}}} на запит, або {pause}; неповний запит не чекає]",
+            f"[одиниця йде в переклад одразу (кінець речення, пауза, клауза"
+            f" від 12 слів, 20 слів); до {self.words_per_request.value()} слів"
+            f" у {{{{text}}}} на запит, неповний запит не чекає]",
             f"[system] {head}",
         ]
         for n, chunk in enumerate(chunks, 1):
@@ -1070,9 +1022,4 @@ class LlmTab(QWidget):
             "services.llm.context_pairs": self.context_pairs.value(),
             "services.llm.words_per_request": self.words_per_request.value(),
             "services.llm.terms": list(parse_terms(self.terms.toPlainText())),
-            "segmentation.translate.end_silence_ms": (
-                None
-                if self.end_silence_off.isChecked()
-                else self.end_silence_ms.value()
-            ),
         }

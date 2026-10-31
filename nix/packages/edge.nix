@@ -18,7 +18,6 @@ python313Packages.buildPythonApplication {
   pythonImportsCheck = [
     "src.translation_system"
     "src.clients"
-    "src.segmentation"
     "src.adapters.direct_adapter"
   ];
   meta = {

@@ -2,7 +2,7 @@ import random
 
 import pytest
 
-from src.segmentation import plan_chunks
+from src.services.asr.chunking import plan_chunks
 
 
 def test_short_audio_single_chunk():

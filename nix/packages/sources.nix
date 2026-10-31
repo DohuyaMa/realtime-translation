@@ -9,7 +9,6 @@ in
     fileset = lib.fileset.unions [
       (root + "/src/__init__.py")
       (root + "/src/services")
-      (root + "/src/segmentation")
     ];
   };
 

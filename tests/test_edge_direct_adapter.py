@@ -136,16 +136,14 @@ def test_reconfigure_calls_apply_settings():
     assert a.translation_system is ts
 
 
-def test_reconfigure_segmentation_does_not_restart_pipeline():
+def test_reconfigure_prompts_does_not_restart_pipeline():
     a = adapter(VALID)
     a.start_pipeline()
     ts = FakeTS.instances[-1]
     count = len(FakeTS.instances)
-    seg = dataclasses.replace(
-        VALID.segmentation,
-        translate=dataclasses.replace(VALID.segmentation.translate, min_speech_ms=500),
+    new = dataclasses.replace(
+        VALID, asr=dataclasses.replace(VALID.asr, prompt="Glossary: NixOS")
     )
-    new = dataclasses.replace(VALID, segmentation=seg)
     assert a.reconfigure_services(new) is True
     assert ts.applied == [new]
     assert ts.stops == 0 and ts.started is True and ts.cleaned is False

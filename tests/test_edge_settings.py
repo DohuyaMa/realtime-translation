@@ -57,11 +57,26 @@ def test_obsolete_keys_are_reported(caplog):
     assert any("asr_urls" in m and "llm.django_urls" in m for m in seen)
 
 
-def test_transcribe_chunk_max_over_900s_invalid():
-    s = resolve_edge_settings(
-        {"segmentation": {"transcribe": {"chunk_max_s": 1200}}}, {}
+def test_keys_of_the_removed_pause_segmenter_are_ignored_visibly():
+    from loguru import logger
+
+    seen = []
+    sink = logger.add(lambda m: seen.append(str(m)), level="WARNING")
+    try:
+        s = resolve_edge_settings(
+            {
+                "segmentation": {"transcribe": {"chunk_max_s": 1200}},
+                "services": {"asr": {"previous_words": 30}},
+            },
+            {},
+        )
+    finally:
+        logger.remove(sink)
+    assert s.validate() == []
+    assert any(
+        "removed pause segmenter" in m and "services.asr.previous_words" in m
+        for m in seen
     )
-    assert s.validate()
 
 
 def test_translate_mode_requires_llm_and_tts():

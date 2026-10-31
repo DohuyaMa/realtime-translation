@@ -1,6 +1,5 @@
 """Settings dialog of the edge: services (allow-list, which instance to use),
-per-service tabs (ASR / Vosk / LLM / TTS, see service_tabs.py) and
-segmentation."""
+per-service tabs (ASR / Vosk / LLM / TTS, see service_tabs.py)."""
 
 import os
 from typing import Any, Dict, Optional
@@ -18,8 +17,6 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QPlainTextEdit,
     QPushButton,
-    QSpinBox,
-    QDoubleSpinBox,
     QTabWidget,
     QVBoxLayout,
     QWidget,
@@ -212,47 +209,6 @@ class EndpointsTab(QWidget):
         }
 
 
-class SegmentationTab(QWidget):
-    """transcribe: chunk_min_s/chunk_max_s; translate: soft/hard/end silence."""
-
-    def __init__(self, settings: EdgeSettings, parent=None):
-        super().__init__(parent)
-        form = QFormLayout(self)
-        tr, tl = settings.segmentation.transcribe, settings.segmentation.translate
-        self.chunk_min_s = QDoubleSpinBox()
-        self.chunk_min_s.setRange(1, 900)
-        self.chunk_min_s.setValue(tr.soft_max_ms / 1000)
-        self.chunk_max_s = QDoubleSpinBox()
-        self.chunk_max_s.setRange(1, 900)
-        self.chunk_max_s.setValue(tr.hard_max_ms / 1000)
-        self.soft_max_ms = self._ms(tl.soft_max_ms)
-        self.hard_max_ms = self._ms(tl.hard_max_ms)
-        form.addRow("transcribe: chunk_min_s", self.chunk_min_s)
-        form.addRow("transcribe: chunk_max_s", self.chunk_max_s)
-        form.addRow("translate: soft_max_ms", self.soft_max_ms)
-        form.addRow("translate: hard_max_ms", self.hard_max_ms)
-        form.addRow(
-            "",
-            QLabel("Пауза, після якої фраза йде в переклад: вкладка «Переклад (LLM)»"),
-        )
-
-    @staticmethod
-    def _ms(value: int) -> QSpinBox:
-        box = QSpinBox()
-        box.setRange(0, 900_000)
-        box.setSingleStep(100)
-        box.setValue(int(value))
-        return box
-
-    def values(self) -> Dict[str, Any]:
-        return {
-            "segmentation.transcribe.chunk_min_s": self.chunk_min_s.value(),
-            "segmentation.transcribe.chunk_max_s": self.chunk_max_s.value(),
-            "segmentation.translate.soft_max_ms": self.soft_max_ms.value(),
-            "segmentation.translate.hard_max_ms": self.hard_max_ms.value(),
-        }
-
-
 def current_settings() -> EdgeSettings:
     from ...core.config import get_config_manager
 
@@ -328,7 +284,7 @@ def service_client_factory(kind: str, settings: EdgeSettings):
 
 
 class SettingsDialog(QDialog):
-    """Endpoints/choice, per-service settings, segmentation.
+    """Endpoints/choice and per-service settings.
 
     Emits the applied ``EdgeSettings`` on OK; service node settings are
     applied separately with each panel's own button.
@@ -386,7 +342,6 @@ class SettingsDialog(QDialog):
             service_client_factory("llm", settings),
             self.bg,
         )
-        self.segmentation_tab = SegmentationTab(settings)
         source = self.endpoints_tab.source_language
         source.currentTextChanged.connect(self.vosk_tab.set_source_language)
         vosk_use = self.endpoints_tab.use["vosk"]
@@ -400,7 +355,6 @@ class SettingsDialog(QDialog):
         tabs.addTab(self.vosk_tab, "Звірка (Vosk)")
         tabs.addTab(self.llm_tab, "Переклад (LLM)")
         tabs.addTab(self.tts_tab, "Озвучка (TTS)")
-        tabs.addTab(self.segmentation_tab, "Сегментація")
         layout.addWidget(tabs)
         self.error_label = QLabel("")
         self.error_label.setStyleSheet("color: red;")
@@ -419,7 +373,6 @@ class SettingsDialog(QDialog):
             **self.asr_tab.values(),
             **self.llm_tab.values(),
             **self.tts_tab.values(),
-            **self.segmentation_tab.values(),
         }
 
     def accept(self):

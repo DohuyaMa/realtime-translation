@@ -38,7 +38,7 @@ pkgs.stdenvNoCC.mkDerivation {
   doInstallCheck = true;
   installCheckPhase = ''
     runHook preInstallCheck
-    HOME=$TMPDIR PYTHONPATH=${sources.speechSrc} ${pythonEnv}/bin/python -c "import ${module}, src.segmentation, src.services.common.models_cli"
+    HOME=$TMPDIR PYTHONPATH=${sources.speechSrc} ${pythonEnv}/bin/python -c "import ${module}, src.services.common.models_cli"
     runHook postInstallCheck
   '';
 

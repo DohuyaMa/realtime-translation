@@ -38,7 +38,7 @@ class ConcreteTranslatorController(TranslatorController):
         return self._adapter.refresh_services()
 
     def reconfigure_services(self, settings) -> bool:
-        """Apply new EdgeSettings (endpoints/mode/segmentation)."""
+        """Apply new EdgeSettings (endpoints/mode/prompts)."""
         return self._adapter.reconfigure_services(settings)
 
     def get_status(self) -> Dict:

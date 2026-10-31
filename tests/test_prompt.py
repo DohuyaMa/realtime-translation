@@ -117,39 +117,26 @@ def test_llm_client_one_call_per_chunk_in_order():
     ]
 
 
-def test_asr_prompt_render_and_trim():
+def test_asr_prompt_render():
     from src.core.prompt import asr_prompt_errors, render_asr_prompt
 
-    words = "a1 b2 c3 d4 e5".split()
-    assert render_asr_prompt("{{previous_text}}", words, 3, None) == "c3 d4 e5"
-    assert render_asr_prompt("{{previous_text}}", words, 0, None) is None
-    assert render_asr_prompt("", words, 3, None) is None
-    # no variables: as-is, previous words are not appended
-    assert render_asr_prompt("Glossary: NixOS", words, 3, None) == "Glossary: NixOS"
-    assert (
-        render_asr_prompt("[{{source_lang}}] {{previous_text}}", words, 2, "pl")
-        == "[Polish] d4 e5"
+    assert render_asr_prompt("", "pl") is None
+    assert render_asr_prompt("Glossary: NixOS", None) == "Glossary: NixOS"
+    assert render_asr_prompt("[{{source_lang}}] NixOS", "pl") == "[Polish] NixOS"
+    # rt-asr adds the committed text itself: no {{previous_text}} any more
+    assert asr_prompt_errors("p", "{{previous_text}}")[0].startswith(
+        "p: unknown placeholder"
     )
-    # over the limit: oldest whole words dropped, never cut mid-word
-    long = ["słowo%02d" % i for i in range(100)]
-    out = render_asr_prompt("X {{previous_text}}", long, 100, None, max_chars=40)
-    assert len(out) <= 40 and out.endswith("słowo99")
-    assert all(w in long for w in out.split()[1:])
-    assert asr_prompt_errors("p", "{{text}}")[0].startswith("p: unknown placeholder")
     assert any("characters" in e for e in asr_prompt_errors("p", "x" * 400))
 
 
 def test_asr_settings_resolve_and_validate():
-    s = resolve_edge_settings(
-        {"services": {"asr": {"prompt": "", "previous_words": 0}}}, {}
-    )
-    assert (s.asr.prompt, s.asr.previous_words) == ("", 0)
-    bad = resolve_edge_settings(
-        {"services": {"asr": {"prompt": "{{foo}}", "previous_words": -1}}}, {}
-    )
+    s = resolve_edge_settings({"services": {"asr": {"prompt": ""}}}, {})
+    assert s.asr.prompt == ""
+    assert resolve_edge_settings({}, {}).asr.prompt == ""
+    bad = resolve_edge_settings({"services": {"asr": {"prompt": "{{foo}}"}}}, {})
     errors = bad.validate()
     assert any("asr.prompt: unknown placeholder(s) foo" in e for e in errors)
-    assert "asr.previous_words must be >= 0" in errors
 
 
 def test_default_system_prompt_forbids_untranslated_words():

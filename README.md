@@ -2,7 +2,7 @@
 
 Real-time speech translation for live calls: microphone -> speech recognition (`rt-asr`, faster-whisper) -> LLM translation (llama worker, leased from Django, or a local `llama-server`) -> speech synthesis (`rt-tts`, Kokoro) -> PipeWire `rt_virtual_output`. A `transcribe` mode produces long-chunk transcripts without translation.
 
-The edge (PySide6 UI, VAD segmentation, HTTP clients) runs on the user's PC. `rt-asr` and `rt-tts` are independent HTTP services that can run on any host (CPU or GPU). Packaged with Nix flakes.
+The edge (PySide6 UI, WS speech streams, translation units, HTTP clients) runs on the user's PC. `rt-asr` and `rt-tts` are independent HTTP services that can run on any host (CPU or GPU). Packaged with Nix flakes.
 
 **Documentation (Ukrainian): [docs/USAGE.md](docs/USAGE.md)** - modes, local run, models, service and edge config, deployment, LLM lease, e2e checklist.
 

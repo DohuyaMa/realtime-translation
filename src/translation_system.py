@@ -878,8 +878,8 @@ class TranslationSystem:
 
     def _stream_prompt(self) -> Optional[str]:
         """Whisper prompt of the stream: the user's template; rt-asr adds
-        the committed words itself ({{previous_text}} is left empty)."""
-        return render_asr_prompt(self.settings.asr.prompt, [], 0, self._language())
+        the committed words itself."""
+        return render_asr_prompt(self.settings.asr.prompt, self._language())
 
     def _open_streams(self) -> None:
         """Open the WS streams (their warm-up); audio fed before ``ready``

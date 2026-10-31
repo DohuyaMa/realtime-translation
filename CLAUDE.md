@@ -24,7 +24,7 @@ User documentation (Ukrainian): `docs/USAGE.md`. Specs: `docs/superpowers/specs/
 
 Real-time speech translation: **edge** (PC of the user) talks over HTTP to **rt-asr** and **rt-tts** services and to llama **workers** through an app session; Django only lists the available services and their tokens (discovery, cached on disk). Local services first, cluster nodes as failover.
 
-Modes (`services.mode`): `transcribe` (long chunks, ASR only), `translate` (phrases: ASR -> LLM -> TTS), `auto` (translate iff LLM and TTS sources exist: `local.*` or `django_urls`).
+Modes (`services.mode`): `transcribe` (stream units as text, ASR only), `translate` (simultaneous: stream units -> LLM -> TTS), `auto` (translate iff LLM and TTS sources exist: `local.*` or `django_urls`).
 
 ### Source layout (`src/`)
 
@@ -34,7 +34,7 @@ Modes (`services.mode`): `transcribe` (long chunks, ASR only), `translate` (phra
 | `src/services/common/` | Shared service runtime: settings (`ENV_KEYS`, `TUNABLE_FIELDS`, `RELOAD_FIELDS`), `/config` (`runtime_config.py`), `/health`, `/status`, auth, model registry/store, `rt-models` CLI |
 | `src/services/asr/`, `src/services/tts/` | `rt-asr` (faster-whisper, `POST /audio/transcriptions`) and `rt-tts` (Kokoro ONNX, `POST /audio/speech`, `GET /audio/voices`; both `GET /v1/models`) FastAPI services |
 | `src/services/vosk/` | `rt-vosk` (Vosk/Kaldi, CPU only; rt-asr request shape, answer with per-word `conf`; `RT_MODEL` = ONE model of one language; other language -> 409 `model_language_mismatch`). Edge translate mode: whisper cross-check (TASK-SYS-12; `core/crosscheck.py` segment gate, whisper = primary LLM text / Vosk = hint; `services.use.vosk` = auto/node/off; opt-in recording `core/session_record.py`, `services.record_session`) |
-| `src/segmentation/` | VAD segmenter (`SegmenterConfig.translate()` / `.transcribe()`): pause-based phrase/chunk boundaries |
+| `src/core/simul.py`, `src/clients/stream.py`, `src/audio/{resample,level,trim}.py` | Stream pipeline: WS stream client (rt-asr/rt-vosk), `SourceLedger` units (sentence/endpoint/clause/20 words), edge level normalization, TTS edge-silence trim |
 | `src/clients/` | HTTP clients: `asr`, `vosk`, `tts`, `llm`, `discovery` (Django service list + cache), endpoint `pool` (priority order, failover), `session` (worker app session, failover/return-to-local), `health` |
 | `src/translation_system.py`, `src/adapters/`, `src/controller/` | Edge pipeline, adapter and controller on top of clients |
 | `src/core/runtime.py` | `EdgeSettings`: `RT_EDGE_*` env > `config.yml` > defaults |

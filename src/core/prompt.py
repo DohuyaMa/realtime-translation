@@ -302,56 +302,27 @@ def build_messages(
 
 # -- Whisper prompt (rt-asr ``prompt`` / initial_prompt) ----------------------
 
-ASR_PLACEHOLDERS = ("previous_text", "source_lang")
-# Optional variables: a template without them is sent as-is (nothing is
-# appended). Default keeps continuity: just the previous words.
-DEFAULT_ASR_PROMPT = "{{previous_text}}"
-DEFAULT_PREVIOUS_WORDS = 30
+ASR_PLACEHOLDERS = ("source_lang",)
+# The user's part of the Whisper prompt (glossary, names, style); rt-asr's
+# stream appends the text it has already committed itself. "" = none.
+DEFAULT_ASR_PROMPT = ""
 # Whisper's prompt holds at most 223 tokens; Cyrillic/Polish text runs at
-# ~1 token per 1.5 chars, so 300 chars stays below the limit.
-ASR_PROMPT_MAX_CHARS = 300
+# ~1 token per 1.5 chars, and rt-asr adds <= 200 chars of committed text.
+ASR_PROMPT_MAX_CHARS = 120
 
 
 def asr_prompt_errors(name: str, template: str) -> list[str]:
     errors = template_errors(name, template, False, ASR_PLACEHOLDERS)
-    static = render(template, {"previous_text": "", "source_lang": "Ukrainian"})
+    static = render(template, {"source_lang": "Ukrainian"})
     if len(static.strip()) > ASR_PROMPT_MAX_CHARS:
         errors.append(
-            f"{name}: {len(static.strip())} characters without previous words;"
-            f" Whisper accepts ~{ASR_PROMPT_MAX_CHARS}"
+            f"{name}: {len(static.strip())} characters; with the committed"
+            f" text rt-asr adds, Whisper accepts ~{ASR_PROMPT_MAX_CHARS}"
         )
     return errors
 
 
-def render_asr_prompt(
-    template: str,
-    previous_words: list[str],
-    count: int,
-    source_lang: str | None,
-    max_chars: int = ASR_PROMPT_MAX_CHARS,
-) -> str | None:
-    """Rendered Whisper prompt; ``{{previous_text}}`` = the last ``count``
-    words, dropped from the oldest (whole words) until within ``max_chars``."""
-    return render_asr_prompt_counted(
-        template, previous_words, count, source_lang, max_chars
-    )[0]
-
-
-def render_asr_prompt_counted(
-    template: str,
-    previous_words: list[str],
-    count: int,
-    source_lang: str | None,
-    max_chars: int = ASR_PROMPT_MAX_CHARS,
-) -> tuple[str | None, int]:
-    """(prompt, number of words actually substituted into {{previous_text}})."""
-    uses = "previous_text" in {m.group(1) for m in _PLACEHOLDER.finditer(template)}
-    words = list(previous_words[-count:]) if count > 0 and uses else []
+def render_asr_prompt(template: str, source_lang: str | None) -> str | None:
+    """The user's Whisper prompt of a stream (None = none)."""
     lang = LANGUAGE_NAMES.get(source_lang or "", "")
-    while True:
-        text = render(
-            template, {"previous_text": " ".join(words), "source_lang": lang}
-        ).strip()
-        if len(text) <= max_chars or not words:
-            return text or None, len(words)
-        words.pop(0)
+    return render(template, {"source_lang": lang}).strip() or None

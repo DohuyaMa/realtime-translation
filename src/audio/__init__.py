@@ -1,7 +1,8 @@
 """Audio processing components for real-time translation system.
 
 Submodules with heavy or optional dependencies (pyaudio) are imported lazily so
-that lightweight modules such as ``vad_stream`` work on the edge devShell.
+that lightweight modules such as ``resample`` and ``level`` work on the edge
+devShell.
 """
 
 import importlib

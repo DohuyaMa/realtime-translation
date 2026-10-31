@@ -39,7 +39,7 @@ class TranslatorController(Protocol):
         ...
 
     def reconfigure_services(self, settings) -> bool:
-        """Apply new EdgeSettings (endpoints/mode/segmentation)."""
+        """Apply new EdgeSettings (endpoints/mode/prompts)."""
         ...
 
     def get_status(self) -> Dict:

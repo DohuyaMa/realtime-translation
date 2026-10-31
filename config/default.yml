@@ -32,12 +32,9 @@ services:
     asr_s: 30
     tts_s: 30
   asr:
-    # Whisper prompt template (vocabulary/names/style). Optional variables:
-    # {{previous_text}} = last previous_words recognized words, {{source_lang}}.
-    # Without variables the text is sent as-is (nothing appended); "" = no prompt;
-    # null = default "{{previous_text}}". Trimmed to ~300 chars (oldest words first).
+    # Whisper prompt template (vocabulary/names/style), optional {{source_lang}};
+    # rt-asr's stream appends the text it already committed. null/"" = none.
     prompt: null
-    previous_words: 30          # 0 = none
   tts:
     voice: null                 # null = service default; list: GET /v1/audio/voices (UI: Озвучка)
     speed: null                 # 0.25..4.0; null = service default
@@ -63,23 +60,6 @@ services:
     # written in English): ..."). null = built-in IT list; "" = none; list or
     # "a, b" / one per line
     terms: null
-
-segmentation:
-  translate:                    # SegmenterConfig fields (phrase-sized segments)
-    threshold: 0.5
-    min_speech_ms: 400
-    end_silence_ms: 700
-    soft_max_ms: 6000            # after this, cut at the first soft_silence_ms pause
-    soft_silence_ms: 250
-    hard_max_ms: 12000           # no pause: cut at the quietest window of the last lookback_ms
-    lookback_ms: 2000
-    preroll_ms: 300
-  transcribe:                   # long chunks, chunk_max_s <= 900
-    chunk_min_s: 300
-    chunk_max_s: 600
-    soft_silence_ms: 500
-    lookback_ms: 5000
-    keep_silence_ms: 2000
 
 audio:
   input_device: null            # PipeWire source the app records (null = default mic)

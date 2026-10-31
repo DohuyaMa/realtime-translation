@@ -1,4 +1,4 @@
-"""Edge runtime settings: service discovery, local endpoints and segmentation.
+"""Edge runtime settings: service discovery, local endpoints, per-user prompts.
 
 The app gets the list of available services (llm workers, rt-asr, rt-tts) and
 their tokens from Django (``django_urls``, own host first; DRF token in
@@ -12,16 +12,13 @@ from the environment are listed in `EdgeSettings.managed` (read-only in the UI).
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, fields, replace
+from dataclasses import dataclass
 from typing import Any, Literal, Mapping, Optional
-
-from src.segmentation import SegmenterConfig
 
 from .prompt import (
     DEFAULT_ASR_PROMPT,
     DEFAULT_CHECK_SYSTEM_PROMPT,
     DEFAULT_CHECK_USER_TEMPLATE,
-    DEFAULT_PREVIOUS_WORDS,
     DEFAULT_SYSTEM_PROMPT,
     DEFAULT_TERMS,
     DEFAULT_USER_TEMPLATE,
@@ -108,11 +105,9 @@ class ServiceUse:
 class AsrRequestSettings:
     """Sent with every rt-asr request (per user, not per service node)."""
 
-    # Whisper prompt template (vocabulary / names / style). Optional
-    # variables {{previous_text}} (last ``previous_words`` recognized words)
-    # and {{source_lang}}; without them the text is sent as-is.
+    # Whisper prompt template (vocabulary / names / style), optional
+    # {{source_lang}}; rt-asr's stream appends its committed text itself
     prompt: str = DEFAULT_ASR_PROMPT
-    previous_words: int = DEFAULT_PREVIOUS_WORDS
 
 
 @dataclass(frozen=True)
@@ -121,12 +116,6 @@ class TtsRequestSettings:
 
     voice: Optional[str] = None
     speed: Optional[float] = None
-
-
-@dataclass(frozen=True)
-class SegmentationSettings:
-    translate: SegmenterConfig = SegmenterConfig.translate()
-    transcribe: SegmenterConfig = SegmenterConfig.transcribe()
 
 
 @dataclass(frozen=True)
@@ -144,7 +133,6 @@ class EdgeSettings:
     tts: TtsRequestSettings = TtsRequestSettings()
     source_language: Literal["auto", "pl", "uk", "ru", "en"] = "auto"
     timeouts: Timeouts = Timeouts(connect_s=3.0, asr_s=30.0, tts_s=30.0)
-    segmentation: SegmentationSettings = SegmentationSettings()
     # «Записувати сесію для аналізу»: per-phrase JSONL + segment WAVs
     # (core/session_record.py); explicit opt-in, applied live
     record_session: bool = False
@@ -208,22 +196,10 @@ class EdgeSettings:
             "llm.check_user_template", self.llm.check_user_template, user=True
         )
         errors += asr_prompt_errors("asr.prompt", self.asr.prompt)
-        if self.asr.previous_words < 0:
-            errors.append("asr.previous_words must be >= 0")
         if self.llm.words_per_request < 1:
             errors.append("llm.words_per_request must be >= 1")
         if self.tts.speed is not None and not 0.25 <= self.tts.speed <= 4.0:
             errors.append("tts.speed must be in 0.25..4.0")
-        for name in ("translate", "transcribe"):
-            try:
-                getattr(self.segmentation, name).validate()
-            except ValueError as e:
-                errors.append(f"segmentation.{name}: {e}")
-        pause = self.segmentation.translate.end_silence_ms
-        if pause is not None and not 200 <= pause <= 3000:
-            errors.append("segmentation.translate.end_silence_ms must be in 200..3000")
-        if self.segmentation.transcribe.hard_max_ms > 900_000:
-            errors.append("segmentation.transcribe chunk_max_s must be <= 900")
         return errors
 
 
@@ -272,25 +248,6 @@ def _items(value: Any) -> tuple[str, ...]:
     return tuple(t for t in (_clean(i) for i in items) if t)
 
 
-def _seg_translate(cfg: Mapping) -> SegmenterConfig:
-    names = {f.name for f in fields(SegmenterConfig)}
-    return replace(
-        SegmenterConfig.translate(), **{k: v for k, v in cfg.items() if k in names}
-    )
-
-
-def _seg_transcribe(cfg: Mapping) -> SegmenterConfig:
-    base = SegmenterConfig.transcribe(
-        float(cfg.get("chunk_min_s", 300)), float(cfg.get("chunk_max_s", 600))
-    )
-    extra = {
-        k: cfg[k]
-        for k in ("soft_silence_ms", "lookback_ms", "keep_silence_ms")
-        if k in cfg
-    }
-    return replace(base, **extra)
-
-
 _OBSOLETE = ("asr_urls", "tts_urls", "api_token_file")
 _OBSOLETE_LLM = (
     "urls",
@@ -307,7 +264,6 @@ def resolve_edge_settings(cfg: Mapping, environ: Mapping) -> EdgeSettings:
     cfg = cfg or {}
     svc = cfg.get("services") or {}
     llm_cfg = svc.get("llm") or {}
-    seg_cfg = cfg.get("segmentation") or {}
     managed: set[str] = set()
 
     def pick(env_key: str, name: str, value: Any) -> Any:
@@ -325,6 +281,18 @@ def resolve_edge_settings(cfg: Mapping, environ: Mapping) -> EdgeSettings:
         logger.warning(
             "config: obsolete keys ignored (services discovered via Django now): {}",
             ", ".join(obsolete),
+        )
+    removed = [k for k in ("segmentation",) if k in cfg] + [
+        f"services.asr.{k}" for k in ("previous_words",) if k in (svc.get("asr") or {})
+    ]
+    if removed:
+        from loguru import logger
+
+        logger.warning(
+            "config: keys of the removed pause segmenter ignored (the stream"
+            " pipeline cuts units itself, rt-asr adds the committed text to"
+            " its prompt): {}",
+            ", ".join(removed),
         )
     ld = LlmSettings()
     notices: list[str] = []
@@ -421,7 +389,6 @@ def resolve_edge_settings(cfg: Mapping, environ: Mapping) -> EdgeSettings:
                 if asr_cfg.get("prompt") is None
                 else str(asr_cfg["prompt"]).strip()
             ),
-            previous_words=int(asr_cfg.get("previous_words", DEFAULT_PREVIOUS_WORDS)),
         ),
         tts=TtsRequestSettings(
             voice=_clean(tts_cfg.get("voice")),
@@ -432,10 +399,6 @@ def resolve_edge_settings(cfg: Mapping, environ: Mapping) -> EdgeSettings:
             connect_s=float(tcfg.get("connect_s", td.connect_s)),
             asr_s=float(tcfg.get("asr_s", td.asr_s)),
             tts_s=float(tcfg.get("tts_s", td.tts_s)),
-        ),
-        segmentation=SegmentationSettings(
-            translate=_seg_translate(seg_cfg.get("translate") or {}),
-            transcribe=_seg_transcribe(seg_cfg.get("transcribe") or {}),
         ),
         record_session=_flag(
             pick(
