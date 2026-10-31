@@ -2,6 +2,7 @@
 let
   py = pkgs.python313;
   enCoreWebSm = pkgs.callPackage ./packages/en-core-web-sm.nix { python3Packages = py.pkgs; };
+  vosk = pkgs.callPackage ./packages/vosk.nix { python3Packages = py.pkgs; };
 in
 pkgs.mkShell {
   packages = [
@@ -12,6 +13,7 @@ pkgs.mkShell {
         fastapi uvicorn pydantic python-multipart httpx
         faster-whisper ctranslate2 huggingface-hub
         kokoro onnxruntime soundfile enCoreWebSm
+        vosk
         # tests / tooling
         pytest pytest-asyncio pytest-timeout black flake8 mypy
       ])))

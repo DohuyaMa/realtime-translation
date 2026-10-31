@@ -4,6 +4,7 @@
 ps:
 let
   enCoreWebSm = pkgs.callPackage ./en-core-web-sm.nix { python3Packages = ps; };
+  vosk = pkgs.callPackage ./vosk.nix { python3Packages = ps; };
   common = with ps; [
     fastapi uvicorn websockets pydantic python-multipart numpy loguru
     soundfile scipy
@@ -12,6 +13,7 @@ let
   perService = {
     asr = with ps; [ faster-whisper ];
     tts = with ps; [ onnxruntime kokoro enCoreWebSm ];
+    vosk = [ vosk ];
   };
 in
 common ++ perService.${service}

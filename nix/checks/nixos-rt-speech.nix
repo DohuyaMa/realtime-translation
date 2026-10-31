@@ -44,11 +44,12 @@ pkgs.testers.runNixOSTest {
     };
   };
 
-  # Real rt-asr/rt-tts CPU bundles under the module's real hardening
-  # (rt-asr: MemoryDenyWriteExecute=yes); fake backends, so no model download.
+  # Real rt-asr/rt-vosk/rt-tts CPU bundles under the module's real hardening
+  # (rt-asr, rt-vosk: MemoryDenyWriteExecute=yes); fake backends, so no model
+  # download.
   nodes.real = { ... }: {
     imports = [ self.nixosModules.rt-speech ];
-    virtualisation.memorySize = 2048;
+    virtualisation.memorySize = 2560;
     environment.systemPackages = [ pkgs.curl ];
     services.rtSpeech.asr = {
       enable = true;
@@ -59,6 +60,10 @@ pkgs.testers.runNixOSTest {
       enable = true;
       package = self.packages.x86_64-linux.rt-tts-cpu;
       extraEnv.RT_TTS_BACKEND = "fake";
+    };
+    services.rtSpeech.vosk = {
+      enable = true; # default package: the cpu bundle
+      extraEnv.RT_VOSK_BACKEND = "fake";
     };
   };
 
@@ -123,6 +128,13 @@ pkgs.testers.runNixOSTest {
         real.wait_for_open_port(8093)
         real.succeed("curl -sf -o /tmp/s.wav -H 'Content-Type: application/json' -d '{\"input\": \"Hello.\"}' http://127.0.0.1:8093/v1/audio/speech")
         real.succeed("test $(stat -c %s /tmp/s.wav) -gt 44")
+        real.wait_for_unit("rt-vosk.service")
+        real.wait_for_open_port(8092)
+        real.succeed("systemctl show rt-vosk -p MemoryDenyWriteExecute --value | grep -qx yes")
+        out = real.succeed("curl -sf -F file=@${sampleWav} -F language=uk http://127.0.0.1:8092/v1/audio/transcriptions")
+        assert '"words"' in out and '"language":"uk"' in out, out
+        status = real.succeed("curl -sf http://127.0.0.1:8092/status")
+        assert '"service":"rt-vosk"' in status, status
 
     with subtest("firewall opens only the configured interface"):
         client.wait_for_unit("multi-user.target")

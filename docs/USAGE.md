@@ -12,6 +12,7 @@
 |---|---|---|---|
 | edge (UI, сегментація, клієнти) | ПК користувача | `python -m src.main` | - |
 | `rt-asr` (faster-whisper) | будь-який хост | `.#rt-asr-cpu`, `.#rt-asr-gpu`, `python -m src.services.asr` | 8091 |
+| `rt-vosk` (Vosk/Kaldi, лише CPU) | будь-який хост | `.#rt-vosk-cpu`, `python -m src.services.vosk` | 8092 |
 | `rt-tts` (Kokoro ONNX) | будь-який хост | `.#rt-tts-cpu`, `.#rt-tts-gpu`, `python -m src.services.tts` | 8093 |
 | LLM (llama-воркер) | локальний або вузол кластера (список від Django) | app-сесія напряму у воркера | 8080 |
 
@@ -23,7 +24,9 @@
 
 Сервіси доступні лише через HTTP (OpenAI-сумісний стиль): `POST /audio/transcriptions`, `POST /audio/speech`, `GET /audio/voices`, `GET /models` (pinned моделі сервісу: `cached`, `size`, `warning` для великих моделей на CPU-вузлі), `GET /health`, `GET /status`, `GET|POST /config` (`GET` віддає також `schema`: для кожного поля тип `bool|int|float|choice|multichoice|model|text`, `choices`, `min`/`max`, опис, `reload` - з неї діалог будує випадаючі списки, лічильники й прапорці). Опційний токен: `RT_API_TOKEN_FILE` (заголовок `Authorization: Bearer <token>` або `Token <token>`; edge шле `Token`).
 
-Пакети flake: `rt-edge` (default package, `nix run .`), `rt-asr-{cpu,gpu}`, `rt-tts-{cpu,gpu}` (також ROCm-варіант ASR, якщо не `broken`), `nixosModules.rt-speech`, `nixosModules.virtual-sinks`, `overlays.default` (`pkgs.rtSpeech.{asr,tts}.<variant>`), `lib.rtSpeech`.
+`rt-vosk` (порт 8092, гіпотеза TASK-SYS-12: другий незалежний ASR як звірка для whisper; у пайплайн edge ще не підключений) - той самий runtime (`/health`, `/status`, `/config`, `POST /model/{load,unload}`, токен, `listenAddresses`, вивантаження за простоєм) і той самий запит, що й `rt-asr`: `POST /v1/audio/transcriptions` (multipart `file` + `language`) -> `{"text", "language", "words": [{"word", "conf", "start", "end"}]}`, де `conf` - впевненість Kaldi для слова (0..1). `RT_MODEL` - список моделей через кому, по одній на мову (default `vosk-small-uk-v3-nano,vosk-small-pl-0.22`); мову Vosk не визначає, тож `language` обов'язкова, якщо завантажено більше однієї моделі (інакше 400; мова без моделі - 400 `unsupported_language`). `GET /v1/models` показує `language` кожної моделі. Лише CPU; `MemoryDenyWriteExecute` увімкнено.
+
+Пакети flake: `rt-edge` (default package, `nix run .`), `rt-asr-{cpu,gpu}`, `rt-vosk-cpu`, `rt-tts-{cpu,gpu}` (також ROCm-варіант ASR, якщо не `broken`), `nixosModules.rt-speech`, `nixosModules.virtual-sinks`, `overlays.default` (`pkgs.rtSpeech.{asr,vosk,tts}.<variant>`), `lib.rtSpeech`.
 
 ## 2. Локальний запуск у devShell
 
@@ -37,10 +40,12 @@ nix develop
 # fake-backend-и (без моделей, для перевірки пайплайну)
 RT_ASR_BACKEND=fake python -m src.services.asr
 RT_TTS_BACKEND=fake python -m src.services.tts
+RT_VOSK_BACKEND=fake python -m src.services.vosk
 
 # реальні backend-и
 RT_ASR_BACKEND=faster-whisper python -m src.services.asr
 python -m src.services.tts          # kokoro за замовчуванням
+python -m src.services.vosk         # vosk, моделі uk + pl
 ```
 
 Edge:
@@ -59,7 +64,7 @@ Edge говорить з воркером через app-сесію (розді�
 
 ## 3. Моделі
 
-Моделі закріплені в реєстрі (revision + sha256 кожного файлу): увесь каталог faster-whisper - `whisper-{tiny,base,small,medium}[.en]`, `whisper-large-v1/v2/v3`, `whisper-large-v3-turbo`, `whisper-distil-{large-v2,large-v3,large-v3.5,medium.en,small.en}` - і `kokoro-82m-v1.0-onnx`. `.en` - лише англійська і зберігаються в `$RT_MODEL_DIR` (default `~/.cache/rt-speech/models`).
+Моделі закріплені в реєстрі (revision + sha256 кожного файлу): увесь каталог faster-whisper - `whisper-{tiny,base,small,medium}[.en]`, `whisper-large-v1/v2/v3`, `whisper-large-v3-turbo`, `whisper-distil-{large-v2,large-v3,large-v3.5,medium.en,small.en}` - і `kokoro-82m-v1.0-onnx`; для `rt-vosk` - `vosk-small-uk-v3-nano` (uk, 133 МБ на диску, ~300 МБ RAM), `vosk-small-uk-v3-small` (uk, 436 МБ, ~800 МБ RAM), `vosk-small-pl-0.22` (pl, 96 МБ, ~250 МБ RAM): zip-архіви alphacephei.com, закріплені sha256 архіву і кожного файлу. `.en` - лише англійська і зберігаються в `$RT_MODEL_DIR` (default `~/.cache/rt-speech/models`).
 
 ```bash
 rt-models list                         # alias, сервіс, ліцензія, ok|missing
@@ -80,7 +85,7 @@ rt-models --model-dir /var/lib/rt-asr/models list
 Класи: **BOOTSTRAP** - лише через env/рестарт; **TUNABLE** - змінюється через `/config` без перезавантаження моделі; **RELOAD** - змінюється через `/config`, модель перезавантажується: стара вивантажується, потім вантажиться нова (асинхронно; помилка - стан `error`, див. 4.2). Default-и нижче - для `RT_DEVICE=cpu` (на `cuda` default `RT_MODEL` для ASR - `whisper-large-v3-turbo`, beam 3, compute `int8_float16`).
 Таблиця згенерована (виконувати всередині `nix develop`): `python -m scripts.gen_env_table`.
 
-`RT_IDLE_UNLOAD_MINUTES` (NixOS: `services.rtSpeech.{asr,tts}.idleUnloadMinutes`): модель вантажиться першим запитом і вивантажується після N хвилин без запитів (кожне завантаження/вивантаження - у лозі); `0` - завантажити на старті й не вивантажувати. `/health` модель не вантажить, показує `model.state`; `/status` вважає вивантажену за простоєм модель `ready` (перший запит після простою чекає завантаження з диска). Явне `POST /model/unload` запитами не скасовується: модель лишається вивантаженою до `POST /model/load` або зміни моделі.
+`RT_IDLE_UNLOAD_MINUTES` (NixOS: `services.rtSpeech.{asr,vosk,tts}.idleUnloadMinutes`): модель вантажиться першим запитом і вивантажується після N хвилин без запитів (кожне завантаження/вивантаження - у лозі); `0` - завантажити на старті й не вивантажувати. `/health` модель не вантажить, показує `model.state`; `/status` вважає вивантажену за простоєм модель `ready` (перший запит після простою чекає завантаження з диска). Явне `POST /model/unload` запитами не скасовується: модель лишається вивантаженою до `POST /model/load` або зміни моделі.
 
 **rt-asr**
 
@@ -107,6 +112,25 @@ rt-models --model-dir /var/lib/rt-asr/models list
 | `RT_MODEL` | `whisper-small` | RELOAD |
 | `RT_MODEL_DIR` | `(не задано)` | BOOTSTRAP |
 | `RT_PORT` | `8091` | BOOTSTRAP |
+
+**rt-vosk**
+
+| Ключ | Default | Клас |
+|---|---|---|
+| `RT_API_TOKEN_FILE` | `(не задано)` | BOOTSTRAP |
+| `RT_COMPUTE_TYPE` | `float32` | BOOTSTRAP |
+| `RT_CONFIG_STATE` | `(не задано)` | BOOTSTRAP |
+| `RT_DEVICE` | `cpu` | BOOTSTRAP |
+| `RT_DEVICES` | `cpu` | BOOTSTRAP |
+| `RT_IDLE_UNLOAD_MINUTES` | `15` | BOOTSTRAP |
+| `RT_LISTEN_ADDRESSES` | `127.0.0.1` | BOOTSTRAP |
+| `RT_LOG_LEVEL` | `info` | TUNABLE |
+| `RT_MAX_PENDING` | `16` | BOOTSTRAP |
+| `RT_MODEL` | `vosk-small-uk-v3-nano,vosk-small-pl-0.22` | RELOAD |
+| `RT_MODEL_DIR` | `(не задано)` | BOOTSTRAP |
+| `RT_PORT` | `8092` | BOOTSTRAP |
+| `RT_VOSK_BACKEND` | `vosk` | RELOAD |
+| `RT_VOSK_MAX_UPLOAD_MB` | `100` | TUNABLE |
 
 **rt-tts**
 
@@ -235,7 +259,7 @@ HM-модуль edge: `homeManagerModules.rt-translator` (також `default`),
 
 ### (a) Colmena-only
 
-Через NixOS-модуль `nixosModules.rt-speech` (`services.rtSpeech.{asr,tts}`):
+Через NixOS-модуль `nixosModules.rt-speech` (`services.rtSpeech.{asr,vosk,tts}`):
 
 ```nix
 { pkgs, ... }: {
@@ -255,7 +279,7 @@ HM-модуль edge: `homeManagerModules.rt-translator` (також `default`),
 }
 ```
 
-Спільні опції: `enable, package, deployRsPath, listenAddresses, port, device (cpu|cuda|rocm), devices, model, configState, modelDir, apiTokenFile, openFirewall, firewallInterfaces, logLevel, rocmGfxVersion, memoryDenyWriteExecute, extraEnv`. ASR: `computeType, language, languages, beamSize, vad, chunkSeconds`. TTS: `voice, speed, sampleRate`. `devices` (default `[ device ]`, env `RT_DEVICES`) - між якими пристроями сервіс перемикається без redeploy: `devices = [ "cpu" "cuda" ]` ставить GPU-бандл (він працює і на cpu) і GPU-sandbox навіть при старті на cpu; `device` - стартовий. Перемикання - поле `device` у діалозі налаштувань вузла (`POST /config`, модель перезавантажується; default-и моделі/beam/compute переобчислюються для нового пристрою, якщо не задані явно). Помилка (напр. CUDA OOM) - явна: `/status` `model.state = "error"` з текстом у `model.error` (стара модель уже вивантажена, див. 4.2); тихого відкату на cpu немає. Потрібен overlay: `nixpkgs.overlays = [ inputs.realtime-translation.overlays.default ];` і `nixosModules.rt-speech` в `imports`.
+Спільні опції: `enable, package, deployRsPath, listenAddresses, port, device (cpu|cuda|rocm), devices, model, configState, modelDir, apiTokenFile, openFirewall, firewallInterfaces, logLevel, rocmGfxVersion, memoryDenyWriteExecute, extraEnv`. ASR: `computeType, language, languages, beamSize, vad, chunkSeconds`. TTS: `voice, speed, sampleRate`. Vosk: власних опцій немає (лише CPU: `device`/`devices` інші за `cpu` - assertion; `model` - список Vosk-моделей через кому). `devices` (default `[ device ]`, env `RT_DEVICES`) - між якими пристроями сервіс перемикається без redeploy: `devices = [ "cpu" "cuda" ]` ставить GPU-бандл (він працює і на cpu) і GPU-sandbox навіть при старті на cpu; `device` - стартовий. Перемикання - поле `device` у діалозі налаштувань вузла (`POST /config`, модель перезавантажується; default-и моделі/beam/compute переобчислюються для нового пристрою, якщо не задані явно). Помилка (напр. CUDA OOM) - явна: `/status` `model.state = "error"` з текстом у `model.error` (стара модель уже вивантажена, див. 4.2); тихого відкату на cpu немає. Потрібен overlay: `nixpkgs.overlays = [ inputs.realtime-translation.overlays.default ];` і `nixosModules.rt-speech` в `imports`.
 
 ### (b) deploy-rs (покроково, в інфрі swarm-nix)
 

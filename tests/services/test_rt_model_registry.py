@@ -1,4 +1,5 @@
 # tests/services/test_rt_model_registry.py
+import hashlib
 import re
 
 import pytest
@@ -18,12 +19,15 @@ def test_aliases_unique():
 
 def test_every_spec_is_pinned():
     for spec in mr._SPECS:
-        assert re.fullmatch(r"[0-9a-f]{40}", spec.revision), spec.alias
-        assert spec.service in {"asr", "tts"}
+        # HF commit, or the sha256 of the pinned archive
+        pin = r"[0-9a-f]{64}" if spec.archive else r"[0-9a-f]{40}"
+        assert re.fullmatch(pin, spec.revision), spec.alias
+        assert spec.service in {"asr", "tts", "vosk"}
         assert spec.files, spec.alias
         for f in spec.files:
             assert re.fullmatch(r"[0-9a-f]{64}", f.sha256), (spec.alias, f.path)
-            assert f.size > 0
+            # Vosk archives ship an empty online_cmvn.conf
+            assert f.size > 0 or f.sha256 == hashlib.sha256(b"").hexdigest()
             assert not f.path.startswith("/") and ".." not in f.path
 
 
@@ -59,6 +63,18 @@ def test_specs_for_service():
         "whisper-distil-small.en",
     }
     assert {s.alias for s in mr.specs_for("tts")} == {"kokoro-82m-v1.0-onnx"}
+    assert {(s.alias, s.language) for s in mr.specs_for("vosk")} == {
+        ("vosk-small-uk-v3-nano", "uk"),
+        ("vosk-small-uk-v3-small", "uk"),
+        ("vosk-small-pl-0.22", "pl"),
+    }
+
+
+def test_vosk_specs_are_archives_with_a_kaldi_model():
+    for spec in mr.specs_for("vosk"):
+        assert spec.archive and spec.repo_id.startswith("https://alphacephei.com/")
+        paths = {f.path for f in spec.files}
+        assert {"am/final.mdl", "conf/model.conf", "ivector/final.ie"} <= paths
 
 
 def test_onnx_spec_has_required_files():

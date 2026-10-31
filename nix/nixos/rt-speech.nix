@@ -1,4 +1,4 @@
-# services.rtSpeech.{asr,tts} — system units modeled on swarm-nix llama-service.nix.
+# services.rtSpeech.{asr,vosk,tts} — system units modeled on swarm-nix llama-service.nix.
 # deploy-rs mode: deployRsPath = "/var/lib/rt-<svc>/current" (symlink managed by the
 # infra's activation script), env overrides from "${deployRsPath}/env".
 { config, lib, pkgs, ... }:
@@ -46,7 +46,7 @@ let
         example = [ "cpu" "cuda" ];
         description = "Devices the service may switch between at runtime (RT_DEVICES; the `device` choices of GET /config, POST /config reloads the model). At most one GPU kind; it selects the bundle variant (the GPU bundle also runs on cpu) and opens the GPU sandbox even while running on cpu.";
       };
-      model = mkOption { type = types.nullOr types.str; default = null; description = "Model id/path (RT_MODEL). null = service default."; };
+      model = mkOption { type = types.nullOr types.str; default = null; description = "Model id/path (RT_MODEL; rt-vosk: comma list of Vosk model aliases, one per language). null = service default."; };
       configState = mkOption { type = types.nullOr types.str; default = "${svc.stateDir}/runtime-config.json"; description = "Runtime config state file (RT_CONFIG_STATE); null = not emitted."; };
       modelDir = mkOption { type = types.str; default = "${svc.stateDir}/models"; description = "Model cache (RT_MODEL_DIR; HF_HOME=<modelDir>/hf)."; };
       apiTokenFile = mkOption {
@@ -85,6 +85,7 @@ let
       vad = mkOption { type = types.bool; default = true; description = "RT_ASR_VAD."; };
       chunkSeconds = mkOption { type = types.nullOr types.float; default = null; description = "RT_ASR_CHUNK_SECONDS; null = not emitted (service default)."; };
     };
+    vosk = { }; # CPU only (Kaldi); the common options cover it
     tts = {
       voice = mkOption { type = types.str; default = "af_heart"; description = "RT_TTS_VOICE."; };
       speed = mkOption { type = types.float; default = 1.0; description = "RT_TTS_SPEED."; };
@@ -109,6 +110,10 @@ let
         {
           assertion = lib.elem cfg.device cfg.devices;
           message = "services.rtSpeech.${service}.device '${cfg.device}' is not in devices ${builtins.toJSON cfg.devices}";
+        }
+        {
+          assertion = service != "vosk" || cfg.devices == [ "cpu" ];
+          message = "services.rtSpeech.vosk runs on cpu only (Kaldi); devices = ${builtins.toJSON cfg.devices}";
         }
         {
           assertion = !(lib.elem "cuda" cfg.devices && lib.elem "rocm" cfg.devices);

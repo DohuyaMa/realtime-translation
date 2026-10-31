@@ -28,6 +28,8 @@ def list_models(
     for spec in specs_for(kind):
         size = sum(f.size for f in spec.files)
         entry = {"id": spec.alias, "cached": not store.verify(spec), "size": size}
+        if spec.language:
+            entry["language"] = spec.language
         if device == "cpu" and size > CPU_HEAVY_BYTES:
             entry["warning"] = "large model on a CPU node: slow, not realtime"
         models.append(entry)

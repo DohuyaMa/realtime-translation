@@ -9,7 +9,7 @@ python313Packages.buildPythonApplication {
   src = sources.edgeSrc;
   build-system = [ python313Packages.setuptools ];
   dependencies = import ./edge-deps.nix python313Packages;
-  # pyproject also declares rt-asr/rt-tts entry points; their modules are not in edgeSrc.
+  # pyproject also declares rt-asr/rt-vosk/rt-tts entry points; their modules are not in edgeSrc.
   postInstall = ''
     find $out/bin -mindepth 1 -maxdepth 1 ! -name translator-ui -delete
   '';

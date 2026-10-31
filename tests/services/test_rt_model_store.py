@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from src.services.common import model_store as ms
-from src.services.common.model_registry import FileSpec, ModelSpec
+from src.services.common.model_registry import ArchiveSource, FileSpec, ModelSpec
 
 FILES = {"model.bin": b"weights-123", "sub/config.json": b'{"a": 1}'}
 
@@ -326,3 +326,52 @@ def test_ensure_reports_download_progress_from_bytes_on_disk(tmp_path, monkeypat
     seen.clear()
     store.ensure(make_spec(), download=True, progress=progress)
     assert seen == []
+
+
+def make_archive(tmp_path, files=FILES, root="vosk-model-x"):
+    import io
+    import zipfile
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        for path, data in files.items():
+            zf.writestr(f"{root}/{path}", data)
+        zf.writestr("../evil.txt", b"never extracted")
+    blob = buf.getvalue()
+    archive = tmp_path / "model.zip"
+    archive.write_bytes(blob)
+    spec = ModelSpec(
+        alias="vosk-x",
+        service="vosk",
+        repo_id=archive.as_uri(),
+        revision=hashlib.sha256(blob).hexdigest(),
+        license="Apache-2.0",
+        files=tuple(
+            FileSpec(p, len(b), hashlib.sha256(b).hexdigest()) for p, b in files.items()
+        ),
+        archive=ArchiveSource(root=root, size=len(blob)),
+    )
+    return spec
+
+
+def test_archive_model_is_downloaded_verified_and_extracted(tmp_path):
+    spec = make_archive(tmp_path)
+    store = ms.ModelStore(tmp_path / "store")  # default downloader dispatches
+    path = store.ensure(spec, download=True, full_verify=True)
+    assert (path / "model.bin").read_bytes() == b"weights-123"
+    assert (path / "sub/config.json").read_bytes() == b'{"a": 1}'
+    assert not (path / ".archive.zip").exists()
+    assert not (tmp_path / "store" / "rt" / "evil.txt").exists()
+    manifest = json.loads((path / ms.MANIFEST).read_text())
+    assert manifest["revision"] == spec.revision
+    assert store.verify(spec, full=True) == []
+
+
+def test_archive_with_wrong_sha256_is_rejected(tmp_path):
+    import dataclasses
+
+    spec = dataclasses.replace(make_archive(tmp_path), revision="0" * 64)
+    store = ms.ModelStore(tmp_path / "store")
+    with pytest.raises(ms.ModelNotProvisioned, match="archive size/sha256 mismatch"):
+        store.ensure(spec, download=True)
+    assert not store.model_path("vosk-x").exists()

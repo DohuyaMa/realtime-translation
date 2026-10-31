@@ -27,7 +27,7 @@
       rtPackagesFor = pkgs: import ./nix/packages { inherit pkgs; };
       flattenRt = rt: lib.filterAttrs (_: drv: !(drv.meta.broken or false)) (lib.listToAttrs (lib.concatMap
         (service: lib.mapAttrsToList (variant: drv: lib.nameValuePair "rt-${service}-${variant}" drv) rt.${service})
-        [ "asr" "tts" ]));
+        [ "asr" "vosk" "tts" ]));
     in
     {
       lib.rtSpeech = rtLib;
@@ -60,6 +60,7 @@
         rt-edge = (rtPackagesFor pkgs).edge;
         rt-asr-cpu = (rtPackagesFor pkgs).asr.cpu;
         rt-tts-cpu = (rtPackagesFor pkgs).tts.cpu;
+        rt-vosk-cpu = (rtPackagesFor pkgs).vosk.cpu;
       });
     };
 }
