@@ -61,6 +61,32 @@ def format_llm_detail(entry: Optional[Dict], session: Optional[Dict]) -> str:
     return ", ".join(parts)
 
 
+def format_timing(status: Dict) -> str:
+    """Last phrase's per-stage latency, queue depths, backpressure counters."""
+    t = status.get("timing") or {}
+    parts = []
+    if t:
+
+        def ms(key):
+            v = t.get(key)
+            return "-" if v is None else f"{v:.0f}"
+
+        parts.append(
+            f"Фраза #{t.get('seq')}: ASR {ms('asr_ms')} мс · LLM {ms('llm_ms')} мс"
+            f" (усього {ms('llm_total_ms')}) · TTS {ms('tts_ms')} мс ·"
+            f" кінець мовлення → звук {ms('e2e_ms')} мс"
+        )
+    queues = status.get("queues") or {}
+    if any(queues.values()):
+        parts.append("черги: " + ", ".join(f"{k} {v}" for k, v in queues.items() if v))
+    behind = {k: v for k, v in (status.get("backpressure") or {}).items() if v}
+    if behind:
+        parts.append("не встигає: " + ", ".join(f"{k} ×{v}" for k, v in behind.items()))
+    if status.get("dropped_segments"):
+        parts.append(f"відкинуто фраз: {status['dropped_segments']}")
+    return "; ".join(parts)
+
+
 class ServiceStatusPanel(QGroupBox):
     """Displays aggregated status of asr/llm/tts (no process control)."""
 
@@ -106,6 +132,10 @@ class ServiceStatusPanel(QGroupBox):
             self._dots[key], self._texts[key], self._details[key] = dot, text, detail
             self._use[key] = use
 
+        self._timing = QLabel("")
+        self._timing.setWordWrap(True)
+        self._timing.setStyleSheet("color: gray;")
+        outer.addWidget(self._timing)
         bar = QHBoxLayout()
         outer.addLayout(bar)
         refresh = QPushButton("Оновити")
@@ -146,6 +176,7 @@ class ServiceStatusPanel(QGroupBox):
 
     def update_status(self, status: Dict):
         """Apply a status dict (get_status() plus optional ``health``)."""
+        self._timing.setText(format_timing(status))
         choices = status.get("choices") or {}
         use = status.get("use") or {}
         for kind in SERVICES:

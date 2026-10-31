@@ -1,5 +1,14 @@
 """Edge coordinator: mic -> VadStream -> rt-asr -> LLM -> rt-tts -> playback.
 
+Staged pipeline (owner 2026-10-31): every stage is its own worker thread with
+a bounded FIFO queue - ASR of phrase n+1 runs while the LLM translates n, TTS
+synthesizes n-1 and n-2 plays. One thread per stage keeps the order (phrase
+sequence numbers in logs/timing). A full downstream queue blocks the stage
+(backpressure, logged + ``backpressure`` status event); the only drop is the
+explicit, logged drop-oldest policy of the segment queue in translate mode.
+The LLM output is streamed: each finished sentence goes to TTS at once and
+playback starts with the first synthesized sentence.
+
 Capture and pause segmentation run locally; ASR/TTS go through endpoint pools
 and translation through an app session on an llama worker (ordered worker
 list with failover, no Django). In transcribe mode long chunks are sent to
@@ -12,6 +21,7 @@ import queue
 import threading
 import time
 from collections import deque
+from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
 
 import numpy as np
@@ -38,6 +48,7 @@ CAPTURE_RATE = 48000
 BLOCKSIZE = 1024
 ASR_RATE = 16000
 TRANSLATE_QUEUE_MAX = 5
+STAGE_QUEUE_MAX = 4
 PLAYBACK_QUEUE_MAX = 8
 # recognized words kept for {{previous_text}} (asr.previous_words <= this)
 PREVIOUS_WORDS_MAX = 1000
@@ -55,6 +66,35 @@ _LLM_LIVE_FIELDS = (
 )
 
 _STOP = object()
+
+
+@dataclass
+class _Phrase:
+    """One speech segment travelling through the stages, with its timing."""
+
+    seq: int
+    t_end: float  # end of speech (segment emitted by the VAD)
+    segment: Optional[Segment] = None
+    text: str = ""
+    src: Optional[str] = None
+    asr_ms: Optional[float] = None
+    llm_first_ms: Optional[float] = None
+    llm_ms: Optional[float] = None
+    tts_first_ms: Optional[float] = None
+    e2e_ms: Optional[float] = None
+    pieces: int = 0  # sentences sent to TTS
+    played: bool = False
+
+
+@dataclass
+class _Sentence:
+    phrase: _Phrase
+    text: str
+    t_ready: float  # when the LLM produced it
+
+
+def _ms(seconds: float) -> float:
+    return round(seconds * 1000.0, 1)
 
 
 def default_llm_target(
@@ -128,6 +168,7 @@ class TranslationSystem:
         llm_factory: Callable[[LlmTarget, LlmSettings], Any] = LlmClient,
         capture_factory: Optional[Callable[[Callable[[np.ndarray], None]], Any]] = None,
         playback_sink: Optional[Callable[[np.ndarray, int], None]] = None,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.settings = settings
         self._directory_factory = directory_factory
@@ -151,7 +192,14 @@ class TranslationSystem:
         self._chunk_queue = self._new_chunk_queue()
         self._session_held = False
         self._stream: Any = None
+        self._clock = clock
+        self._llm_q: queue.Queue = queue.Queue(maxsize=STAGE_QUEUE_MAX)
+        self._tts_q: queue.Queue = queue.Queue(maxsize=STAGE_QUEUE_MAX)
         self._playback_queue: queue.Queue = queue.Queue(maxsize=PLAYBACK_QUEUE_MAX)
+        self._seq = 0
+        self._timing: Dict[str, Any] = {}
+        self._backpressure: Dict[str, int] = {"llm": 0, "tts": 0, "playback": 0}
+        self._dropped = 0
         self._audio_q: queue.Queue = queue.Queue()
         self._capturing = False
         self._threads: Dict[str, threading.Thread] = {}
@@ -272,6 +320,8 @@ class TranslationSystem:
         self._vad = self._vad_stream_factory(self._segmenter_config(self.settings))
         self._chunk_queue = self._new_chunk_queue()
         self._audio_q = queue.Queue()
+        self._llm_q = queue.Queue(maxsize=STAGE_QUEUE_MAX)
+        self._tts_q = queue.Queue(maxsize=STAGE_QUEUE_MAX)
         self._playback_queue = queue.Queue(maxsize=PLAYBACK_QUEUE_MAX)
         self._recognized.clear()
         self._translation_context.clear()
@@ -289,7 +339,9 @@ class TranslationSystem:
         self._threads = {
             name: threading.Thread(target=fn, daemon=True, name=f"rt-{name}")
             for name, fn in (
-                ("worker", self._chunk_worker_loop),
+                ("asr", self._chunk_worker_loop),
+                ("llm", self._llm_worker),
+                ("tts", self._tts_worker),
                 ("playback", self._playback_worker),
                 ("capture", self._pipeline_loop),
             )
@@ -314,13 +366,16 @@ class TranslationSystem:
         # 2. drain the segment queue
         cfg = self._segmenter_config(self.settings)
         self._wait_drained(max(60.0, cfg.hard_max_ms / 1000.0))
-        # 3. stop the workers
-        self.is_running = False
-        self._enqueue_segment(_STOP)
-        for name in ("worker", "playback"):
+        # 3. stop the stages: _STOP travels asr -> llm -> tts -> playback
+        #    behind the queued work, so every phrase is finished and played
+        self._chunk_queue.put(_STOP)
+        for name in ("asr", "llm", "tts", "playback"):
             t = self._threads.get(name)
             if t:
-                t.join(timeout=5.0)
+                t.join(timeout=60.0)
+                if t.is_alive():
+                    logger.warning("{} stage still busy after 60 s at stop", name)
+        self.is_running = False
         self._threads = {}
         # 4. close the worker session
         self._close_session()
@@ -409,10 +464,20 @@ class TranslationSystem:
         )
 
     def enqueue_playback(self, audio: np.ndarray, sample_rate: int) -> None:
+        """External audio for the playback stage (played in arrival order)."""
+        self._put(self._playback_queue, (None, audio, int(sample_rate)), "playback")
+
+    def _put(self, q: queue.Queue, item: Any, stage: str) -> None:
+        """Hand work to ``stage``; a full queue blocks (backpressure), visibly."""
         try:
-            self._playback_queue.put_nowait((audio, int(sample_rate)))
+            q.put_nowait(item)
+            return
         except queue.Full:
-            logger.warning("playback queue full - dropping audio")
+            pass
+        self._backpressure[stage] += 1
+        logger.warning("{} stage is behind (queue full): upstream waits", stage)
+        self._emit({"status": "backpressure", "stage": stage})
+        q.put(item)
 
     # -- threads ------------------------------------------------------------
 
@@ -446,7 +511,9 @@ class TranslationSystem:
         for segment in segments:
             self._enqueue_segment(segment)
 
-    def _enqueue_segment(self, item) -> None:
+    def _enqueue_segment(self, segment: Segment) -> None:
+        self._seq += 1
+        item = _Phrase(self._seq, self._clock(), segment)
         q = self._chunk_queue
         while True:
             try:
@@ -454,9 +521,15 @@ class TranslationSystem:
                 return
             except queue.Full:
                 try:
-                    q.get_nowait()
+                    old = q.get_nowait()
                     q.task_done()
-                    logger.warning("segment queue full - dropped oldest segment")
+                    # explicit policy: translate mode keeps the freshest speech
+                    self._dropped += 1
+                    logger.warning(
+                        "segment queue full - dropped oldest segment #{}",
+                        getattr(old, "seq", "?"),
+                    )
+                    self._emit({"status": "dropped", "stage": "asr"})
                 except queue.Empty:
                     pass
 
@@ -466,6 +539,7 @@ class TranslationSystem:
             item = q.get()
             try:
                 if item is _STOP:
+                    self._llm_q.put(_STOP)
                     return
                 self._process_segment(item)
             except Exception as e:
@@ -475,16 +549,68 @@ class TranslationSystem:
             finally:
                 q.task_done()
 
-    def _playback_worker(self) -> None:
-        while self.is_running:
+    def _llm_worker(self) -> None:
+        while True:
+            item = self._llm_q.get()
+            if item is _STOP:
+                self._tts_q.put(_STOP)
+                return
             try:
-                audio, sr = self._playback_queue.get(timeout=0.1)
-            except queue.Empty:
-                continue
+                self._translate(item)
+            except Exception as e:
+                logger.exception("llm stage error: {}", e)
+                self._pipeline_errors += 1
+                self._fail("pipeline", type(e).__name__)
+
+    def _tts_worker(self) -> None:
+        while True:
+            item = self._tts_q.get()
+            if item is _STOP:
+                self._playback_queue.put(_STOP)
+                return
+            try:
+                self._synthesize(item)
+            except Exception as e:
+                logger.exception("tts stage error: {}", e)
+                self._pipeline_errors += 1
+                self._fail("pipeline", type(e).__name__)
+
+    def _playback_worker(self) -> None:
+        while True:
+            item = self._playback_queue.get()
+            if item is _STOP:
+                return
+            phrase, audio, sr = item
+            if phrase is not None and not phrase.played:
+                phrase.played = True
+                phrase.e2e_ms = _ms(self._clock() - phrase.t_end)
+                self._record_timing(phrase)
             try:
                 self._playback_sink(audio, sr)
             except Exception as e:
                 logger.exception("playback error: {}", e)
+
+    def _record_timing(self, phrase: _Phrase) -> None:
+        t = {
+            "seq": phrase.seq,
+            "asr_ms": phrase.asr_ms,
+            "llm_ms": phrase.llm_first_ms,
+            "llm_total_ms": phrase.llm_ms,
+            "tts_ms": phrase.tts_first_ms,
+            "e2e_ms": phrase.e2e_ms,
+        }
+        self._timing = t
+        logger.info(
+            "phrase #{}: asr {} ms, llm first sentence {} ms (total {}),"
+            " tts first {} ms, end of speech -> playback {} ms",
+            phrase.seq,
+            phrase.asr_ms,
+            phrase.llm_first_ms,
+            phrase.llm_ms,
+            phrase.tts_first_ms,
+            phrase.e2e_ms,
+        )
+        self._emit({"status": "timing", "timing": t})
 
     # -- processing ---------------------------------------------------------
 
@@ -501,13 +627,13 @@ class TranslationSystem:
             }
         )
 
-    def _process_segment(self, segment: Segment) -> None:
-        if len(segment.audio) == 0:
+    def _process_segment(self, phrase: _Phrase) -> None:
+        if len(phrase.segment.audio) == 0:
             return
         if self._mode == "translate":
-            self._translate_segment(segment)
+            self._recognize(phrase)
         else:
-            self._transcribe_segment(segment)
+            self._transcribe_segment(phrase.segment)
         self._segments_processed += 1
 
     def _language(self) -> Optional[str]:
@@ -544,35 +670,53 @@ class TranslationSystem:
             self._pending_recognized.append(text)
         self._emit({"status": "transcription_complete", "original_text": text})
 
-    def _translate_segment(self, segment: Segment) -> None:
+    def _recognize(self, phrase: _Phrase) -> None:
+        """ASR stage (translate mode): hand the text to the LLM stage."""
         lang = self._language()
         prompt = self._asr_prompt()
+        t0 = self._clock()
         try:
             result = self._pools.asr.call(
                 lambda c: c.transcribe(
-                    segment.audio, language=lang, prompt=prompt, priority="realtime"
+                    phrase.segment.audio,
+                    language=lang,
+                    prompt=prompt,
+                    priority="realtime",
                 )
             )
         except ServiceError as e:
             self._service_error(e)
             return
+        phrase.asr_ms = _ms(self._clock() - t0)
         text = (result.text or "").strip()
         if not text:
             return
         self._recognized.extend(text.split())
         with self._lock:
             self._pending_recognized.append(text)
-        src = lang or result.language
-        if not src:
+        phrase.src = lang or result.language
+        if not phrase.src:
             logger.warning("source language unknown - skipping translation")
             return
+        phrase.text = text
+        phrase.segment = None  # audio no longer needed
+        self._put(self._llm_q, phrase, "llm")
 
-        t0 = time.monotonic()
+    def _translate(self, phrase: _Phrase) -> None:
+        """LLM stage: stream the translation, each sentence on to TTS."""
+        t0 = self._clock()
         self._llm_requests += 1
+        sentences: List[str] = []
         try:
-            translation = self._llm.translate(
-                text, src, context=list(self._translation_context)
-            )
+            for sentence in self._llm.translate_stream(
+                phrase.text, phrase.src, context=list(self._translation_context)
+            ):
+                now = self._clock()
+                if phrase.llm_first_ms is None:
+                    phrase.llm_first_ms = _ms(now - t0)
+                sentences.append(sentence)
+                phrase.pieces += 1
+                self._put(self._tts_q, _Sentence(phrase, sentence, now), "tts")
         except ServiceError as e:
             self._llm_errors += 1
             self._service_error(e)
@@ -584,27 +728,34 @@ class TranslationSystem:
             self._fail("llm", "language")
             return
         finally:
-            self._llm_time += time.monotonic() - t0
-        self._translation_context.append((text, translation))
+            self._llm_time += self._clock() - t0
+        phrase.llm_ms = _ms(self._clock() - t0)
+        translation = " ".join(sentences)
+        self._translation_context.append((phrase.text, translation))
         with self._lock:
             self._pending_translated.append(translation)
-
-        tts = self.settings.tts
-        try:
-            audio, sr = self._pools.tts.call(
-                lambda c: c.synthesize(translation, tts.voice, tts.speed)
-            )
-        except ServiceError as e:
-            self._service_error(e)
-        else:
-            self.enqueue_playback(audio, sr)
         self._emit(
             {
                 "status": "translation_complete",
-                "original_text": text,
+                "original_text": phrase.text,
                 "translated_text": translation,
             }
         )
+
+    def _synthesize(self, item: _Sentence) -> None:
+        """TTS stage: one sentence at a time, in order, on to playback."""
+        tts = self.settings.tts
+        try:
+            audio, sr = self._pools.tts.call(
+                lambda c: c.synthesize(item.text, tts.voice, tts.speed)
+            )
+        except ServiceError as e:
+            self._service_error(e)
+            return
+        phrase = item.phrase
+        if phrase.tts_first_ms is None:
+            phrase.tts_first_ms = _ms(self._clock() - item.t_ready)
+        self._put(self._playback_queue, (phrase, audio, int(sr)), "playback")
 
     # -- stats --------------------------------------------------------------
 
@@ -635,6 +786,15 @@ class TranslationSystem:
                 "tts": tts.active() if tts is not None else None,
             },
             "session": self._session_snapshot(),
+            "timing": dict(self._timing),
+            "queues": {
+                "asr": self._chunk_queue.qsize(),
+                "llm": self._llm_q.qsize(),
+                "tts": self._tts_q.qsize(),
+                "playback": self._playback_queue.qsize(),
+            },
+            "backpressure": dict(self._backpressure),
+            "dropped_segments": self._dropped,
             "use": {k: getattr(self.settings.use, k) for k in KINDS},
             "choices": {
                 k: [

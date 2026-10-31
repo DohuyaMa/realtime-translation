@@ -93,6 +93,9 @@ class FakeLlm:
                 raise err
         return f"EN({text})"
 
+    def translate_stream(self, text, source_lang, context=()):
+        yield self.translate(text, source_lang, context)
+
     def close(self):
         pass
 
@@ -447,7 +450,7 @@ def test_translate_queue_drops_oldest_segments():
     for i in range(7):
         ts._enqueue_segment(seg(i + 1))
     assert ts._chunk_queue.qsize() == 5
-    assert len(ts._chunk_queue.queue[0].audio) == 3 * 16000
+    assert len(ts._chunk_queue.queue[0].segment.audio) == 3 * 16000
 
 
 def test_capture_failure_aborts_start_and_closes_session():

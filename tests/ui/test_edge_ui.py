@@ -702,3 +702,27 @@ def test_llm_tab_pause_setting(app):
     tab.end_silence_ms.setValue(450)
     assert "пауза 450 мс" in tab.preview.toPlainText()
     assert tab.values()["segmentation.translate.end_silence_ms"] == 450
+
+
+def test_status_panel_shows_stage_timing(app):
+    panel = ServiceStatusPanel()
+    panel.update_status(
+        {
+            "timing": {
+                "seq": 7,
+                "asr_ms": 3800.0,
+                "llm_ms": 400.0,
+                "llm_total_ms": 900.0,
+                "tts_ms": 4700.0,
+                "e2e_ms": 8900.0,
+            },
+            "queues": {"asr": 0, "llm": 1, "tts": 2, "playback": 0},
+            "backpressure": {"llm": 0, "tts": 3, "playback": 0},
+            "dropped_segments": 0,
+            "health": {},
+        }
+    )
+    text = panel._timing.text()
+    assert "Фраза #7: ASR 3800 мс · LLM 400 мс (усього 900) · TTS 4700 мс" in text
+    assert "кінець мовлення → звук 8900 мс" in text
+    assert "черги: llm 1, tts 2" in text and "не встигає: tts ×3" in text

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import json
 import re
-from typing import Optional, Protocol, Sequence
+from typing import Iterable, Iterator, Optional, Protocol, Sequence
 
 import httpx
 
@@ -11,6 +12,33 @@ from .base import ServiceError, json_body, raise_for_response
 
 SOURCE_LANGUAGES = ("pl", "uk", "ru")
 _THINK = re.compile(r"(?s)<think>.*?</think>")
+_SENTENCE = re.compile(r"(?s)(.*?[.!?…]+[\"')\]]*)(\s+|$)")
+
+
+def _sentences(deltas: Iterable[str]) -> Iterator[str]:
+    """Complete sentences out of streamed text deltas (``<think>`` dropped)."""
+    buf = ""
+    done = 0  # chars of the visible text already emitted
+    for delta in deltas:
+        buf += delta
+        visible = _THINK.sub("", buf)
+        if "<think>" in visible:  # reasoning still open: hold it back
+            visible = visible[: visible.index("<think>")]
+        rest = visible[done:]
+        while True:
+            m = _SENTENCE.match(rest)
+            if not m or not m.group(2):  # need whitespace after the end mark
+                break
+            sentence = m.group(1).strip()
+            done += m.end()
+            rest = visible[done:]
+            if sentence:
+                yield sentence
+    tail = _THINK.sub("", buf)[done:].strip()
+    if "<think>" in tail:
+        tail = tail[: tail.index("<think>")].strip()
+    if tail:
+        yield tail
 
 
 class LlmTarget(Protocol):
@@ -56,44 +84,74 @@ class LlmClient:
         raise_for_response(self.service, resp)
         return resp
 
-    def _request(self, method: str, path: str, **kwargs) -> httpx.Response:
-        try:
-            return self._send(method, path, **kwargs)
-        except ServiceError as e:
-            if e.kind not in ("auth", "unreachable", "timeout", "busy"):
-                raise
-            self._target.invalidate(e.kind)
-        try:
-            return self._send(method, path, **kwargs)
-        except ServiceError as e:
-            if e.kind == "auth":  # still rejected: let the target fail over
-                self._target.invalidate("auth")
-            raise
-
     def translate(
         self, text: str, source_lang: str, context: Sequence[tuple[str, str]] = ()
     ) -> str:
+        """Whole translation (joined stream)."""
+        return " ".join(self.translate_stream(text, source_lang, context))
+
+    def translate_stream(
+        self, text: str, source_lang: str, context: Sequence[tuple[str, str]] = ()
+    ) -> Iterator[str]:
+        """Translated sentences as soon as each one is complete.
+
+        One streamed call per chunk of <= words_per_request words (in order);
+        earlier chunks of this phrase become context of the next ones.
+        """
         if source_lang == "en":
-            return text
+            yield text
+            return
         if source_lang not in SOURCE_LANGUAGES:
             raise ValueError(f"unsupported source language {source_lang!r}")
         s = self._settings
         ctx = tuple(context)
-        results = []
-        # one call per chunk of <= words_per_request words, results in order;
-        # earlier chunks of this phrase become context of the next ones
         for chunk in split_words(text, s.words_per_request):
-            result = self._complete(
-                build_messages(
-                    s.system_prompt, s.user_template, chunk, source_lang, ctx
-                ),
-                chunk,
+            messages = build_messages(
+                s.system_prompt, s.user_template, chunk, source_lang, ctx
             )
-            results.append(result)
-            ctx = ctx + ((chunk, result),)
-        return " ".join(results)
+            parts = []
+            for sentence in self._complete_stream(messages, chunk):
+                parts.append(sentence)
+                yield sentence
+            if not parts:
+                raise ServiceError(self.service, "http", "empty translation")
+            ctx = ctx + ((chunk, " ".join(parts)),)
 
-    def _complete(self, messages: list, chunk: str) -> str:
+    def _open_stream(self, body: dict) -> httpx.Response:
+        """POST with stream=True; same one-retry policy as ``_request``."""
+        for attempt in (0, 1):
+            base, token = self._target.current()
+            headers = {"Authorization": f"Token {token}"} if token else {}
+            req = self._http.build_request(
+                "POST",
+                base.rstrip("/") + "/v1/chat/completions",
+                json=body,
+                headers=headers,
+            )
+            try:
+                try:
+                    resp = self._http.send(req, stream=True)
+                except httpx.TimeoutException as e:
+                    raise ServiceError(self.service, "timeout", str(e)) from e
+                except httpx.TransportError as e:
+                    raise ServiceError(self.service, "unreachable", str(e)) from e
+                if resp.status_code >= 400:
+                    resp.read()
+                    resp.close()
+                    if resp.status_code == 503:
+                        raise ServiceError(self.service, "busy", "HTTP 503", 503)
+                    raise_for_response(self.service, resp)
+                return resp
+            except ServiceError as e:
+                retryable = e.kind in ("auth", "unreachable", "timeout", "busy")
+                if attempt == 1 or not retryable:
+                    if attempt == 1 and e.kind == "auth":
+                        self._target.invalidate("auth")
+                    raise
+                self._target.invalidate(e.kind)
+        raise AssertionError("unreachable")
+
+    def _complete_stream(self, messages: list, chunk: str) -> Iterator[str]:
         s = self._settings
         body = {
             "model": s.model,
@@ -101,20 +159,47 @@ class LlmClient:
             "temperature": s.temperature,
             "max_tokens": min(s.max_tokens_cap, 32 + 3 * len(chunk.split())),
             "chat_template_kwargs": {"enable_thinking": False},
+            "stream": True,
         }
-        payload = json_body(
-            self.service, self._request("POST", "/v1/chat/completions", json=body)
-        )
+        resp = self._open_stream(body)
         try:
-            content = payload["choices"][0]["message"]["content"]
+            if "text/event-stream" in resp.headers.get("content-type", ""):
+                deltas = self._sse_deltas(resp)
+            else:  # server answered without streaming: one JSON body
+                resp.read()
+                deltas = iter([self._message_content(json_body(self.service, resp))])
+            yield from _sentences(deltas)
+        except httpx.TimeoutException as e:
+            raise ServiceError(self.service, "timeout", str(e)) from e
+        except httpx.TransportError as e:
+            raise ServiceError(self.service, "unreachable", str(e)) from e
+        finally:
+            resp.close()
+
+    def _sse_deltas(self, resp: httpx.Response) -> Iterator[str]:
+        for line in resp.iter_lines():
+            if not line.startswith("data:"):
+                continue
+            data = line[5:].strip()
+            if data == "[DONE]":
+                return
+            try:
+                event = json.loads(data)
+                delta = event["choices"][0].get("delta") or {}
+            except (ValueError, KeyError, IndexError, TypeError) as e:
+                raise ServiceError(
+                    self.service, "http", f"malformed stream event: {data!r:.200}"
+                ) from e
+            if delta.get("content"):
+                yield delta["content"]
+
+    def _message_content(self, payload: dict) -> str:
+        try:
+            return payload["choices"][0]["message"]["content"] or ""
         except (KeyError, IndexError, TypeError) as e:
             raise ServiceError(
                 self.service, "http", f"malformed response: {payload!r:.200}"
             ) from e
-        result = _THINK.sub("", content or "").strip()
-        if not result:
-            raise ServiceError(self.service, "http", "empty translation")
-        return result
 
     def status(self) -> dict:
         # Health probe: single attempt, never invalidates the session target.
