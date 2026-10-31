@@ -10,13 +10,34 @@ from fastapi import FastAPI
 
 from ..common.app import LifespanHook, create_service_app
 from ..common.auth import load_token
+from ..common.env import SettingsError
 from ..common.runtime import ServiceRuntime
 from ..common.runtime_config import RuntimeConfig
 from ..common.settings import render_env_value
+from ..common.stream import StreamError, StreamHub, StreamStart, build_stream_router
 from .backend import AsrBackend, make_backend
 from .http import build_http_router
-from .settings import AsrSettings
+from .settings import AsrSettings, normalize_language
+from .stream import AsrStreamSession
 from .textfilter import SegmentFilter
+
+
+def _stream_factory(config: RuntimeConfig[AsrSettings]):
+    def open_session(start: StreamStart, backend: AsrBackend) -> AsrStreamSession:
+        s = config.current()
+        try:
+            language = normalize_language(start.language) or s.language
+        except SettingsError as exc:
+            raise StreamError("invalid_request", str(exc)) from exc
+        return AsrStreamSession(
+            backend,
+            language=language,
+            languages=s.languages,
+            prompt=start.prompt,
+            t0=start.t0,
+        )
+
+    return open_session
 
 
 def _settings_env(settings: AsrSettings) -> Dict[str, str]:
@@ -56,13 +77,23 @@ def create_app(
         idle_unload_s=settings.idle_unload_minutes * 60.0,
     )
     segment_filter = SegmentFilter()
+    hub = StreamHub(
+        runtime,
+        _stream_factory(config),
+        max_sessions=settings.max_sessions,
+        tick_s=settings.stream_tick_ms / 1000.0,
+    )
     return create_service_app(
         settings=settings,
         runtime=runtime,
         token=token,
         routers=[build_http_router(config, runtime, segment_filter)],
+        ws_routers=[build_stream_router(hub, token)],
         lifespan_hooks=lifespan_hooks,
         config=config,
         on_reload=lambda _s: runtime.reload(),
-        status_extra=lambda: {"dropped_segments": segment_filter.counts()},
+        status_extra=lambda: {
+            "dropped_segments": segment_filter.counts(),
+            "sessions": hub.status(),
+        },
     )

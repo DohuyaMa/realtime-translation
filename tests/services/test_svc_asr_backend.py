@@ -182,14 +182,9 @@ def test_faster_whisper_transcribe_maps_options():
     )
     kw = b._engine.last
     assert kw["vad"] is we.FILE_VAD and kw["initial_prompt"] == "ctx"
-    assert kw["beam_size"] == 2 and kw["partial"] is False
+    assert kw["beam_size"] == 2
     assert r.text == "hi there" and r.language == "en" and r.duration == 1.0
     assert [(s.start, s.end, s.text) for s in r.segments] == [(0.0, 1.0, "hi there")]
-    b.transcribe(
-        np.zeros(SR, np.float32),
-        DecodeOptions(None, None, beam_size=1, without_timestamps=True),
-    )
-    assert b._engine.last["partial"] is True and b._engine.last["vad"] is None
 
 
 def test_faster_whisper_iter_and_detect_delegate():

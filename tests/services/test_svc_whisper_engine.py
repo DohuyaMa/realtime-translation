@@ -13,6 +13,7 @@ class FakeSeg:
     def __init__(self, start, end, text):
         self.start, self.end, self.text = start, end, text
         self.no_speech_prob, self.avg_logprob, self.compression_ratio = 0.1, -0.2, 1.1
+        self.words = None
 
 
 class FakeModel:
@@ -64,25 +65,6 @@ def test_final_transcribe_kwargs(engine):
     assert [s.text for s in result.segments] == ["Привіт", "світ"]
 
 
-def test_partial_transcribe_kwargs(engine):
-    engine.transcribe(
-        np.zeros(16000, dtype=np.float32),
-        language="pl",
-        beam_size=5,
-        vad=we.STREAMING_VAD,
-        initial_prompt="kontekst",
-        partial=True,
-    )
-    _, kw = engine._model.calls[0]
-    assert (
-        kw["beam_size"] == 1
-        and kw["temperature"] == 0.0
-        and kw["without_timestamps"] is True
-    )
-    assert kw["vad_parameters"] == we.STREAMING_VAD.as_dict()
-    assert kw["initial_prompt"] == "kontekst"
-
-
 def test_no_vad(engine):
     engine.transcribe(np.zeros(16000, dtype=np.float32), language="uk", vad=None)
     _, kw = engine._model.calls[0]
@@ -111,7 +93,7 @@ def test_vad_profiles():
         "threshold": 0.5,
         "neg_threshold": 0.35,
         "min_speech_duration_ms": 250,
-        "min_silence_duration_ms": 400,
+        "min_silence_duration_ms": 500,
         "speech_pad_ms": 200,
         "max_speech_duration_s": 12.0,
     }

@@ -36,8 +36,10 @@ class VadProfile:
         return data
 
 
-# Streaming endpointing: min_silence_duration_ms is the finalization delay.
-STREAMING_VAD = VadProfile(0.5, 0.35, 250, 400, 200, 12.0)
+# Streaming endpointing (asr/stream.py): speech >= threshold, silence below
+# neg_threshold; min_silence_duration_ms is the endpoint (owner decision
+# 2026-10-31: 500 ms), speech_pad_ms the pre-roll kept before speech.
+STREAMING_VAD = VadProfile(0.5, 0.35, 250, 500, 200, 12.0)
 # File transcription (vad_filter=True).
 FILE_VAD = VadProfile(0.5, None, 0, 500, 300, 30.0)
 
@@ -52,11 +54,22 @@ class SegmentStats:
 
 
 @dataclass(frozen=True)
+class TimedWord:
+    """One word of a ``word_timestamps`` decode (seconds within the audio)."""
+
+    word: str
+    start: float
+    end: float
+    prob: float
+
+
+@dataclass(frozen=True)
 class Segment:
     start: float
     end: float
     text: str
     stats: SegmentStats | None = None
+    words: tuple[TimedWord, ...] = ()
 
 
 def _segment(s) -> Segment:
@@ -66,6 +79,13 @@ def _segment(s) -> Segment:
         s.text.strip(),
         SegmentStats(
             float(s.no_speech_prob), float(s.avg_logprob), float(s.compression_ratio)
+        ),
+        tuple(
+            TimedWord(
+                w.word.strip(), float(w.start), float(w.end), float(w.probability)
+            )
+            for w in (s.words or ())
+            if w.word.strip()
         ),
     )
 
@@ -168,6 +188,32 @@ class WhisperEngine:
         for s in segments:
             yield _segment(s)
 
+    def stream_decode(
+        self, audio, *, language: str, initial_prompt: str | None
+    ) -> list[Segment]:
+        """One streaming tick (spec 2026-10-31 §1): greedy, no temperature
+        fallback, word timestamps, no conditioning, no VAD (the session has
+        cut the speech already)."""
+        samples = to_float32_mono(audio)
+        if samples.size == 0:
+            return []
+        kwargs = {
+            "language": language,
+            "beam_size": 1,
+            "temperature": 0.0,
+            "condition_on_previous_text": False,
+            "word_timestamps": True,
+            "without_timestamps": False,
+            "vad_filter": False,
+            "no_speech_threshold": 0.6,
+            "compression_ratio_threshold": 2.4,
+            "log_prob_threshold": -1.0,
+        }
+        if initial_prompt:
+            kwargs["initial_prompt"] = initial_prompt
+        segments, _info = self._model.transcribe(samples, **kwargs)
+        return [_segment(s) for s in segments]
+
     def detect_language(self, audio, allowed: Sequence[str]) -> tuple[str, float]:
         """Most probable language among `allowed`, from the first <= 30 s of audio."""
         if not allowed:
@@ -189,13 +235,12 @@ class WhisperEngine:
         beam_size: int = 1,
         vad: VadProfile | None = FILE_VAD,
         initial_prompt: str | None = None,
-        partial: bool = False,
     ) -> TranscriptionResult:
         samples = to_float32_mono(audio)
         duration = samples.size / SAMPLE_RATE
         if samples.size == 0:
             return TranscriptionResult("", language or "", [], 0.0)
-        if language is not None and not partial:
+        if language is not None:
             parsed = list(
                 self.iter_transcribe(
                     samples,
@@ -208,8 +253,6 @@ class WhisperEngine:
             info_language = language
         else:
             kwargs = self._final_kwargs(language, beam_size, vad, initial_prompt)
-            if partial:
-                kwargs.update(beam_size=1, temperature=0.0, without_timestamps=True)
             segments, info = self._model.transcribe(samples, **kwargs)
             parsed = [_segment(s) for s in segments]
             info_language = info.language

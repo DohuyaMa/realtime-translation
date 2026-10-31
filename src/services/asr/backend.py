@@ -11,13 +11,15 @@ import numpy as np
 from ..common.audio import TARGET_RATE
 from ..common.model_store import Progress
 from .settings import AsrSettings, normalize_language
-from .whisper_engine import SegmentStats
+from .vad import EnergyVad, Vad
+from .whisper_engine import SegmentStats, TimedWord
 
 __all__ = [
     "AsrBackend",
     "DecodeOptions",
     "FakeAsrBackend",
     "Segment",
+    "TimedWord",
     "Transcription",
     "make_backend",
     "normalize_language",
@@ -31,7 +33,6 @@ class DecodeOptions:
     temperature: float = 0.0
     beam_size: int = 5
     vad_filter: bool = False
-    without_timestamps: bool = False
 
 
 @dataclass(frozen=True)
@@ -40,6 +41,7 @@ class Segment:
     end: float
     text: str
     stats: Optional[SegmentStats] = None  # None: the backend has no confidences
+    words: Tuple[TimedWord, ...] = ()  # stream_decode only
 
 
 @dataclass(frozen=True)
@@ -75,6 +77,16 @@ class AsrBackend(Protocol):
         ...
 
     def detect_language(self, audio: np.ndarray, allowed: Sequence[str]) -> str: ...
+
+    def stream_decode(
+        self, audio: np.ndarray, language: str, prompt: Optional[str]
+    ) -> List[Segment]:
+        """One streaming tick: greedy decode with word timestamps."""
+        ...
+
+    def new_vad(self) -> Vad:
+        """A fresh (per stream session) speech detector."""
+        ...
 
 
 class FakeAsrBackend:
@@ -154,6 +166,31 @@ class FakeAsrBackend:
         if not allowed:
             raise ValueError("allowed languages must not be empty")
         return self.detected if self.detected in allowed else allowed[0]
+
+    def stream_decode(
+        self, audio: np.ndarray, language: str, prompt: Optional[str]
+    ) -> List[Segment]:
+        """``text_fn`` words (default: one word ``w<i>`` per 0.4 s of audio)
+        spread evenly over the audio."""
+        opts = DecodeOptions(language=language, prompt=prompt, beam_size=1)
+        self.calls.append((len(audio), opts))
+        time.sleep(self._decode_delay)
+        duration = len(audio) / TARGET_RATE
+        if self._text_fn:
+            tokens = self._text_fn(audio, opts).split()
+        else:
+            tokens = [f"w{i}" for i in range(int(duration / 0.4))]
+        if not tokens:
+            return []
+        step = duration / len(tokens)
+        words = tuple(
+            TimedWord(t, round(i * step, 3), round((i + 1) * step, 3), 0.9)
+            for i, t in enumerate(tokens)
+        )
+        return [Segment(0.0, duration, " ".join(tokens), None, words)]
+
+    def new_vad(self) -> Vad:
+        return EnergyVad()
 
 
 def make_backend(settings: AsrSettings) -> AsrBackend:

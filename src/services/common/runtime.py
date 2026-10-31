@@ -111,6 +111,7 @@ class ServiceRuntime:
         self._attempt: Optional[_Attempt] = None
         self._idle_stop = threading.Event()
         self._started = False
+        self._holds: dict[object, Callable[[], None]] = {}
 
     # --- lifecycle ----------------------------------------------------------
 
@@ -311,8 +312,38 @@ class ServiceRuntime:
         logger.info("{}: model unloaded", self.service)
         return True
 
+    # --- streaming sessions ------------------------------------------------
+
+    def hold(self, on_drop: Callable[[], None]) -> object:
+        """Register an open streaming session; ``on_drop`` (any thread) is
+        called before the model is unloaded or reloaded."""
+        handle = object()
+        with self._cond:
+            self._holds[handle] = on_drop
+        return handle
+
+    def release(self, handle: object) -> None:
+        with self._cond:
+            self._holds.pop(handle, None)
+        self.touch()  # idle time counts from the end of the session
+
+    @property
+    def holds(self) -> int:
+        with self._cond:
+            return len(self._holds)
+
+    def _notify_drop(self) -> None:
+        with self._cond:
+            callbacks = list(self._holds.values())
+        for on_drop in callbacks:
+            try:
+                on_drop()
+            except Exception:  # noqa: BLE001 — one session must not block the unload
+                logger.exception("{}: session drop callback failed", self.service)
+
     def _drop_backend(self) -> None:
         """Unload the backend on the inference thread (between two jobs)."""
+        self._notify_drop()
 
         def drop() -> None:
             backend, self.backend = self.backend, None
@@ -385,6 +416,7 @@ class ServiceRuntime:
                 or self.backend is None
                 or self._busy is not None
                 or self.worker.pending
+                or self._holds
                 or idle < self.idle_unload_s
             ):
                 return False

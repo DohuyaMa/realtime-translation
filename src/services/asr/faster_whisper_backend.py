@@ -11,6 +11,7 @@ from ..common.device import default_threads
 from ..common.model_store import ModelSettings, Progress, prepare_model
 from .backend import DecodeOptions, Segment, Transcription
 from .settings import AsrSettings
+from .vad import SileroVad, Vad
 from .whisper_engine import FILE_VAD, WhisperEngine
 
 
@@ -53,16 +54,12 @@ class FasterWhisperBackend:
             engine.close()
 
     def transcribe(self, audio: np.ndarray, opts: DecodeOptions) -> Transcription:
-        partial = (
-            opts.without_timestamps and opts.beam_size == 1 and not opts.vad_filter
-        )
         r = self._engine.transcribe(
             audio,
             language=opts.language,
             beam_size=opts.beam_size,
             vad=FILE_VAD if opts.vad_filter else None,
             initial_prompt=opts.prompt,
-            partial=partial,
         )
         return Transcription(
             text=r.text,
@@ -87,3 +84,16 @@ class FasterWhisperBackend:
 
     def detect_language(self, audio: np.ndarray, allowed: Sequence[str]) -> str:
         return self._engine.detect_language(audio, allowed)[0]
+
+    def stream_decode(
+        self, audio: np.ndarray, language: str, prompt: Optional[str]
+    ) -> list[Segment]:
+        return [
+            Segment(s.start, s.end, s.text, s.stats, s.words)
+            for s in self._engine.stream_decode(
+                audio, language=language, initial_prompt=prompt
+            )
+        ]
+
+    def new_vad(self) -> Vad:
+        return SileroVad()

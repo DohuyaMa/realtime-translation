@@ -67,6 +67,8 @@ class AsrSettings(BaseSettings):
     chunk_seconds: float = 600.0
     chunk_lookback_seconds: float = 30.0
     realtime_max_seconds: float = 30.0
+    stream_tick_ms: int = 500
+    max_sessions: int = 4
 
     BACKEND_ENV: ClassVar[Optional[str]] = "RT_ASR_BACKEND"
     ENV_KEYS: ClassVar[Mapping[str, str]] = {
@@ -79,6 +81,8 @@ class AsrSettings(BaseSettings):
         "chunk_seconds": "RT_ASR_CHUNK_SECONDS",
         "chunk_lookback_seconds": "RT_ASR_CHUNK_LOOKBACK_SECONDS",
         "realtime_max_seconds": "RT_ASR_REALTIME_MAX_SECONDS",
+        "stream_tick_ms": "RT_ASR_STREAM_TICK_MS",
+        "max_sessions": "RT_ASR_MAX_SESSIONS",
     }
     FIELD_META: ClassVar[Mapping[str, FieldMeta]] = {
         **BaseSettings.FIELD_META,
@@ -170,5 +174,11 @@ class AsrSettings(BaseSettings):
                 30.0,
                 min_value=5.0,
                 max_value=120.0,
+            ),
+            stream_tick_ms=env_int(
+                env, keys["stream_tick_ms"], 500, min_value=100, max_value=5000
+            ),
+            max_sessions=env_int(
+                env, keys["max_sessions"], 4, min_value=1, max_value=64
             ),
         )

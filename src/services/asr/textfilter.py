@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import re
 import threading
-from typing import List, Optional
+from difflib import SequenceMatcher
+from typing import List, Optional, Sequence
 
 from loguru import logger
 
@@ -14,6 +15,33 @@ from .whisper_engine import SegmentStats
 def normalize_word(w: str) -> str:
     """Strip leading/trailing punctuation for comparison."""
     return re.sub(r"^[^\w]+|[^\w]+$", "", w, flags=re.UNICODE).lower()
+
+
+def repetition_keep(normed: Sequence[str]) -> List[int]:
+    """Indices of the words kept after collapsing consecutive repeated words
+    or short phrases (window up to 5 words); ``normed`` = normalized words."""
+    keep: List[int] = []
+    i = 0
+    n = len(normed)
+    while i < n:
+        keep.append(i)
+        moved = False
+        for win in range(1, min(6, n - i + 1)):
+            seq_n = normed[i : i + win]
+            j = i + win
+            count = 0
+            while j + win <= n and normed[j : j + win] == seq_n:
+                j += win
+                count += 1
+            if count > 0:
+                if win > 1:
+                    keep.extend(range(i + 1, i + win))
+                i = j
+                moved = True
+                break
+        if not moved:
+            i += 1
+    return keep
 
 
 def filter_repetitions(text: str) -> str:
@@ -30,31 +58,34 @@ def filter_repetitions(text: str) -> str:
     words = text.split()
     if len(words) < 2:
         return text
+    return " ".join(
+        words[i] for i in repetition_keep([normalize_word(w) for w in words])
+    )
 
-    normed = [normalize_word(w) for w in words]
 
-    result: List[str] = []
-    i = 0
-    while i < len(words):
-        result.append(words[i])
-        moved = False
-        for win in range(1, min(6, len(words) - i + 1)):
-            seq_n = normed[i : i + win]
-            j = i + win
-            count = 0
-            while j + win <= len(words) and normed[j : j + win] == seq_n:
-                j += win
-                count += 1
-            if count > 0:
-                if win > 1:
-                    result.extend(words[i + 1 : i + win])
-                i = j
-                moved = True
-                break
-        if not moved:
-            i += 1
+# --- prompt echo -------------------------------------------------------------
+#
+# With initial_prompt = the committed text, whisper sometimes "transcribes"
+# the prompt again instead of the new audio. A hypothesis of >= ECHO_MIN_WORDS
+# words of which >= ECHO_MIN_SHARE appear, in order, in the prompt, with one
+# run of >= ECHO_MIN_WORDS consecutive words, is an echo (scattered common
+# words are not).
+ECHO_MIN_WORDS = 3
+ECHO_MIN_SHARE = 0.8
 
-    return " ".join(result)
+
+def is_prompt_echo(words: Sequence[str], prompt: Optional[str]) -> bool:
+    """``words`` (normalized hypothesis words) repeat the prompt."""
+    if len(words) < ECHO_MIN_WORDS or not prompt:
+        return False
+    pw = [w for w in (normalize_word(t) for t in prompt.split()) if w]
+    blocks = SequenceMatcher(
+        None, list(words), pw, autojunk=False
+    ).get_matching_blocks()
+    longest = max((b.size for b in blocks), default=0)
+    return longest >= ECHO_MIN_WORDS and sum(
+        b.size for b in blocks
+    ) >= ECHO_MIN_SHARE * len(words)
 
 
 # --- hallucinated segments -------------------------------------------------
