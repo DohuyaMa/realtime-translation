@@ -42,12 +42,14 @@ change is logged/emitted. Each phrase is logged in one INFO line (whisper,
 Vosk + mean conf + agreement, gate, LLM mode, translation); the opt-in
 session recording (``core.session_record``) also keeps its audio.
 
-Warm-up (owner 2026-10-31): Start warms every service of the pipeline in
-parallel - rt-asr and rt-vosk (``POST /model/load`` when the model is not
-ready, wait for ready, one 0.5 s silent transcription), the LLM (one 1-token
-completion) and rt-tts (load if needed + one short synthesis). Capture starts
-at once; phrases queue behind the warm-up of their stage. Each warm-up is
-logged with its ms, the UI shows «прогрів…» until all are done
+Warm-up (owner 2026-10-31, spec 2026-10-31 §3a): Start warms every service
+of the pipeline in parallel - it opens the rt-asr and rt-vosk streams
+(``clients.stream.StreamClient``: the handshake loads the model, an unloaded
+one gets ``POST /model/load`` first; the server decodes 1 s of silence after
+``ready``), the LLM (one 1-token completion) and rt-tts (load if needed + one
+short synthesis). Capture starts at once; audio waits in the stream's ring
+buffer (<= 30 s) until the stream is ready. Each warm-up is logged with its
+ms, the UI shows «прогрів…» with the services still warming
 (``warmup_state`` events) and one INFO line gives Start -> all ready.
 
 Capture and pause segmentation run locally; ASR/TTS go through endpoint pools
@@ -70,6 +72,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence
 import numpy as np
 from loguru import logger
 
+from .audio.resample import Downsampler
 from .audio.vad_stream import VadStream, make_vad
 from .clients import (
     LlmClient,
@@ -84,7 +87,8 @@ from .clients import (
     endpoints,
 )
 from .clients.discovery import choices
-from .clients.model_status import parse_status
+from .clients.model_status import ensure_model_ready
+from .clients.stream import StreamClient
 from .clients.vosk import VoskResult
 from .core.crosscheck import (
     GATE_DISAGREE,
@@ -116,13 +120,6 @@ SHORT_SOURCE_WORDS = 3
 CAPTURE_START_CHECK_S = 0.2
 # TTS warm-up text (first Kokoro synthesis took 6.3 s live, 2026-10-31 §10)
 TTS_WARMUP_TEXT = "Hello."
-# rt-asr / rt-vosk warm-up audio: 0.5 s of silence (first phrase after an
-# idle unload took up to 6.9 s of ASR live, 2026-10-31)
-WARMUP_AUDIO = np.zeros(ASR_RATE // 2, dtype=np.int16)
-# POST /model/load answers at once; the load (maybe a download) is polled
-MODEL_ACTION_TIMEOUT_S = 60.0
-MODEL_READY_TIMEOUT_S = 600.0
-MODEL_POLL_S = 0.5
 # how often the ASR stage re-checks a held incomplete text
 HOLD_POLL_S = 0.05
 # playback that returns this much earlier than its audio lasts is reported
@@ -351,9 +348,14 @@ class TranslationSystem:
         playback_sink: Optional[Callable[[np.ndarray, int], None]] = None,
         clock: Callable[[], float] = time.monotonic,
         recorder_factory: Callable[[], SessionRecorder] = SessionRecorder,
+        stream_factory: Callable[..., Any] = StreamClient,
     ) -> None:
         self.settings = settings
         self._recorder_factory = recorder_factory
+        self._stream_factory = stream_factory
+        # rt-asr / rt-vosk WS streams of the running pipeline (kind -> client)
+        self._streams: Dict[str, Any] = {}
+        self._downsampler = Downsampler(CAPTURE_RATE)
         # «Записувати сесію для аналізу» (settings.record_session)
         self._recorder: Optional[SessionRecorder] = None
         self._directory_factory = directory_factory
@@ -609,6 +611,7 @@ class TranslationSystem:
         if self._mode == "translate" and self.settings.record_session:
             self._start_recording()
         self._begin_warmup()
+        self._open_streams()
         self.is_running = True
         self._capturing = True
         self._threads = {
@@ -638,6 +641,7 @@ class TranslationSystem:
             segments = self._vad.flush() if self._vad else []
         for segment in segments:
             self._enqueue_segment(segment)
+        self._close_streams()
         # 2. drain the segment queue
         cfg = self._segmenter_config(self.settings)
         self._wait_drained(max(60.0, cfg.hard_max_ms / 1000.0))
@@ -824,6 +828,9 @@ class TranslationSystem:
                 break
 
     def _feed(self, block: np.ndarray) -> None:
+        pcm = self._downsampler(block)
+        for stream in list(self._streams.values()):
+            stream.feed(pcm)
         with self._vad_lock:
             segments = self._vad.feed_block(block)
             self._audio_level_input = min(self._vad.last_level() * 5.0, 1.0)
@@ -853,10 +860,6 @@ class TranslationSystem:
                     pass
 
     def _chunk_worker_loop(self) -> None:
-        if "vosk" in self._warmup_pending:
-            self._vosk_exec.submit(self._warm_up_service, "vosk")
-        if "asr" in self._warmup_pending:
-            self._warm_up_service("asr")
         q = self._chunk_queue
         while True:
             try:
@@ -1475,13 +1478,31 @@ class TranslationSystem:
         ).start()
 
     def _warm_up_tts(self) -> None:
-        """TTS stage thread, before the first sentence: Kokoro's first
-        inference is slow (6.3 s live, 2026-10-31 §10)."""
-        self._warm_up_service("tts")
+        """TTS stage thread, before the first sentence: model ready (loaded
+        if needed) + one short synthesis - Kokoro's first inference is slow
+        (6.3 s live, 2026-10-31 §10). A failure is reported, never stops the
+        stage."""
+        pool = self._pools.tts
+        t0 = time.monotonic()
+        info: Dict[str, Any] = {"url": None, "error": None, "loaded": False}
+        tts = self.settings.tts
+
+        def go(client: Any) -> None:
+            info["loaded"] = ensure_model_ready("tts", client)
+            client.synthesize(TTS_WARMUP_TEXT, tts.voice, tts.speed)
+
+        try:
+            pool.call(go)
+            info["url"] = (pool.active() or {}).get("url")
+        except Exception as e:  # reported below
+            info["error"] = f"{type(e).__name__}: {e}"
+        info["ms"] = _ms(time.monotonic() - t0)
+        self._warmed("tts", info)
 
     def _begin_warmup(self) -> None:
-        """Which services warm up at this start (all in parallel, each on
-        the stage that uses it); announced as one ``warmup_state``."""
+        """Which services warm up at this start (all in parallel: the
+        streams on their own threads, LLM and TTS on their stages);
+        announced as one ``warmup_state``."""
         kinds = ["asr"]
         if self._mode == "translate":
             kinds += ["llm", "tts"]
@@ -1492,52 +1513,56 @@ class TranslationSystem:
         logger.info("warm-up started: {}", ", ".join(kinds))
         self._emit({"status": "warmup_state", "ready": False, "pending": kinds})
 
-    def _ensure_model_ready(self, kind: str, client: Any) -> bool:
-        """Load the service's model when it is not ready and wait for it.
-        True = a load was needed. Not ready in time / load error ->
-        ServiceError."""
-        if parse_status(client.get_status()).state == "ready":
-            return False
-        client.load_model(timeout_s=MODEL_ACTION_TIMEOUT_S)
-        logger.info("{} warm-up: model load requested", kind)
-        deadline = time.monotonic() + MODEL_READY_TIMEOUT_S
-        while True:
-            st = parse_status(client.get_status())
-            if st.state == "ready":
-                return True
-            if st.state in ("error", "unloaded"):
-                raise ServiceError(kind, "not_ready", f"model {st.state}: {st.error}")
-            if time.monotonic() >= deadline:
-                raise ServiceError(
-                    kind, "not_ready", f"not ready after {MODEL_READY_TIMEOUT_S:.0f} s"
-                )
-            time.sleep(MODEL_POLL_S)
+    # -- rt-asr / rt-vosk streams ---------------------------------------------
 
-    def _warm_up_service(self, kind: str) -> None:
-        """rt-asr / rt-vosk / rt-tts: model ready (loaded if needed) + one
-        tiny request. A failure is reported, never stops the stage."""
-        pool = getattr(self._pools, kind)
-        t0 = time.monotonic()
-        info: Dict[str, Any] = {"url": None, "error": None, "loaded": False}
-        language = self._language()
-        tts = self.settings.tts
+    def _open_streams(self) -> None:
+        """Open the WS streams (their warm-up); audio fed before ``ready``
+        waits in each stream's ring buffer."""
+        self._downsampler = Downsampler(CAPTURE_RATE)
+        lang = self._language()
+        kinds = [("asr", self._pools.asr)]
+        if self._mode == "translate" and self._pools.vosk is not None:
+            kinds.append(("vosk", self._pools.vosk))
+        streams = {}
+        for kind, pool in kinds:
+            streams[kind] = self._stream_factory(
+                kind, pool, language=lang, on_event=self._on_stream_event
+            )
+        self._streams = streams
+        for stream in streams.values():
+            stream.start()
 
-        def go(client: Any) -> None:
-            info["loaded"] = self._ensure_model_ready(kind, client)
-            if kind == "asr":
-                client.transcribe(WARMUP_AUDIO, language=language, priority="realtime")
-            elif kind == "vosk" and language:  # auto: no language known yet
-                client.transcribe(WARMUP_AUDIO, language=language)
-            elif kind == "tts":
-                client.synthesize(TTS_WARMUP_TEXT, tts.voice, tts.speed)
+    def _close_streams(self) -> None:
+        streams, self._streams = self._streams, {}
+        for stream in streams.values():
+            stream.stop()
 
-        try:
-            pool.call(go)
-            info["url"] = (pool.active() or {}).get("url")
-        except Exception as e:  # reported below
-            info["error"] = f"{type(e).__name__}: {e}"
-        info["ms"] = _ms(time.monotonic() - t0)
-        self._warmed(kind, info)
+    def _on_stream_event(self, kind: str, msg: Dict[str, Any]) -> None:
+        """Stream client thread: ``ready`` / ``failed`` end the stream's
+        warm-up; recognition events are not used by the pipeline yet."""
+        t = msg.get("type")
+        if t == "ready" and not msg.get("reconnect"):
+            self._warmed(
+                kind,
+                {
+                    "url": msg.get("url"),
+                    "ms": msg.get("ms"),
+                    "loaded": msg.get("loaded", False),
+                    "error": None,
+                },
+            )
+        elif t == "failed" and kind in self._warmup_pending:
+            self._warmed(
+                kind,
+                {
+                    "url": None,
+                    "ms": _ms(time.monotonic() - self._start_t),
+                    "loaded": False,
+                    "error": msg.get("error"),
+                },
+            )
+        elif t in ("final", "partial", "endpoint"):
+            logger.debug("{} stream: {}", kind, msg)
 
     def _warmed(self, kind: str, info: Dict[str, Any]) -> None:
         """One warm-up finished: logged, emitted; the last one of a start
@@ -1568,7 +1593,12 @@ class TranslationSystem:
             was = bool(self._warmup_pending)
             self._warmup_pending.discard(kind)
             done = was and not self._warmup_pending
+            pending = sorted(self._warmup_pending)
         if not done:
+            if was and pending:  # «прогрів…» names what is still warming
+                self._emit(
+                    {"status": "warmup_state", "ready": False, "pending": pending}
+                )
             return
         total = _ms(time.monotonic() - self._start_t)
         failed = sorted(k for k, i in self._warmup.items() if i["error"])

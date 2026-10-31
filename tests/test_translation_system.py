@@ -23,7 +23,6 @@ from src.core.runtime import (
 from src.segmentation import Segment, SegmenterConfig
 from src.translation_system import (
     TTS_WARMUP_TEXT,
-    WARMUP_AUDIO,
     TranslationSystem,
     default_llm_target,
 )
@@ -56,9 +55,6 @@ class FakeAsr(FakeModelService):
         self.warmups = 0
 
     def transcribe(self, audio, sample_rate=16000, language=None, prompt=None, **kw):
-        if audio is WARMUP_AUDIO:  # pipeline-start warm-up, kept apart
-            self.warmups += 1
-            return AsrResult("", language)
         self.calls.append(
             {"n": len(audio), "language": language, "prompt": prompt, **kw}
         )
@@ -66,6 +62,78 @@ class FakeAsr(FakeModelService):
         if isinstance(r, Exception):
             raise r
         return r
+
+
+class FakeStream:
+    """A WS stream (clients.stream.StreamClient): ready at once unless
+    ``hold``; the test plays the server with ``emit``."""
+
+    def __init__(
+        self,
+        kind,
+        pool,
+        *,
+        language=None,
+        on_event=None,
+        prompt=None,
+        hold=False,
+        error=None,
+    ):
+        self.kind, self.pool, self.language = kind, pool, language
+        self.on_event = on_event
+        self.hold, self.error = hold, error
+        self.fed = 0
+        self.started = self.stopped = False
+
+    def start(self):
+        self.started = True
+        if self.error is not None:
+            self.emit({"type": "failed", "error": self.error})
+        elif not self.hold:
+            self.ready()
+
+    def ready(self, loaded=False):
+        self.emit(
+            {
+                "type": "ready",
+                "url": self.pool.url,
+                "ms": 1.0,
+                "loaded": loaded,
+                "model": "m",
+                "reconnect": False,
+            }
+        )
+
+    def emit(self, msg):
+        self.on_event(self.kind, msg)
+
+    def feed(self, pcm):
+        self.fed += len(pcm)
+
+    def stop(self, timeout_s=None):
+        self.stopped = True
+
+    def close(self):
+        self.stopped = True
+
+    def stats(self):
+        return {"url": self.pool.url, "state": "open"}
+
+
+class FakeStreams:
+    """stream_factory: every opened stream, by kind (latest)."""
+
+    def __init__(self, **per_kind):
+        self.per_kind = per_kind  # kind -> FakeStream kwargs
+        self.opened = []
+
+    def __call__(self, kind, pool, **kw):
+        s = FakeStream(kind, pool, **kw, **self.per_kind.get(kind, {}))
+        self.opened.append(s)
+        return s
+
+    def __getitem__(self, kind):
+        return [s for s in self.opened if s.kind == kind][-1]
 
 
 class FakeTts(FakeModelService):
@@ -271,6 +339,7 @@ def make(settings, asr_results=(), target=None, llm=None, tts=True):
         llm_factory=lambda t, s: llm,
         capture_factory=capture,
         playback_sink=sink,
+        stream_factory=FakeStreams(),
     )
     ts.set_status_callback(events.append)
     return ts, pools, llm, vads, capture, sink, events

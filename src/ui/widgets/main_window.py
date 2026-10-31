@@ -12,7 +12,7 @@ from loguru import logger
 from typing import Optional, Dict
 
 from ..controller import UIController
-from ..controller.ui_controller import PipelineEventLog
+from ..controller.ui_controller import SERVICE_NAMES, PipelineEventLog
 from ...controller.translator_controller import ConcreteTranslatorController
 from ...adapters import DirectAdapter
 from .status_logger import StatusLogger, StatusManager
@@ -70,7 +70,8 @@ class MainWindow(QMainWindow):
         
         # UI state
         self.is_translating = False
-        self._warming = False  # pipeline-start warm-up still running
+        # pipeline-start warm-up: services still warming ([] = all ready)
+        self._warming: list = []
         # kill switch: standby after «Зупинити все…»; busy while it works
         self._standby = False
         self._power_busy: Optional[str] = None  # "stopping" | "starting"
@@ -648,7 +649,8 @@ class MainWindow(QMainWindow):
         if not self.is_translating:
             return 'Translation stopped'
         if self._warming:
-            return 'Translation active - прогрів…'
+            names = ", ".join(SERVICE_NAMES.get(k, k) for k in self._warming)
+            return f'Translation active - прогрів… ({names})'
         return 'Translation active'
 
     def _apply_pipeline_event(self, event: Dict):
@@ -656,7 +658,7 @@ class MainWindow(QMainWindow):
         model not ready) in the log - GUI thread (marshalled by signal)."""
         if event.get("status") == "warmup_state":
             # «прогрів…» in the status line until every service is warm
-            self._warming = not event.get("ready")
+            self._warming = [] if event.get("ready") else event.get("pending", [])
             self.status_manager.set_status(self._translation_status_text())
         line = self._event_log.lines(event)
         if line is None:

@@ -14,13 +14,13 @@ from ..core.runtime import EdgeSettings, get_runtime_config
 
 # «Запустити» waits MODEL_READY_TIMEOUT_S for the local models before
 # restarting the pipeline (a first load may download the model); the same
-# limits as the pipeline-start warm-up
-from ..translation_system import (
+# limits as the stream warm-up (clients.model_status.ensure_model_ready)
+from ..clients.model_status import (
     MODEL_ACTION_TIMEOUT_S,
     MODEL_POLL_S,
     MODEL_READY_TIMEOUT_S,
-    TranslationSystem,
 )
+from ..translation_system import TranslationSystem
 
 STANDBY_ERROR = "система зупинена рубильником: спершу «Запустити»"
 

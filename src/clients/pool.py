@@ -81,7 +81,7 @@ class EndpointPool(Generic[C]):
             healthy = [u for u in alive if self._status.get(u, (True, None))[0]]
             return (healthy or alive)[0]
 
-    def _activate(self) -> str:
+    def activate(self) -> str:
         url = self.pick()
         with self._lock:
             previous, self._active = self._active, url
@@ -106,29 +106,29 @@ class EndpointPool(Generic[C]):
             "offline": e.credential.offline,
         }
 
-    def _client(self, url: str) -> C:
+    def client(self, url: str) -> C:
         with self._lock:
             if url not in self._clients:
                 self._clients[url] = self._factory(self.endpoints[url])
             return self._clients[url]
 
-    def _mark_down(self, url: str) -> None:
+    def mark_down(self, url: str) -> None:
         with self._lock:
             self._down_until[url] = self._clock() + self._down_s
 
     def call(self, fn: Callable[[C], T]) -> T:
-        url = self._activate()
+        url = self.activate()
         try:
-            return fn(self._client(url))
+            return fn(self.client(url))
         except ServiceError as e:
             if not is_retryable(e):
                 raise
             logger.warning("{}: {} failed ({}), failing over", self.service, url, e)
-            self._mark_down(url)
-        return fn(self._client(self._activate()))
+            self.mark_down(url)
+        return fn(self.client(self.activate()))
 
     def clients(self) -> Dict[str, C]:
-        return {u: self._client(u) for u in self.urls}
+        return {u: self.client(u) for u in self.urls}
 
     def close(self) -> None:
         with self._lock:

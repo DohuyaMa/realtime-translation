@@ -1096,7 +1096,10 @@ def test_main_window_logs_pipeline_events(app, cfg):
     win.is_translating = True
     emit({"status": "warmup_state", "ready": False, "pending": ["asr", "llm"]})
     app.processEvents()
-    assert win.status_logger.status_area.text() == "Translation active - прогрів…"
+    assert (
+        win.status_logger.status_area.text()
+        == "Translation active - прогрів… (ASR, LLM)"
+    )
     emit({"status": "warmup_state", "ready": True, "ms": 900.0, "failed": []})
     app.processEvents()
     assert win.status_logger.status_area.text() == "Translation active"

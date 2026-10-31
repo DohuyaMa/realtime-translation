@@ -5,7 +5,12 @@ progress, error, and the process memory."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, Mapping, Optional
+import time
+from typing import Any, Callable, Dict, Mapping, Optional
+
+from loguru import logger
+
+from .base import ServiceError
 
 STATES = ("unloaded", "downloading", "loading", "ready", "error")
 TRANSITIONAL = frozenset({"downloading", "loading"})
@@ -67,3 +72,35 @@ def parse_status(status: Mapping[str, Any]) -> ModelStatus:
         ready=bool(status.get("ready", state == "ready")),
         dropped={str(k): int(v) for k, v in dropped.items() if v},
     )
+
+
+# POST /model/load answers at once; the load (maybe a download) is polled
+MODEL_ACTION_TIMEOUT_S = 60.0
+MODEL_READY_TIMEOUT_S = 600.0
+MODEL_POLL_S = 0.5
+
+
+def ensure_model_ready(
+    kind: str,
+    client: Any,
+    *,
+    timeout_s: float = MODEL_READY_TIMEOUT_S,
+    sleep: Callable[[float], None] = time.sleep,
+) -> bool:
+    """Load the service's model when it is not ready and wait for it.
+    True = a load was needed. Not ready in time / load error ->
+    ServiceError(kind, "not_ready")."""
+    if parse_status(client.get_status()).state == "ready":
+        return False
+    client.load_model(timeout_s=MODEL_ACTION_TIMEOUT_S)
+    logger.info("{}: model load requested", kind)
+    deadline = time.monotonic() + timeout_s
+    while True:
+        st = parse_status(client.get_status())
+        if st.state == "ready":
+            return True
+        if st.state in ("error", "unloaded"):
+            raise ServiceError(kind, "not_ready", f"model {st.state}: {st.error}")
+        if time.monotonic() >= deadline:
+            raise ServiceError(kind, "not_ready", f"not ready after {timeout_s:.0f} s")
+        sleep(MODEL_POLL_S)

@@ -42,12 +42,13 @@ from src.core.runtime import (
     resolve_edge_settings,
 )
 from src.segmentation import Segment
-from src.translation_system import WARMUP_AUDIO, TranslationSystem
+from src.translation_system import TranslationSystem
 from test_pipeline_stages import SlowAsr, SlowLlm, SlowTts
 from test_translation_system import (
     FakeCapture,
     FakeModelService,
     FakePools,
+    FakeStreams,
     FakeVad,
     StaticTarget,
     wait_for,
@@ -74,9 +75,6 @@ class FakeVosk(FakeModelService):
         self.warmups = 0
 
     def transcribe(self, audio, language, sample_rate=16000, **kw):
-        if audio is WARMUP_AUDIO:
-            self.warmups += 1
-            return VoskResult("", language)
         self.calls.append({"language": language, "t": time.monotonic()})
         time.sleep(self.delay)
         r = self.results.pop(0) if self.results else VoskResult("", language)
@@ -104,7 +102,7 @@ def settings(**kw):
     return EdgeSettings(mode="translate", local=local, **kw)
 
 
-def system(asr, vosk, llm=None, **kw):
+def system(asr, vosk, llm=None, streams=None, **kw):
     vads, capture, events = [], FakeCapture(), []
     llm = llm or CheckLlm()
 
@@ -122,6 +120,7 @@ def system(asr, vosk, llm=None, **kw):
         llm_factory=lambda t, s: llm,
         capture_factory=capture,
         playback_sink=lambda a, sr: None,
+        stream_factory=streams or FakeStreams(),
     )
     ts.set_status_callback(events.append)
     return ts, vads, capture, llm, events
@@ -789,52 +788,44 @@ def test_terms_segment_passes_merges_and_echo_releases_it():
 # -- pipeline-start warm-up of every service (owner 2026-10-31) --------------
 
 
-def test_start_warms_up_asr_vosk_llm_tts_in_parallel():
-    class SlowLoadAsr(SlowAsr):
-        state = "unloaded"
-
-        def get_status(self):
-            time.sleep(0.2)  # a model load takes time
-            return super().get_status()
-
-    asr = SlowLoadAsr([AsrResult("Добрий день.", "uk")], 0)
+def test_start_opens_both_streams_and_warms_llm_tts_in_parallel():
+    asr = SlowAsr([AsrResult("Добрий день.", "uk")], 0)
     vosk = FakeVosk([VoskResult("добрий день", "uk", words("добрий день"))])
-    vosk.state = "unloaded"
-    ts, vads, capture, llm, events = system(asr, vosk)
+    streams = FakeStreams(asr={"hold": True}, vosk={"hold": True})
+    ts, vads, capture, llm, events = system(asr, vosk, streams=streams)
     assert ts.start()
     try:
-        # capture runs at once: a phrase spoken during the warm-up queues
-        vads[-1].pending.append(seg())
+        # capture runs at once: audio goes to the opening streams' rings
         capture.push()
-        assert ts.get_stats()["warmup_pending"]
-        assert wait_for(lambda: llm.calls and not ts.get_stats()["warmup_pending"])
+        assert wait_for(lambda: streams["asr"].fed and streams["vosk"].fed)
+        assert streams["asr"].language == "uk"
+        assert wait_for(
+            lambda: set(ts.get_stats()["warmup_pending"]) == {"asr", "vosk"}
+        )
+        streams["vosk"].ready(loaded=True)
+        streams["asr"].ready()
+        assert wait_for(lambda: not ts.get_stats()["warmup_pending"])
         stats = ts.get_stats()
     finally:
         ts.stop()
-    assert asr.loads == 1 and asr.warmups == 1 and asr.calls[0]["n"] == 16000
-    assert vosk.loads == 1 and vosk.warmups == 1
+    assert streams["asr"].stopped and streams["vosk"].stopped
     assert set(stats["warmup"]) == {"asr", "vosk", "llm", "tts"}
-    assert stats["warmup"]["asr"]["loaded"] and not stats["warmup"]["tts"]["loaded"]
+    assert stats["warmup"]["vosk"]["loaded"] and not stats["warmup"]["asr"]["loaded"]
     states = [e for e in events if e.get("status") == "warmup_state"]
     assert states[0]["ready"] is False
     assert sorted(states[0]["pending"]) == ["asr", "llm", "tts", "vosk"]
+    # «прогрів…» names what is still warming after each service
+    assert {"status": "warmup_state", "ready": False, "pending": ["asr"]} in states
     assert states[-1]["ready"] is True and states[-1]["failed"] == []
-    # parallel: ASR (2 status polls) and Vosk loads overlap
-    assert states[-1]["ms"] < 1000
-    assert llm.calls == ["Добрий день."]
 
 
 def test_failed_service_warm_up_is_reported_and_translation_goes_on():
     vosk = FakeVosk([VoskResult("добрий день", "uk", words("добрий день"))])
-
-    def broken():
-        raise ServiceError("vosk", "http", "boom")
-
-    vosk.get_status = broken
+    streams = FakeStreams(vosk={"error": "vosk: unreachable: no endpoint"})
     asr = SlowAsr([AsrResult("Добрий день.", "uk")], 0)
-    ts, vads, capture, llm, events = system(asr, vosk)
+    ts, vads, capture, llm, events = system(asr, vosk, streams=streams)
     stats = run(ts, vads, capture, [seg()], lambda: llm.calls)
-    assert "boom" in stats["warmup"]["vosk"]["error"]
+    assert "no endpoint" in stats["warmup"]["vosk"]["error"]
     assert any(
         e.get("status") == "warmup_state" and e.get("failed") == ["vosk"]
         for e in events

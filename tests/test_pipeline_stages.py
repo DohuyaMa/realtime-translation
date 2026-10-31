@@ -15,6 +15,7 @@ from test_translation_system import (
     FakeAsr,
     FakeCapture,
     FakePools,
+    FakeStreams,
     FakeTts,
     FakeVad,
     StaticTarget,
@@ -23,7 +24,7 @@ from test_translation_system import (
     wait_for,
 )
 from src.clients import Directory
-from src.translation_system import TTS_WARMUP_TEXT, WARMUP_AUDIO, TranslationSystem
+from src.translation_system import TTS_WARMUP_TEXT, TranslationSystem
 
 STAGE_S = 0.1
 
@@ -34,8 +35,7 @@ class SlowAsr(FakeAsr):
         self.delay, self.clock = delay, clock
 
     def transcribe(self, audio, **kw):
-        if audio is not WARMUP_AUDIO:
-            self._advance()
+        self._advance()
         return super().transcribe(audio, **kw)
 
     def _advance(self):
@@ -115,6 +115,7 @@ def system(asr, llm, tts, sink, clock=time.monotonic):
         capture_factory=capture,
         playback_sink=sink,
         clock=clock,
+        stream_factory=FakeStreams(),
     )
     return ts, vads, capture
 
