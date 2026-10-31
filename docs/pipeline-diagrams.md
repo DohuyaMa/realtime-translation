@@ -1,8 +1,10 @@
 # Повний ланцюжок перекладу — діаграми
 
-Стан на 2026-10-31 (rt-edge: гейт на рівні сегмента, whisper основний текст для LLM —
-[`live-test-2026-10-31.md`](../context/live-test-2026-10-31.md) §10). Детальний опис налаштувань —
-[`USAGE.md`](USAGE.md).
+Стан на 2026-10-31 (rt-edge: стріми rt-asr/rt-vosk, одночасний переклад
+одиницями, гейт Vosk на одиницю —
+[специфікація](superpowers/specs/2026-10-31-streaming-asr-simultaneous-translation.md),
+[`live-test-2026-10-31.md`](../context/live-test-2026-10-31.md) §10, §13).
+Детальний опис налаштувань — [`USAGE.md`](USAGE.md).
 
 ## 1. Компоненти та зв'язки
 
@@ -11,7 +13,7 @@ flowchart LR
   subgraph PC["cyborg — ПК користувача"]
     MIC["Мікрофон<br/>(parec, вибране джерело)"]
     subgraph APP["rt-app (translator-ui)"]
-      PIPE["Конвеєр<br/>VAD → ASR → LLM → TTS → відтворення"]
+      PIPE["Конвеєр<br/>стріми ASR/Vosk → одиниці → LLM → TTS → відтворення"]
       UI["Вікно + трей<br/>стан моделей, рубильник"]
     end
     subgraph LOCAL["Локальні сервіси, 127.0.0.1"]
@@ -46,57 +48,65 @@ flowchart LR
 конкретний вузол; для Vosk ще «вимкнено»). Локальні сервіси — завжди
 127.0.0.1; tailnet-адреси — лише для інших вузлів.
 
-## 2. Шлях однієї фрази
+## 2. Шлях однієї одиниці перекладу
 
 ```mermaid
 sequenceDiagram
   autonumber
-  participant M as Мікрофон (parec)
-  participant S as VAD-сегментатор
-  participant A as ASR-стадія (rt-app)
-  participant WH as rt-asr (whisper)
-  participant VK as rt-vosk
+  participant M as Мікрофон (parec, 48 кГц)
+  participant E as Edge: рівень + 16 кГц
+  participant WH as rt-asr WS (whisper, LocalAgreement-2)
+  participant VK as rt-vosk WS (Kaldi)
+  participant U as Стадія одиниць (SourceLedger)
   participant L as LLM-воркер
   participant G as Перевірка відповіді
   participant T as rt-tts (Kokoro)
   participant P as Відтворення (pacat)
 
-  M->>S: аудіо 16 кГц
-  S->>A: сегмент (кінець — пауза ≥ 700 мс,<br/>або розріз 6 с м'який / 12 с жорсткий)
-  par паралельно
-    A->>WH: аудіо + мова + prompt {{previous_text}}
-    WH-->>A: текст (rt-asr уже відкинув тишу<br/>та відомі галюцинації — лічильник)
+  M->>E: блоки аудіо
+  Note over E: нормалізація рівня (до −20 dBFS, ≤ +24 дБ, лімітер);<br/>тихо ≥ 3 с мови → «Мікрофон тихий»
+  par ті самі кадри по 100 мс в обидва стріми
+    E->>WH: PCM16
+    WH-->>U: final (зафіксовані слова з часом, лише дописуються),<br/>partial (незафіксований хвіст), endpoint (тиша ≥ 500 мс)
   and
-    A->>VK: те саме аудіо + мова
-    VK-->>A: слова + впевненість<br/>(409, якщо модель вузла іншої мови)
+    E->>VK: PCM16
+    VK-->>U: final / partial зі словами (conf, start, end)
+  end
+  Note over U: хвіст після курсора + partial — сірим в UI, не озвучується
+  U->>U: одиниця: кінець речення / endpoint /<br/>≥ 12 слів на межі клаузи (,;:) / 20 слів
+  U->>U: чекати ≤ 300 мс, доки Vosk покриє кінець одиниці<br/>(інакше лише whisper — vosk_late)
+  alt у тексті немає літер
+    U-->>U: пропуск (asr_no_words)
+  else Vosk: жодного слова ≥ 2 літер (no_word) або жодного збігу (disagree)
+    U-->>U: відкинуто до LLM (vosk_gate_dropped), ledger просто йде далі
+  else Vosk без слів 2 одиниці поспіль (≥ 3 слів whisper)
+    U-->>U: «Vosk не чує — звірка вимкнена до відновлення»,<br/>далі лише whisper, поки не повернуться слова Vosk
   end
   opt «Записувати сесію для аналізу»
-    A-->>A: seg-N.wav + рядок phrases.jsonl<br/>(whisper, Vosk + conf, agreement, гейт)
+    U-->>U: seg-N.wav + рядок phrases.jsonl
   end
-  alt у тексті немає літер
-    A-->>A: пропуск (asr_no_words)
-  else у Vosk немає жодного слова ≥ 2 літер (no_word)
-    A-->>A: відкинуто до LLM (vosk_gate_dropped)
-  else жодне слово whisper ≥ 3 літер не збіглося з Vosk (disagree)
-    A-->>A: галюцинація whisper — відкинуто до LLM<br/>(vosk_gate_disagree)
-  else речення не закінчене (немає . ! ?, або «…»)
-    A-->>A: притримати хвіст і склеїти з наступним сегментом<br/>(тиша після нього → відправити сам, без гейта)
-  end
-  Note over A: хоч один збіг — уся фраза whisper іде далі:<br/>Vosk відкидає фразу цілком, але не видаляє слів
-  A->>L: system: інструкції (whisper — основний, Vosk — підказка)<br/>user: TEXT: {{text}} / HINT: {{vosk_text}}
-  L-->>G: переклад потоком, по реченнях
+  U->>L: system: інструкції; контекст — попередні пари<br/>user: TEXT: одиниця / HINT: слова Vosk її відрізка /<br/>NEXT (do not translate): решта зафіксованого + partial
+  L-->>G: переклад (частинами: речення, довге — по клаузах ≥ 4 слів)
   alt ≤ 3 слів оригіналу
     G-->>G: дочекатися всієї відповіді
   end
-  Note over G: один INFO-рядок на фразу: whisper, Vosk (conf, agree),<br/>гейт, режим LLM, переклад
-  alt задовго (> max(8, 3 × слів)) або кирилиця
-    G-->>A: відхилено (llm_rejected, подія в журналі),<br/>у контекст не йде
+  Note over G: один INFO-рядок на одиницю: whisper, Vosk (conf, agree),<br/>гейт, режим LLM, NEXT, переклад
+  alt задовго, кирилиця або витік NEXT
+    G-->>U: відхилено (llm_rejected, подія в журналі),<br/>у контекст не йде
   else норма
-    G->>T: речення за реченням
-    T->>P: аудіо по порядку
+    G->>T: частина за частиною
+    T->>P: аудіо по порядку (тиша по краях обрізана: 50 / 150 мс)
     P->>P: вибраний вихід (віртуальний мікрофон)<br/>+ навушники, якщо увімкнено
   end
 ```
+
+Одиниці не перетинаються: що озвучено, те не виправляється і не
+повторюється (рішення власника 2/3). Затримки на одиницю — у
+`get_stats()["latency"]` (p50/p90: `commit_ms` кінець слова → фіксація,
+`llm_first_ms`, `tts_first_ms`, `ready_ms` кінець мови → звук готовий,
+`e2e_ms` кінець мови → початок відтворення) і в INFO-рядку
+`speech end -> …`; офлайн-стенд — `python -m scripts.pipeline_bench`
+(USAGE §8).
 
 TEXT (whisper) перекладається повністю; HINT (Vosk) лише виправляє
 слова, які whisper розчув неправильно, а слова HINT поза TEXT не
