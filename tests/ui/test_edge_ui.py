@@ -16,10 +16,32 @@ from src.ui.widgets.service_status_panel import (  # noqa: E402
 )
 from src.ui.widgets.settings_dialog import EndpointsDialog  # noqa: E402
 
+_WINDOWS = []
+
+
+def _window(ctl):
+    from src.ui.widgets.main_window import MainWindow
+
+    win = MainWindow(ctl)
+    _WINDOWS.append(win)
+    return win
+
 
 @pytest.fixture(scope="module")
 def app():
-    return QApplication.instance() or QApplication([])
+    qapp = QApplication.instance() or QApplication([])
+    yield qapp
+    # Close the windows (stops their status-polling threads) and collect the
+    # widgets while Qt is alive: collecting PySide wrappers at interpreter
+    # shutdown can segfault.
+    import gc
+
+    while _WINDOWS:
+        win = _WINDOWS.pop()
+        win.minimize_to_tray.setChecked(False)
+        win.close()
+    qapp.processEvents()
+    gc.collect()
 
 
 def test_services_labels():
@@ -148,13 +170,11 @@ def test_main_window_constructs(app, cfg):
     import time
     from unittest.mock import MagicMock
 
-    from src.ui.widgets.main_window import MainWindow
-
     ctl = MagicMock()
     ctl.get_input_devices.return_value = []
     ctl.get_output_devices.return_value = []
     ctl.get_status.return_value = {"running": True}
-    win = MainWindow(ctl)
+    win = _window(ctl)
     assert win.service_status_panel.get_service_names() == ["asr", "llm", "tts"]
     win._apply_ui_update({"input": 0.5, "health": {}})
     win.on_general_settings_changed(resolve_edge_settings({}, {}))
@@ -179,13 +199,11 @@ def test_status_callback_from_worker_runs_on_gui_thread(app, cfg):
     import time
     from unittest.mock import MagicMock
 
-    from src.ui.widgets.main_window import MainWindow
-
     ctl = MagicMock()
     ctl.get_input_devices.return_value = []
     ctl.get_output_devices.return_value = []
     ctl.get_status.return_value = {"running": True}
-    win = MainWindow(ctl)
+    win = _window(ctl)
     seen = []
     win.status_manager.set_status = lambda m: seen.append(
         (m, threading.current_thread() is threading.main_thread())
@@ -212,12 +230,10 @@ def test_status_callback_from_worker_runs_on_gui_thread(app, cfg):
 def test_overlapping_exclusive_tasks_dropped(app, cfg):
     from unittest.mock import MagicMock
 
-    from src.ui.widgets.main_window import MainWindow
-
     ctl = MagicMock()
     ctl.get_input_devices.return_value = []
     ctl.get_output_devices.return_value = []
-    win = MainWindow(ctl)
+    win = _window(ctl)
     win._busy = True
     assert win._run_async(lambda: None, lambda r: None) is False
 

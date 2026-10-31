@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import httpx
 from loguru import logger
@@ -39,16 +39,23 @@ def read_token(token_file: Optional[str]) -> Optional[str]:
 class Credential:
     """Token of one service endpoint (sent as ``Authorization: Token <t>``).
 
-    ``value`` comes from service discovery (Django / its cache). For the local
-    worker ``fallback_file`` is the host-local token file: a 401 re-reads it
-    once (the token rotates on every worker restart) and the endpoint is then
-    marked ``offline`` (token not from Django). The caller retries once; a
-    second 401 is an explicit auth error.
+    ``value`` comes from service discovery (Django / its cache). Worker tokens
+    rotate on every worker restart/re-registration, so after a 401 ``reload``
+    first asks ``refresh`` (a rate-limited fresh discovery) for the current
+    token; for the local worker it then falls back to ``fallback_file`` (the
+    host-local token file) and marks the endpoint ``offline``. The caller
+    retries once; a second 401 is an explicit auth error.
     """
 
-    def __init__(self, value: str = "", fallback_file: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        value: str = "",
+        fallback_file: Optional[str] = None,
+        refresh: Optional[Callable[[], Optional[str]]] = None,
+    ) -> None:
         self.value = value
         self.fallback_file = fallback_file
+        self.refresh = refresh
         self.offline = False
         if not value and fallback_file:
             self.value = read_token(fallback_file) or ""
@@ -59,6 +66,14 @@ class Credential:
 
     def reload(self) -> bool:
         """After a 401: True if a different token is now available."""
+        if self.refresh is not None:
+            old = self.value
+            fresh = self.refresh()  # may also push the new token into self
+            if fresh and fresh != old:
+                logger.warning("HTTP 401: token refreshed from service discovery")
+                self.value = fresh
+                self.offline = False
+                return True
         if not self.fallback_file:
             return False
         fresh = read_token(self.fallback_file) or ""

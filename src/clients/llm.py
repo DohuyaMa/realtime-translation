@@ -67,7 +67,12 @@ class LlmClient:
             if e.kind not in ("auth", "unreachable", "timeout", "busy"):
                 raise
             self._target.invalidate(e.kind)
-        return self._send(method, path, **kwargs)
+        try:
+            return self._send(method, path, **kwargs)
+        except ServiceError as e:
+            if e.kind == "auth":  # still rejected: let the target fail over
+                self._target.invalidate("auth")
+            raise
 
     def translate(
         self, text: str, source_lang: str, context: Sequence[tuple[str, str]] = ()

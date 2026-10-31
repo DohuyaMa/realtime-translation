@@ -71,16 +71,22 @@ def ep(host, token="t", local=False, fallback=None):
 
 @pytest.fixture
 def workers():
-    return FakeWorkers()
+    w = FakeWorkers()
+    w.created = []
+    yield w
+    for ws in w.created:  # no heartbeat thread may outlive its test
+        ws.stop()
 
 
 def sessions(workers, *eps, clock=None):
-    return WorkerSessions(
+    ws = WorkerSessions(
         list(eps),
         30,
         transport=httpx.MockTransport(workers),
         clock=clock or Clock(),
     )
+    workers.created.append(ws)
+    return ws
 
 
 def test_session_lifecycle_open_heartbeat_reopen_close(workers):
@@ -154,7 +160,8 @@ def test_local_worker_restart_uses_local_token_file(workers, tmp_path):
     workers.up["local"]["token"] = "sha256:new"  # worker restarted
     assert client.translate("x", "pl") == "from-local"
     assert ws.snapshot()["offline"] is True
-    workers.up["local"]["token"] = "sha256:other"  # file stale -> explicit auth error
+    workers.up["local"]["token"] = "sha256:other"  # file stale: no valid token
     with pytest.raises(ServiceError) as e:
         client.translate("x", "pl")
-    assert e.value.kind == "auth"
+    # failed over; no other worker -> explicit error, no session
+    assert e.value.kind == "unreachable" and ws.snapshot()["active"] is None

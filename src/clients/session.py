@@ -258,9 +258,9 @@ class WorkerSessions:
                 return
             if kind == "auth":
                 url = self.current_url()
-                if url is not None:
-                    self.endpoints[url].credential.reload()
-                return
+                if url is not None and self.endpoints[url].credential.reload():
+                    return  # retry on the same worker with the new token
+                logger.warning("llm: no valid token for {}, failing over", url)
             self._failover(kind)
 
     def snapshot(self) -> dict:

@@ -141,3 +141,101 @@ def test_offline_local_worker_uses_local_token_file(tmp_path):
 
 def test_service_entry_key():
     assert ServiceEntry("asr", "n", "u", "t").key == "asr:n"
+
+
+class Clock:
+    def __init__(self):
+        self.t = 0.0
+
+    def __call__(self):
+        return self.t
+
+
+def rotating_django(tokens):
+    """Django whose cyborg llm token changes on every call."""
+    calls = []
+
+    def handle(req):
+        calls.append(1)
+        body = json.loads(json.dumps(PAYLOAD))
+        body["services"][1]["token"] = tokens[min(len(calls), len(tokens)) - 1]
+        return httpx.Response(200, json=body)
+
+    return handle, calls
+
+
+def test_401_triggers_rate_limited_rediscovery_and_retry(tmp_path):
+    from src.clients import ServiceClient
+
+    handle, calls = rotating_django(["t-old", "t-new", "t-newer"])
+    tok = tmp_path / "drf"
+    tok.write_text("drf\n")
+    s = EdgeSettings(
+        django_urls=("http://d1",),
+        django_token_file=str(tok),
+        local=LocalUrls(asr=None, llm=None, tts=None),
+    )
+    d = discover(
+        s, cache_path=tmp_path / "c.json", transport=httpx.MockTransport(handle)
+    )
+    clock = Clock()
+    d.clock, d._last = clock, 0.0
+    (ep,) = endpoints("llm", s, d, hostname="sktop")
+    assert ep.credential.value == "t-old"
+    valid = {"t": "t-new"}
+    seen = []
+
+    def worker(req):
+        seen.append(req.headers["authorization"])
+        good = req.headers["authorization"] == f"Token {valid['t']}"
+        return httpx.Response(200 if good else 401, json={})
+
+    c = ServiceClient(
+        ep.url, credential=ep.credential, transport=httpx.MockTransport(worker)
+    )
+    clock.t = 31.0
+    assert c._request("GET", "/x").status_code == 200
+    assert seen == ["Token t-old", "Token t-new"] and len(calls) == 2
+    valid["t"] = "t-newer"  # rotated again within 30 s: no rediscovery
+    clock.t = 40.0
+    seen.clear()
+    with pytest.raises(Exception) as e:
+        c._request("GET", "/x")
+    assert getattr(e.value, "kind", None) == "auth" and len(calls) == 2
+    assert seen == ["Token t-new"]
+
+
+def test_periodic_refresh_pushes_new_tokens(tmp_path):
+    handle, calls = rotating_django(["t-old", "t-new"])
+    tok = tmp_path / "drf"
+    tok.write_text("drf\n")
+    s = EdgeSettings(
+        django_urls=("http://d1",),
+        django_token_file=str(tok),
+        local=LocalUrls(asr=None, llm=None, tts=None),
+    )
+    d = discover(
+        s, cache_path=tmp_path / "c.json", transport=httpx.MockTransport(handle)
+    )
+    (ep,) = endpoints("llm", s, d, hostname="sktop")
+    d.min_refresh_s = 0.0
+    d.start_periodic(0.02)
+    try:
+        import time
+
+        deadline = time.monotonic() + 3
+        while ep.credential.value != "t-new" and time.monotonic() < deadline:
+            time.sleep(0.01)
+    finally:
+        d.stop_periodic()
+    assert ep.credential.value == "t-new"
+
+
+def test_failed_refresh_keeps_current_list(tmp_path):
+    d = Directory(
+        [ServiceEntry("llm", "n", "u", "t")],
+        "django:x",
+        fetch=lambda: Directory([], "cache"),
+        min_refresh_s=0.0,
+    )
+    assert d.refresh() is False and d.services[0].token == "t"

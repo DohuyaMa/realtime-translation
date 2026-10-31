@@ -15,9 +15,12 @@ from __future__ import annotations
 import json
 import os
 import socket
+import threading
+import time
+import weakref
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional, Sequence
+from typing import Any, Callable, Optional, Sequence
 
 import httpx
 from loguru import logger
@@ -26,6 +29,7 @@ from ..core.runtime import KINDS, EdgeSettings
 from .base import Credential, read_token
 
 PATH = "/api/llm/app-services/"
+REFRESH_EVERY_S = 300.0
 
 
 @dataclass(frozen=True)
@@ -54,12 +58,95 @@ class Endpoint:
 
 @dataclass
 class Directory:
-    """Discovered services plus where the list came from."""
+    """Discovered services plus where the list came from.
+
+    ``fetch`` (set by ``discover``) re-runs discovery: on a 401 via
+    ``token_for`` (at most once per ``min_refresh_s``) and every
+    ``REFRESH_EVERY_S`` in the background; fresh tokens are pushed into the
+    credentials handed out by ``endpoints``.
+    """
 
     services: list[ServiceEntry] = field(default_factory=list)
     source: str = "none"  # "django:<url>" | "cache" | "none"
     instance: Optional[str] = None
     errors: list[str] = field(default_factory=list)
+    fetch: Optional[Callable[[], "Directory"]] = field(default=None, repr=False)
+    min_refresh_s: float = 30.0
+    clock: Callable[[], float] = field(default=time.monotonic, repr=False)
+
+    def __post_init__(self) -> None:
+        self._last = self.clock()
+        self._lock = threading.Lock()
+        self._creds: dict[tuple[str, str], list[Credential]] = {}
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+
+    def _token(self, kind: str, node: str) -> Optional[str]:
+        e = next((e for e in self.services if e.kind == kind and e.node == node), None)
+        return e.token if e else None
+
+    def register(self, kind: str, node: str, cred: Credential) -> Credential:
+        ref = weakref.ref(self)  # no Directory <-> Credential reference cycle
+
+        def refresh() -> Optional[str]:
+            directory = ref()
+            return directory.token_for(kind, node) if directory else None
+
+        cred.refresh = refresh
+        with self._lock:
+            self._creds.setdefault((kind, node), []).append(cred)
+        return cred
+
+    def refresh(self) -> bool:
+        """Re-run discovery (rate-limited); True if Django answered."""
+        if self.fetch is None:
+            return False
+        with self._lock:
+            if self.clock() - self._last < self.min_refresh_s:
+                return False
+            self._last = self.clock()
+        new = self.fetch()
+        if not new.source.startswith("django:"):
+            return False  # keep the current list; failures are logged
+        with self._lock:
+            self.services, self.source = new.services, new.source
+            self.instance, self.errors = new.instance, new.errors
+            creds = {k: list(v) for k, v in self._creds.items()}
+        for (kind, node), items in creds.items():
+            token = self._token(kind, node)
+            for cred in items:
+                if token and token != cred.value:
+                    logger.info("discovery: new token for {}:{}", kind, node)
+                    cred.value, cred.offline = token, False
+        return True
+
+    def token_for(self, kind: str, node: str) -> Optional[str]:
+        self.refresh()
+        return self._token(kind, node)
+
+    def start_periodic(self, interval_s: float = 0.0) -> None:
+        if self.fetch is None or self._thread is not None:
+            return
+        interval = interval_s or REFRESH_EVERY_S
+        self._stop = threading.Event()
+
+        def run(stop: threading.Event) -> None:
+            while not stop.wait(interval):
+                try:
+                    self.refresh()
+                except Exception as e:  # keep refreshing
+                    logger.warning("periodic discovery failed: {}", e)
+
+        self._thread = threading.Thread(
+            target=run, args=(self._stop,), name="discovery", daemon=True
+        )
+        self._thread.start()
+
+    def stop_periodic(self) -> None:
+        self._stop.set()
+        t, self._thread = self._thread, None
+        if t is not None and t is not threading.current_thread():
+            t.join(timeout=1.0)
 
 
 def default_cache_path() -> Path:
@@ -110,6 +197,18 @@ def discover(
 ) -> Directory:
     """Ask each Django in order; fall back to the on-disk cache."""
     cache_path = cache_path or default_cache_path()
+    d = _discover(settings, cache_path, transport, timeout_s)
+    if settings.django_urls:  # nothing to refresh without Django
+        d.fetch = lambda: _discover(settings, cache_path, transport, timeout_s)
+    return d
+
+
+def _discover(
+    settings: EdgeSettings,
+    cache_path: Path,
+    transport: Optional[httpx.BaseTransport],
+    timeout_s: float,
+) -> Directory:
     errors: list[str] = []
     if settings.django_urls:
         token = read_token(settings.django_token_file) or ""
@@ -174,7 +273,9 @@ def endpoints(
                 kind,
                 host,
                 local_url,
-                Credential(own.token if own else "", fallback),
+                directory.register(
+                    kind, host, Credential(own.token if own else "", fallback)
+                ),
                 local=True,
             )
         )
@@ -183,5 +284,6 @@ def endpoints(
             continue
         if not is_allowed(e, settings.allowed_services):
             continue
-        out.append(Endpoint(kind, e.node, e.url, Credential(e.token)))
+        cred = directory.register(kind, e.node, Credential(e.token))
+        out.append(Endpoint(kind, e.node, e.url, cred))
     return out

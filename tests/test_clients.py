@@ -126,7 +126,7 @@ def test_llm_401_invalidates_auth_and_retries_once():
 
     with pytest.raises(ServiceError) as e:
         llm(always_401, t2).translate("a", "ru")
-    assert e.value.kind == "auth" and t2.calls == ["auth"] and len(hits) == 2
+    assert e.value.kind == "auth" and t2.calls == ["auth", "auth"] and len(hits) == 2
 
 
 def test_llm_503_is_busy_and_unreachable_retries_on_new_target():

@@ -73,7 +73,7 @@ def test_non_retryable_error_propagates_without_retry():
 
     def fn(url):
         calls.append(url)
-        raise ServiceError("asr", "auth", status_code=401)
+        raise ServiceError("asr", "http", status_code=400)
 
     with pytest.raises(ServiceError):
         p.call(fn)
@@ -149,3 +149,14 @@ def test_build_pools_local_first_then_allowed_cluster_services():
     bare = build_pools(EdgeSettings(), Directory())
     assert bare.tts is None and bare.asr.urls == ["http://127.0.0.1:8091"]
     bare.close()
+
+
+def test_auth_error_fails_over_to_next_node():
+    p = make()
+
+    def fn(url):
+        if url == "a":
+            raise ServiceError("asr", "auth", status_code=401)
+        return url
+
+    assert p.call(fn) == "b"

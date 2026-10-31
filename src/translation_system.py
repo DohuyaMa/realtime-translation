@@ -164,6 +164,7 @@ class TranslationSystem:
 
     def _build_backends(self) -> None:
         self._directory = self._directory_factory(self.settings)
+        self._directory.start_periodic()
         self._pools = self._pools_factory(self.settings, self._directory)
         self._llm_target = self._llm_target_factory(self.settings, self._directory)
         self._llm = (
@@ -173,6 +174,7 @@ class TranslationSystem:
         )
 
     def _close_backends(self) -> None:
+        self._directory.stop_periodic()
         for obj in (self._llm, self._pools):
             close = getattr(obj, "close", None)
             if close:
