@@ -167,7 +167,11 @@ class AsrStreamSession:
                 probs = self._vad.probs(tail[: n * WINDOW].reshape(n, WINDOW))
                 for k, prob in enumerate(probs):
                     endpoint |= self._vad_window(float(prob), pos + (k + 1) * WINDOW)
-            if not self._speech_in_buf:  # idle: keep only the pre-roll
+            if not self._speech_in_buf and not self._in_speech:
+                # idle: keep only the pre-roll. Not while a possible speech
+                # start is being confirmed (min_speech): trimming then cut
+                # the first syllable of every utterance after a pause
+                # (bench 2026-10-31: «Перший» -> «Ший», «Порада» -> «Розда»)
                 self._trim_to(self._received - len(self._vad_tail) - self._preroll)
             return endpoint
 

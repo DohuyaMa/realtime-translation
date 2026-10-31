@@ -16,10 +16,31 @@ SOURCE_LANGUAGES = ("pl", "uk", "ru")
 WARM_UP_TIMEOUT_S = 120.0
 _THINK = re.compile(r"(?s)<think>.*?</think>")
 _SENTENCE = re.compile(r"(?s)(.*?[.!?…]+[\"')\]]*)(\s+|$)")
+_CLAUSE = re.compile(r"[,;:]+[\"')\]]*(?=\s)")
+# a clause mark ends a TTS piece once the piece has this many words: the
+# first audio of a long translation is ready after one clause, not after
+# the whole sentence (Kokoro takes ~0.2 s per second of audio on CPU)
+PIECE_CLAUSE_WORDS = 4
 
 
-def _sentences(deltas: Iterable[str]) -> Iterator[str]:
-    """Complete sentences out of streamed text deltas (``<think>`` dropped)."""
+def _cut(rest: str) -> Optional[tuple[str, int]]:
+    """The first complete piece of ``rest`` and the chars it consumes: up
+    to a sentence end, or up to a clause mark after >= PIECE_CLAUSE_WORDS
+    words; None = not complete yet (needs whitespace after the mark)."""
+    m = _SENTENCE.match(rest)
+    stop = m.end(1) if m and m.group(2) else len(rest)
+    for c in _CLAUSE.finditer(rest, 0, stop):
+        if len(rest[: c.end()].split()) >= PIECE_CLAUSE_WORDS:
+            ws = re.match(r"\s+", rest[c.end() :])
+            return rest[: c.end()], c.end() + (ws.end() if ws else 0)
+    if m and m.group(2):
+        return m.group(1), m.end()
+    return None
+
+
+def _pieces(deltas: Iterable[str]) -> Iterator[str]:
+    """TTS pieces (sentences, long ones cut at clauses) out of streamed text
+    deltas (``<think>`` dropped)."""
     buf = ""
     done = 0  # chars of the visible text already emitted
     for delta in deltas:
@@ -27,21 +48,26 @@ def _sentences(deltas: Iterable[str]) -> Iterator[str]:
         visible = _THINK.sub("", buf)
         if "<think>" in visible:  # reasoning still open: hold it back
             visible = visible[: visible.index("<think>")]
-        rest = visible[done:]
         while True:
-            m = _SENTENCE.match(rest)
-            if not m or not m.group(2):  # need whitespace after the end mark
+            cut = _cut(visible[done:])
+            if cut is None:
                 break
-            sentence = m.group(1).strip()
-            done += m.end()
-            rest = visible[done:]
-            if sentence:
-                yield sentence
+            piece, used = cut
+            done += used
+            if piece.strip():
+                yield piece.strip()
     tail = _THINK.sub("", buf)[done:].strip()
     if "<think>" in tail:
         tail = tail[: tail.index("<think>")].strip()
-    if tail:
-        yield tail
+    while tail:  # the last piece needs no whitespace after its mark
+        cut = _cut(tail + " ")
+        if cut is None:
+            yield tail
+            return
+        piece, used = cut
+        if piece.strip():
+            yield piece.strip()
+        tail = (tail + " ")[used:].strip()
 
 
 class LlmTarget(Protocol):
@@ -123,7 +149,7 @@ class LlmClient:
         check: Optional[Aligned] = None,
         next_text: str = "",
     ) -> Iterator[str]:
-        """Translated sentences as soon as each one is complete.
+        """Translated TTS pieces (``_pieces``) as soon as each one is complete.
 
         One streamed call per chunk of <= words_per_request words (in order);
         earlier chunks of this phrase become context of the next ones.
@@ -229,7 +255,7 @@ class LlmClient:
             else:  # server answered without streaming: one JSON body
                 resp.read()
                 deltas = iter([self._message_content(json_body(self.service, resp))])
-            yield from _sentences(deltas)
+            yield from _pieces(deltas)
         except httpx.TimeoutException as e:
             raise ServiceError(self.service, "timeout", str(e)) from e
         except httpx.TransportError as e:

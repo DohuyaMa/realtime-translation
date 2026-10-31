@@ -66,6 +66,7 @@ import numpy as np
 from loguru import logger
 
 from .audio.resample import Downsampler, rms
+from .audio.trim import trim_silence
 from .clients import (
     LlmClient,
     LlmTarget,
@@ -406,6 +407,9 @@ class TranslationSystem:
         }
         self._backpressure: Dict[str, int] = {"llm": 0, "tts": 0, "playback": 0}
         self._playback_short = 0
+        # seconds of translated audio queued for playback (get_stats)
+        self._backlog_lock = threading.Lock()
+        self._backlog_s = 0.0
         self._asr_no_words = 0
         # Vosk cross-check (TASK-SYS-12)
         self._vosk_state: Dict[str, Any] = {"mode": "off", "error": None}
@@ -1387,7 +1391,11 @@ class TranslationSystem:
                 unit.played = True
                 unit.e2e_ms = _ms(self._clock() - unit.t_end)
                 self._record_timing(unit)
-            self._play(unit, audio, sr)
+            try:
+                self._play(unit, audio, sr)
+            finally:
+                with self._backlog_lock:
+                    self._backlog_s = max(0.0, self._backlog_s - len(audio) / sr)
 
     def _play(self, unit: Optional[_Unit], audio: np.ndarray, sr: int) -> None:
         """Play one piece; each piece is logged with its length, and a sink
@@ -1557,7 +1565,8 @@ class TranslationSystem:
         )
 
     def _synthesize(self, item: _Sentence) -> None:
-        """TTS stage: one sentence at a time, in order, on to playback."""
+        """TTS stage: one piece at a time, in order, edge silence trimmed,
+        on to playback."""
         tts = self.settings.tts
         try:
             audio, sr = self._pools.tts.call(
@@ -1566,11 +1575,14 @@ class TranslationSystem:
         except ServiceError as e:
             self._service_error(e)
             return
+        audio = trim_silence(audio, int(sr))
         unit = item.unit
         if unit.tts_first_ms is None:
             now = self._clock()
             unit.tts_first_ms = _ms(now - item.t_ready)
             unit.ready_ms = _ms(now - unit.t_end)
+        with self._backlog_lock:
+            self._backlog_s += len(audio) / float(sr)
         self._put(self._playback_queue, (unit, audio, int(sr)), "playback")
 
     # -- stats --------------------------------------------------------------
@@ -1629,6 +1641,7 @@ class TranslationSystem:
                 "playback": self._playback_queue.qsize(),
             },
             "backpressure": dict(self._backpressure),
+            "playback_backlog_s": round(self._backlog_s, 1),
             "asr_no_words": self._asr_no_words,
             "playback_short": self._playback_short,
             "warmup": {k: dict(v) for k, v in self._warmup.items()},

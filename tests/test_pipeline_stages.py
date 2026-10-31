@@ -10,7 +10,7 @@ import pytest
 import numpy as np
 
 from src.clients.asr import AsrResult
-from src.clients.llm import LlmClient, _sentences
+from src.clients.llm import LlmClient, _pieces
 from src.core.runtime import LlmSettings
 from test_translation_system import (
     FakeAsr,
@@ -220,11 +220,23 @@ def test_full_stage_queue_is_backpressure_not_drop():
     assert {"status": "backpressure", "stage": "tts"} in events
 
 
-def test_sentences_from_stream_deltas():
+def test_pieces_from_stream_deltas():
     deltas = ["Hello wor", "ld. How", " are you? Fi", "ne"]
-    assert list(_sentences(deltas)) == ["Hello world.", "How are you?", "Fine"]
-    assert list(_sentences(["<think>x. y.</think>A. ", "B"])) == ["A.", "B"]
-    assert list(_sentences(["Dr. No"])) == ["Dr.", "No"]  # simple splitter
+    assert list(_pieces(deltas)) == ["Hello world.", "How are you?", "Fine"]
+    assert list(_pieces(["<think>x. y.</think>A. ", "B"])) == ["A.", "B"]
+    assert list(_pieces(["Dr. No"])) == ["Dr.", "No"]  # simple splitter
+
+
+def test_pieces_cut_long_sentences_at_clauses():
+    text = "Yes, so you can easily view full tab names, manage them, and free up space."
+    assert list(_pieces([text])) == [
+        "Yes, so you can easily view full tab names,",
+        "manage them, and free up space.",
+    ]
+    # streamed: a clause mark waits for the whitespace after it; 39,5 is a number
+    deltas = ["It was 39,5 percent", ",", " then", " more."]
+    assert list(_pieces(deltas)) == ["It was 39,5 percent,", "then more."]
+    assert list(_pieces(["One, two, three"])) == ["One, two, three"]
 
 
 def test_llm_client_streams_sse_sentences():

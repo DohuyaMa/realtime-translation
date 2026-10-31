@@ -119,6 +119,19 @@ def test_short_click_is_not_speech_and_idle_buffer_keeps_only_preroll():
     assert b.lengths == []
 
 
+def test_utterance_onset_keeps_the_preroll_before_speech_start():
+    """The audio while speech is being confirmed (min_speech) stays in the
+    buffer: whisper gets the utterance from preroll before its start."""
+    b = Scripted(["x"])
+    s = session(b)
+    s.feed(silence(2.0))
+    for _ in range(10):  # 100 ms frames, like the edge sends them
+        s.feed(speech(0.1))
+    s.step()
+    # 1 s of speech + the pre-roll (200 ms) before the detected start
+    assert b.lengths and b.lengths[0] >= int(1.15 * SR)
+
+
 def test_hypothesis_filters_hallucination_repetition_and_echo():
     bad = SegmentStats(no_speech_prob=0.1, avg_logprob=-0.2, compression_ratio=3.0)
     b = Scripted(
