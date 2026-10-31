@@ -65,6 +65,7 @@ from typing import Any, Callable, Deque, Dict, List, Optional, Sequence
 import numpy as np
 from loguru import logger
 
+from .audio.level import LevelNormalizer
 from .audio.resample import Downsampler, rms
 from .audio.trim import trim_silence
 from .clients import (
@@ -119,6 +120,12 @@ PLAYBACK_SHORT_S = 0.3
 FED_TIMES_MAX = 4000
 # latency samples kept for get_stats()["latency"] p50/p90
 LATENCY_KEEP = 500
+# Vosk is "deaf" (no words) after this many consecutive whisper units of
+# >= VOSK_DEAF_WORDS words with an empty HINT (live 2026-10-31 §13)
+VOSK_DEAF_UNITS = 2
+VOSK_DEAF_WORDS = 3
+DEAF = "deaf"  # _vosk_state mode
+VOSK_DEAF_WHY = f"без слів Vosk у {VOSK_DEAF_UNITS} одиницях поспіль"
 
 # LlmSettings fields that only shape the prompt/request; everything else
 # changes where/how the LLM is reached and requires a restart.
@@ -355,6 +362,8 @@ class TranslationSystem:
         # rt-asr / rt-vosk WS streams of the running pipeline (kind -> client)
         self._streams: Dict[str, Any] = {}
         self._downsampler = Downsampler(CAPTURE_RATE)
+        self._normalizer = LevelNormalizer(CAPTURE_RATE)
+        self._mic_quiet = False
         self._directory_factory = directory_factory
         self._pools_factory = pools_factory
         self._llm_target_factory = llm_target_factory
@@ -410,6 +419,7 @@ class TranslationSystem:
         # seconds of translated audio queued for playback (get_stats)
         self._backlog_lock = threading.Lock()
         self._backlog_s = 0.0
+        self._vosk_silent_units = 0  # consecutive units with an empty HINT
         self._asr_no_words = 0
         # Vosk cross-check (TASK-SYS-12)
         self._vosk_state: Dict[str, Any] = {"mode": "off", "error": None}
@@ -819,16 +829,40 @@ class TranslationSystem:
                 break
 
     def _feed(self, block: np.ndarray) -> None:
-        """48 kHz block -> 16 kHz PCM16 into every stream; the signal level
-        for the UI is its RMS."""
+        """48 kHz block -> level normalization -> 16 kHz PCM16 into every
+        stream; the signal level for the UI is the raw block's RMS."""
         self._audio_level_input = min(rms(block) * 5.0, 1.0)
-        pcm = self._downsampler(block)
+        pcm = self._downsampler(self._normalizer(block))
+        if self._normalizer.quiet != self._mic_quiet:
+            self._mic_level_changed()
         for stream in list(self._streams.values()):
             stream.feed(pcm)
         with self._fed_lock:
             self._fed_samples += len(pcm)
             self._fed_s.append(self._fed_samples / ASR_RATE)
             self._fed_at.append(self._clock())
+
+    def _mic_level_changed(self) -> None:
+        """The raw speech level stays low (or is back up): a warning in the
+        UI and the log with the measured dBFS - the gain hides a quiet
+        microphone from the streams but Vosk still hears worse."""
+        n = self._normalizer
+        self._mic_quiet = n.quiet
+        level = round(n.speech_db or 0.0, 1)
+        if n.quiet:
+            logger.warning(
+                "microphone is quiet: speech {} dBFS, gain +{:.1f} dB", level, n.gain_db
+            )
+        else:
+            logger.info("microphone level back to normal: speech {} dBFS", level)
+        self._emit(
+            {
+                "status": "mic_level",
+                "quiet": n.quiet,
+                "dbfs": level,
+                "gain_db": round(n.gain_db, 1),
+            }
+        )
 
     def _wall(self, t: float) -> float:
         """clock() when stream second ``t`` was fed (now if not yet)."""
@@ -851,6 +885,9 @@ class TranslationSystem:
         """Open the WS streams (their warm-up); audio fed before ``ready``
         waits in each stream's ring buffer."""
         self._downsampler = Downsampler(CAPTURE_RATE)
+        self._normalizer = LevelNormalizer(CAPTURE_RATE)
+        self._mic_quiet = False
+        self._vosk_silent_units = 0
         lang = self._language()
         kinds: List[tuple] = [("asr", self._pools.asr, self._stream_prompt())]
         if self._mode == "translate" and self._vosk_state["mode"] == "on":
@@ -962,6 +999,9 @@ class TranslationSystem:
             self._vosk.on_message(msg)
             if t == "final":
                 self._check_vosk_language()
+            if self._vosk_state["mode"] == DEAF and msg.get("words"):
+                self._vosk_silent_units = 0
+                self._set_vosk_state("on", None)
         elif t == "ready":
             if self._vosk_state["mode"] == "unavailable":
                 self._set_vosk_state("on", None)
@@ -1000,6 +1040,21 @@ class TranslationSystem:
 
     def _vosk_active(self) -> bool:
         return "vosk" in self._streams and self._vosk_state["mode"] == "on"
+
+    def _vosk_heard(self, unit: _Unit, hint: List[Word]) -> bool:
+        """False = Vosk is deaf: it gave no words for VOSK_DEAF_UNITS
+        whisper units of >= VOSK_DEAF_WORDS words in a row (a quiet
+        microphone, live 2026-10-31 §13). The check is then off - the unit
+        and the next ones pass whisper-only - until Vosk words come back
+        (``_apply_vosk``)."""
+        if hint or len(unit.source.words) < VOSK_DEAF_WORDS:
+            self._vosk_silent_units = 0
+            return True
+        self._vosk_silent_units += 1
+        if self._vosk_silent_units < VOSK_DEAF_UNITS:
+            return True
+        self._set_vosk_state(DEAF, VOSK_DEAF_WHY)
+        return False
 
     def _dispatch(self) -> None:
         """Units in order: each waits <= VOSK_WAIT_S for Vosk to cover its
@@ -1052,8 +1107,14 @@ class TranslationSystem:
             # Kaldi's partial lags ~1 s: Vosk words already in the span are
             # used as the HINT even when its end is not covered yet
             hint = partial
+            if not self._vosk_heard(unit, hint):
+                hint = None
+                self._vosk_whisper_only += 1
         elif vosk and not self._draining:
             self._vosk_late += 1
+            if self._vosk.covered < unit.source.t0:
+                # no Vosk word since before the unit began: deaf, not late
+                self._vosk_heard(unit, [])
             logger.info(
                 "unit #{}: vosk covered {:.2f} s < end {:.2f} s after {} ms"
                 " - whisper-only",
@@ -1064,6 +1125,9 @@ class TranslationSystem:
             )
         elif vosk:  # stopping: Vosk sent all it had
             hint = self._vosk.hint(unit.source.t0, unit.source.t1)
+            if not self._vosk_heard(unit, hint):
+                hint = None
+                self._vosk_whisper_only += 1
         elif self.settings.use.vosk != OFF:
             self._vosk_whisper_only += 1
         self._vosk.forget_before(unit.source.t0)
@@ -1642,6 +1706,15 @@ class TranslationSystem:
             },
             "backpressure": dict(self._backpressure),
             "playback_backlog_s": round(self._backlog_s, 1),
+            "mic": {
+                "quiet": self._normalizer.quiet,
+                "dbfs": (
+                    None
+                    if self._normalizer.speech_db is None
+                    else round(self._normalizer.speech_db, 1)
+                ),
+                "gain_db": round(self._normalizer.gain_db, 1),
+            },
             "asr_no_words": self._asr_no_words,
             "playback_short": self._playback_short,
             "warmup": {k: dict(v) for k, v in self._warmup.items()},

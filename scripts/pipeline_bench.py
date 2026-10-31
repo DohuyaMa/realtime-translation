@@ -3,7 +3,7 @@ units -> LLM -> TTS -> playback) with the real services, without an audio
 device (spec 2026-10-31 §5).
 
     RT_API_TOKEN=... RT_LLM_TOKEN=... python -m scripts.pipeline_bench talk.wav \
-        --language uk [--vosk ''] [--log units.log]
+        --language uk [--vosk ''] [--log units.log] [--gain-db -20]
 
 The WAV (mono 16-bit, 48 kHz or any multiple of 16 kHz) is "captured" in
 1024-sample blocks at real-time pace; playback is a sink that waits the
@@ -33,13 +33,13 @@ from src.translation_system import BLOCKSIZE, TranslationSystem
 class WavCapture:
     """``capture_factory``: plays the WAV into the pipeline at real time."""
 
-    def __init__(self, path: str) -> None:
+    def __init__(self, path: str, gain_db: float = 0.0) -> None:
         with wave.open(path, "rb") as w:
             self.rate = w.getframerate()
             data = w.readframes(w.getnframes())
             channels = w.getnchannels()
         pcm = np.frombuffer(data, dtype="<i2").reshape(-1, channels)[:, 0]
-        self.audio = pcm.astype(np.float32) / 32768.0
+        self.audio = pcm.astype(np.float32) / 32768.0 * 10.0 ** (gain_db / 20.0)
         self.done = threading.Event()
 
     def __call__(self, on_block: Callable[[np.ndarray], None]) -> "WavCapture":
@@ -86,6 +86,12 @@ def main() -> None:
     ap.add_argument("--llm", default="http://127.0.0.1:8080")
     ap.add_argument("--model", default=LlmSettings().model)
     ap.add_argument("--log", default=None, help="INFO log file (units, timing)")
+    ap.add_argument(
+        "--gain-db",
+        type=float,
+        default=0.0,
+        help="scale the WAV first, e.g. -20 = a quiet microphone",
+    )
     args = ap.parse_args()
 
     logger.remove()
@@ -116,7 +122,7 @@ def main() -> None:
             vosk=pool("vosk", args.vosk, f.vosk) if args.vosk else None,
         )
 
-    capture = WavCapture(args.wav)
+    capture = WavCapture(args.wav, args.gain_db)
     played = []
 
     def sink(audio: np.ndarray, sr: int) -> None:
@@ -157,6 +163,8 @@ def main() -> None:
         "asr_no_words",
         "pipeline_errors",
         "backpressure",
+        "playback_backlog_s",
+        "mic",
     )
     print({k: stats[k] for k in keys})
 

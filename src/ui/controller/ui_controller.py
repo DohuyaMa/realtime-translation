@@ -67,10 +67,22 @@ def describe_pipeline_event(event: Dict) -> Optional[Tuple[str, str]]:
                 f"Прогрів завершено за {event.get('ms')} мс, не вдався: {failed}"
             )
         return "INFO", f"Усе прогріто за {event.get('ms')} мс від старту"
+    if status == "mic_level":
+        if event.get("quiet"):
+            return "WARN", (
+                f"Мікрофон тихий — підніміть гучність входу (мова"
+                f" {event.get('dbfs')} dBFS, підсилення +{event.get('gain_db')} дБ)"
+            )
+        return "INFO", f"Рівень мікрофона в нормі ({event.get('dbfs')} dBFS)"
     if status == "vosk_state":
         v = event.get("vosk") or {}
         if v.get("mode") == "on":
             return "INFO", "Звірка Vosk знову працює"
+        if v.get("mode") == "deaf":
+            return "WARN", (
+                f"Vosk не чує — звірка вимкнена до відновлення ({v.get('error')}):"
+                " переклад лише з whisper"
+            )
         return "WARN", (
             f"Vosk недоступний ({v.get('error') or '?'}): переклад лише з whisper"
         )

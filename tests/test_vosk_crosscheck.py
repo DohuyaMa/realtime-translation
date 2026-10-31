@@ -314,6 +314,43 @@ def test_vosk_late_is_whisper_only_and_counted():
     assert stats["vosk_late"] == 1 and stats["vosk"]["mode"] == "on"
 
 
+def test_deaf_vosk_turns_the_check_off_until_words_return():
+    """§13: a quiet microphone - Vosk hears nothing while whisper does; the
+    first silent unit is still gated, the second turns the check off (the
+    unit passes whisper-only), Vosk words switch it back on."""
+    ts, streams, llm, events = system()
+    assert ts.start()
+    try:
+        t = speak(streams, "Давай спробуємо щось перевести.", None)
+        # Vosk heard noise later on: covers the span, but no word in it
+        streams["vosk"].emit(vosk_final("а", t + 5.0, t + 5.2))
+        t = speak(streams, "Знову нічого не чути вслух.", None, t)
+        t = speak(streams, "І ще одна фраза тут.", None, t)
+        assert wait_for(lambda: len(llm.calls) == 2)
+        mid = ts.get_stats()
+        streams["vosk"].emit(vosk_final("так", t + 1.0, t + 1.3))
+        speak(streams, "Це дуже добре.", "це дуже добре", t + 6.0)
+        assert wait_for(lambda: len(llm.calls) == 3)
+        stats = ts.get_stats()
+    finally:
+        ts.stop()
+    assert mid["vosk"]["mode"] == "deaf"
+    assert llm.calls[0] == "Знову нічого не чути вслух."  # 1st: no_word drop
+    assert llm.checks == [None, None, "це дуже добре"]
+    assert stats["vosk"]["mode"] == "on"
+    states = [e["vosk"]["mode"] for e in events if e.get("status") == "vosk_state"]
+    assert states == ["deaf", "on"]
+
+
+def test_deaf_vosk_is_described_for_the_log():
+    from src.ui.controller.ui_controller import describe_pipeline_event
+
+    level, msg = describe_pipeline_event(
+        {"status": "vosk_state", "vosk": {"mode": "deaf", "error": "x"}}
+    )
+    assert level == "WARN" and msg.startswith("Vosk не чує")
+
+
 def test_unit_hint_is_cut_from_one_vosk_final_by_time():
     ts, streams, llm, _ = system()
     assert ts.start()
