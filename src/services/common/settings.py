@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import os
 from dataclasses import dataclass
 from typing import (
@@ -14,9 +15,10 @@ from typing import (
     Sequence,
 )
 
-from .env import env_choice, env_int, env_str
+from .env import SettingsError, env_choice, env_int, env_str
 
 DEFAULT_PORTS = {"rt-asr": 8091, "rt-tts": 8093}
+DEFAULT_LISTEN_ADDRESSES = ("127.0.0.1",)
 DEVICES = ("cpu", "cuda", "rocm")
 LOG_LEVELS = ("trace", "debug", "info", "warning", "error", "critical")
 
@@ -36,7 +38,7 @@ def render_env_value(value: object) -> str:
 class BaseSettings:
     service: str
     backend: str
-    host: str
+    listen_addresses: tuple[str, ...]
     port: int
     device: str
     model: str
@@ -52,7 +54,7 @@ class BaseSettings:
     # subclasses set BACKEND_ENV (e.g. "RT_ASR_BACKEND"). Always read the full
     # mapping through env_keys().
     ENV_KEYS: ClassVar[Mapping[str, str]] = {
-        "host": "RT_HOST",
+        "listen_addresses": "RT_LISTEN_ADDRESSES",
         "port": "RT_PORT",
         "device": "RT_DEVICE",
         "model": "RT_MODEL",
@@ -102,6 +104,28 @@ class BaseSettings:
         return "cuda" if self.is_gpu else "cpu"
 
 
+def parse_listen_addresses(key: str, raw: Optional[str]) -> tuple[str, ...]:
+    """Comma list of IP literals (one listening socket each); default loopback."""
+    if raw is None:
+        return DEFAULT_LISTEN_ADDRESSES
+    out: list[str] = []
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            addr = str(ipaddress.ip_address(part))
+        except ValueError as exc:
+            raise SettingsError(
+                f"{key} entries must be IP addresses, got {part!r}"
+            ) from exc
+        if addr not in out:
+            out.append(addr)
+    if not out:
+        raise SettingsError(f"{key} must list at least one address")
+    return tuple(out)
+
+
 def base_from_env(
     env: Mapping[str, str],
     *,
@@ -121,7 +145,9 @@ def base_from_env(
     return dict(
         service=service,
         backend=env_choice(env, keys["backend"], default_backend, backends),
-        host=env_str(env, keys["host"], "127.0.0.1"),
+        listen_addresses=parse_listen_addresses(
+            keys["listen_addresses"], env_str(env, keys["listen_addresses"], None)
+        ),
         port=env_int(
             env,
             keys["port"],

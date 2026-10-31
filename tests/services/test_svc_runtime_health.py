@@ -422,20 +422,40 @@ def test_run_service_exits_2_on_settings_error(capsys):
     assert "RT_PORT must be <= 65535" in capsys.readouterr().err
 
 
-def test_run_service_runs_uvicorn(monkeypatch):
+def test_run_service_runs_uvicorn_on_bound_sockets(monkeypatch):
     import uvicorn
 
     from src.services.common import serve
 
     calls = []
     monkeypatch.setattr(serve, "setup_logging", lambda level: calls.append(level))
-    monkeypatch.setattr(uvicorn, "run", lambda app, **kw: calls.append((app, kw)))
-    settings = _settings(port=9999)
+    monkeypatch.setattr(
+        serve, "bind_sockets", lambda addrs, port: calls.append((addrs, port)) or ["s"]
+    )
+
+    def fake_run(self, sockets=None):
+        calls.append((self.config.app, self.config.workers, sockets))
+
+    monkeypatch.setattr(uvicorn.Server, "run", fake_run)
+    settings = _settings(port=9999, listen_addresses=("127.0.0.1", "100.64.0.1"))
     app = object()
     assert run_service(lambda env: settings, lambda s: app) == 0
     assert calls[0] == "info"
-    assert calls[1][0] is app
-    assert calls[1][1]["port"] == 9999 and calls[1][1]["workers"] == 1
+    assert calls[1] == (("127.0.0.1", "100.64.0.1"), 9999)
+    assert calls[2] == (app, 1, ["s"])
+
+
+def test_run_service_exits_2_when_bind_fails(monkeypatch, capsys):
+    from src.services.common import serve
+
+    monkeypatch.setattr(serve, "setup_logging", lambda level: None)
+
+    def boom(addrs, port):
+        raise OSError(98, "Address already in use")
+
+    monkeypatch.setattr(serve, "bind_sockets", boom)
+    assert run_service(lambda env: _settings(port=9999), lambda s: object()) == 2
+    assert "cannot listen on 127.0.0.1 port 9999" in capsys.readouterr().err
 
 
 # -- lazy load / idle unload (RT_IDLE_UNLOAD_MINUTES) ---------------------

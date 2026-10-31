@@ -99,8 +99,8 @@ rt-models --model-dir /var/lib/rt-asr/models list
 | `RT_COMPUTE_TYPE` | `int8` | RELOAD |
 | `RT_CONFIG_STATE` | `(не задано)` | BOOTSTRAP |
 | `RT_DEVICE` | `cpu` | RELOAD |
-| `RT_HOST` | `127.0.0.1` | BOOTSTRAP |
 | `RT_IDLE_UNLOAD_MINUTES` | `15` | BOOTSTRAP |
+| `RT_LISTEN_ADDRESSES` | `127.0.0.1` | BOOTSTRAP |
 | `RT_LOG_LEVEL` | `info` | TUNABLE |
 | `RT_MAX_PENDING` | `16` | BOOTSTRAP |
 | `RT_MODEL` | `whisper-small` | RELOAD |
@@ -115,8 +115,8 @@ rt-models --model-dir /var/lib/rt-asr/models list
 | `RT_COMPUTE_TYPE` | `float32` | RELOAD |
 | `RT_CONFIG_STATE` | `(не задано)` | BOOTSTRAP |
 | `RT_DEVICE` | `cpu` | RELOAD |
-| `RT_HOST` | `127.0.0.1` | BOOTSTRAP |
 | `RT_IDLE_UNLOAD_MINUTES` | `15` | BOOTSTRAP |
+| `RT_LISTEN_ADDRESSES` | `127.0.0.1` | BOOTSTRAP |
 | `RT_LOG_LEVEL` | `info` | TUNABLE |
 | `RT_MAX_PENDING` | `16` | BOOTSTRAP |
 | `RT_MODEL` | `kokoro-82m-v1.0-onnx` | RELOAD |
@@ -190,7 +190,7 @@ services:
 
 Режим `transcribe` лише з локальним ASR: `mode: transcribe` без `django_urls`.
 
-Для віддаленого доступу сервіси слухають не `127.0.0.1`: `RT_HOST=0.0.0.0` (+ firewall, + `RT_API_TOKEN_FILE`).
+Сервіс слухає кожну адресу з `RT_LISTEN_ADDRESSES` (список через кому, default `127.0.0.1`; окремий сокет на адресу, ще не піднята адреса теж біндиться - `IP_FREEBIND`). Для віддаленого доступу додайте кластерну адресу вузла поряд із `127.0.0.1`, напр. `RT_LISTEN_ADDRESSES=127.0.0.1,100.64.0.10` (+ firewall, + `RT_API_TOKEN_FILE`); `0.0.0.0` не потрібен.
 
 HM-модуль edge: `homeManagerModules.rt-translator` (також `default`), опції `rt-translator.*`: `django.urls`, `django.tokenFile`, `local.{llm,asr,tts}` (default `http://127.0.0.1:{8080,8091,8093}`, `null` - сервісу на хості немає), `localTokenFile` (default `/run/llama/local-token`), `allowedServices` (`null` - усі; тоді вибір в UI), `llm.model`, `mode` (`null` = auto), `autostart`, `virtualSinks.enable`. Вони перетворюються на `RT_EDGE_*` env. Assertions: `mode = "translate"` потребує `local.llm` і `local.tts` або `django.urls`; `django.urls` потребує `django.tokenFile`; токен-файли не можуть бути в `/nix/store`.
 
@@ -208,7 +208,7 @@ HM-модуль edge: `homeManagerModules.rt-translator` (також `default`),
     enable = true;
     package = pkgs.rtSpeech.asr.gpu;
     device = "cuda";
-    host = "0.0.0.0";
+    listenAddresses = [ "127.0.0.1" "100.64.0.10" ];  # loopback + tailscale-адреса вузла
     openFirewall = true;            # лише на firewallInterfaces (default tailscale0)
     apiTokenFile = "/run/secrets/rt-speech-token";
   };
@@ -220,7 +220,7 @@ HM-модуль edge: `homeManagerModules.rt-translator` (також `default`),
 }
 ```
 
-Спільні опції: `enable, package, deployRsPath, host, port, device (cpu|cuda|rocm), model, configState, modelDir, apiTokenFile, openFirewall, firewallInterfaces, logLevel, rocmGfxVersion, memoryDenyWriteExecute, extraEnv`. ASR: `computeType, language, languages, beamSize, vad, chunkSeconds`. TTS: `voice, speed, sampleRate`. Потрібен overlay: `nixpkgs.overlays = [ inputs.realtime-translation.overlays.default ];` і `nixosModules.rt-speech` в `imports`.
+Спільні опції: `enable, package, deployRsPath, listenAddresses, port, device (cpu|cuda|rocm), model, configState, modelDir, apiTokenFile, openFirewall, firewallInterfaces, logLevel, rocmGfxVersion, memoryDenyWriteExecute, extraEnv`. ASR: `computeType, language, languages, beamSize, vad, chunkSeconds`. TTS: `voice, speed, sampleRate`. Потрібен overlay: `nixpkgs.overlays = [ inputs.realtime-translation.overlays.default ];` і `nixosModules.rt-speech` в `imports`.
 
 ### (b) deploy-rs (покроково, в інфрі swarm-nix)
 

@@ -85,7 +85,7 @@ def test_env_keys_cover_fields():
         "max_chars",
     }
     assert "engine" in TtsSettings.RELOAD_FIELDS
-    assert {"host", "port"} <= TtsSettings.bootstrap_fields()
+    assert {"listen_addresses", "port"} <= TtsSettings.bootstrap_fields()
     assert not TtsSettings.bootstrap_fields() & TtsSettings.TUNABLE_FIELDS
 
 

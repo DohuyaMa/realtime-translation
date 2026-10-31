@@ -14,7 +14,7 @@ assert p.python313.outPath == pkgs.python313.outPath;
 assert p.python313Packages.ctranslate2.outPath == pkgs.python313Packages.ctranslate2.outPath;
 assert p.ctranslate2.outPath == pkgs.ctranslate2.outPath;
 assert builtins.elem "RT_PORT=8091" (p.rtSpeech.lib.envLines "asr" {
-  host = "127.0.0.1"; port = 8091; device = "cpu"; modelDir = "/var/lib/rt-asr/models"; logLevel = "info";
+  listenAddresses = [ "127.0.0.1" ]; port = 8091; device = "cpu"; modelDir = "/var/lib/rt-asr/models"; logLevel = "info";
   model = null; computeType = null; rocmGfxVersion = ""; apiTokenFile = null; extraEnv = { };
   language = null; languages = [ "uk" ]; beamSize = null; vad = true; chunkSeconds = null;
 });

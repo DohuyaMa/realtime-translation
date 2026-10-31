@@ -2,7 +2,7 @@
 let
   lib = pkgs.lib;
   base = {
-    host = "0.0.0.0";
+    listenAddresses = [ "127.0.0.1" "100.64.0.10" ];
     port = 8091;
     device = "cpu";
     modelDir = "/var/lib/rt-asr/models";
@@ -18,7 +18,7 @@ let
   tts = (removeAttrs base [ "computeType" ]) // { port = 8093; modelDir = "/var/lib/rt-tts/models"; voice = "af_heart"; speed = 1.0; sampleRate = 24000; };
   common = port: dir: [
     "PYTHONUNBUFFERED=1"
-    "RT_HOST=0.0.0.0"
+    "RT_LISTEN_ADDRESSES=127.0.0.1,100.64.0.10"
     "RT_PORT=${toString port}"
     "RT_DEVICE=cpu"
     "RT_MODEL_DIR=${dir}"
@@ -75,10 +75,10 @@ let
       expr = lib.takeEnd 2 (rtLib.envLines "asr" (asr // { extraEnv = { ZED = "1"; ALPHA = "a b"; }; }));
       expected = [ "ALPHA=a b" "ZED=1" ];
     };
-    testAlwaysHostPortDevice = {
+    testAlwaysListenPortDevice = {
       # infra R2: deploy-rs health check reads RT_PORT from the rendered env file
       expr = map (s: builtins.head (lib.splitString "=" s)) (lib.take 4 (rtLib.envLines "tts" tts));
-      expected = [ "PYTHONUNBUFFERED" "RT_HOST" "RT_PORT" "RT_DEVICE" ];
+      expected = [ "PYTHONUNBUFFERED" "RT_LISTEN_ADDRESSES" "RT_PORT" "RT_DEVICE" ];
     };
     testTokenPathLiteral = {
       # infra R3: literal credential path (systemd does not expand %d inside EnvironmentFile)
@@ -93,8 +93,14 @@ let
     testUnknownServiceRejected = { expr = failsToEval (rtLib.envLines "stt" asr); expected = true; };
     testVariantForDevice = { expr = rtLib.variantForDevice; expected = { cpu = "cpu"; cuda = "gpu"; rocm = "rocm"; }; };
     testHealthCheck = {
-      expr = rtLib.healthCheckCommand "asr" asr;
-      expected = "curl -sf http://127.0.0.1:8091/health > /dev/null";
+      expr = [
+        (rtLib.healthCheckCommand "asr" asr)
+        (rtLib.healthCheckCommand "asr" (asr // { listenAddresses = [ "::1" ]; }))
+      ];
+      expected = [
+        "curl -sf http://127.0.0.1:8091/health > /dev/null"
+        "curl -sf http://[::1]:8091/health > /dev/null"
+      ];
     };
   };
 in

@@ -42,7 +42,7 @@ Modes (`services.mode`): `transcribe` (long chunks, ASR only), `translate` (phra
 
 ### Ports
 
-`rt-asr` 8091, `rt-tts` 8093, dev `llama-server` 8080. Services bind `127.0.0.1` by default (`RT_HOST`); optional bearer token via `RT_API_TOKEN_FILE`.
+`rt-asr` 8091, `rt-tts` 8093, dev `llama-server` 8080. Services listen on `RT_LISTEN_ADDRESSES` (comma list, one socket each; default `127.0.0.1`; NixOS `listenAddresses`); optional bearer token via `RT_API_TOKEN_FILE`.
 
 ### Nix (`nix/`, `flake.nix`)
 

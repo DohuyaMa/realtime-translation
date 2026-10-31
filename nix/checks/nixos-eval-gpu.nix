@@ -23,8 +23,8 @@ let
   ttsDefault = evalWith { tts = { enable = true; package = fake "rt-tts"; }; };
   ttsRocm = evalWith { tts = { enable = true; device = "rocm"; }; };
   storeToken = evalWith { asr = { enable = true; package = fake "rt-asr"; apiTokenFile = "${builtins.storeDir}/x-token"; }; };
-  firewall = evalWith { asr = { enable = true; package = fake "rt-asr"; host = "0.0.0.0"; openFirewall = true; }; };
-  closed = evalWith { asr = { enable = true; package = fake "rt-asr"; host = "0.0.0.0"; }; };
+  firewall = evalWith { asr = { enable = true; package = fake "rt-asr"; listenAddresses = [ "127.0.0.1" "100.64.0.10" ]; openFirewall = true; }; };
+  closed = evalWith { asr = { enable = true; package = fake "rt-asr"; listenAddresses = [ "127.0.0.1" "100.64.0.10" ]; }; };
 
   failedAssertions = config: map (a: a.message) (builtins.filter (a: !a.assertion) config.assertions);
 
@@ -99,7 +99,7 @@ let
       expected = { iface = [ 8091 ]; global = [ ]; };
     };
     testFirewallClosedByDefault = {
-      # infra R5: openFirewall = false never opens the port, whatever host is
+      # infra R5: openFirewall = false never opens the port, whatever listenAddresses are
       expr = {
         global = closed.networking.firewall.allowedTCPPorts;
         ifaces = lib.concatMap (i: i.allowedTCPPorts or [ ]) (builtins.attrValues closed.networking.firewall.interfaces);

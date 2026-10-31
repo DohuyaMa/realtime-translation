@@ -13,7 +13,7 @@ in
 pkgs.testers.runNixOSTest {
   name = "rt-speech";
 
-  nodes.server = { ... }: {
+  nodes.server = { config, ... }: {
     imports = [ self.nixosModules.rt-speech ];
     networking.firewall.enable = true;
     # root-only secret, like a sops-nix file (infra R3: one 0400 root file serves all system users)
@@ -24,7 +24,8 @@ pkgs.testers.runNixOSTest {
     services.rtSpeech.asr = {
       enable = true;
       package = fakes.asr;
-      host = "0.0.0.0";
+      # loopback for local clients + the test VLAN address for the client node
+      listenAddresses = [ "127.0.0.1" config.networking.primaryIPAddress ];
       openFirewall = true;
       firewallInterfaces = [ "eth1" ];
       apiTokenFile = "/run/secrets/rt-token";
@@ -33,7 +34,7 @@ pkgs.testers.runNixOSTest {
     services.rtSpeech.tts = {
       enable = true;
       deployRsPath = "/var/lib/rt-tts/current";
-      host = "0.0.0.0";
+      listenAddresses = [ "127.0.0.1" config.networking.primaryIPAddress ];
       openFirewall = true;
       firewallInterfaces = [ "eth9" ]; # not the test VLAN: must stay closed from the client
     };

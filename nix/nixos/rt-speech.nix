@@ -27,7 +27,12 @@ let
         example = "${svc.stateDir}/current";
         description = "deploy-rs managed bundle symlink. When set, ExecStart and EnvironmentFile use it and `package` is not built.";
       };
-      host = mkOption { type = types.str; default = "127.0.0.1"; description = "Bind address (RT_HOST). Use 0.0.0.0 together with openFirewall for remote edges."; };
+      listenAddresses = mkOption {
+        type = types.nonEmptyListOf types.str;
+        default = [ "127.0.0.1" ];
+        example = [ "127.0.0.1" "100.64.0.10" ];
+        description = "IP addresses to listen on, one socket each (RT_LISTEN_ADDRESSES). Keep 127.0.0.1 for clients on this host and add the cluster (e.g. tailscale) address for remote edges; addresses not configured yet are bound anyway (IP_FREEBIND).";
+      };
       port = mkOption { type = types.port; default = svc.port; description = "Listen port (RT_PORT)."; };
       device = mkOption { type = types.enum [ "cpu" "cuda" "rocm" ]; default = "cpu"; description = "Compute device (RT_DEVICE); also selects the bundle variant and GPU sandbox rules."; };
       model = mkOption { type = types.nullOr types.str; default = null; description = "Model id/path (RT_MODEL). null = service default."; };
@@ -88,8 +93,8 @@ let
         assertion = cfg.apiTokenFile == null || !(lib.hasPrefix builtins.storeDir cfg.apiTokenFile);
         message = "services.rtSpeech.${service}.apiTokenFile must not point into the Nix store";
       }];
-      warnings = lib.optional (cfg.openFirewall && cfg.host == "127.0.0.1")
-        "services.rtSpeech.${service}: openFirewall is set but host is 127.0.0.1, so nothing listens on ${lib.concatStringsSep ", " cfg.firewallInterfaces}";
+      warnings = lib.optional (cfg.openFirewall && lib.all (a: a == "127.0.0.1" || a == "::1") cfg.listenAddresses)
+        "services.rtSpeech.${service}: openFirewall is set but listenAddresses are loopback only, so nothing listens on ${lib.concatStringsSep ", " cfg.firewallInterfaces}";
 
       users.users.${unit} = { isSystemUser = true; group = unit; home = svc.stateDir; description = "rt-speech ${service} service"; };
       users.groups.${unit} = { };

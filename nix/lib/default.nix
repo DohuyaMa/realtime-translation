@@ -24,7 +24,7 @@ let
     assert lib.assertMsg (services ? ${service}) "rtSpeech.envLines: unknown service '${service}'";
     [
       "PYTHONUNBUFFERED=1"
-      (kv "RT_HOST" cfg.host)
+      (kv "RT_LISTEN_ADDRESSES" (lib.concatStringsSep "," cfg.listenAddresses))
       (kv "RT_PORT" cfg.port)
       (kv "RT_DEVICE" cfg.device)
       (kv "RT_MODEL_DIR" cfg.modelDir)
@@ -60,6 +60,11 @@ in
   mkEnvFile = { pkgs, service, cfg }:
     pkgs.writeTextDir "env" (lib.concatLines (envLines service cfg));
 
+  # Probes the first listen address (IPv6 literals in brackets).
   healthCheckCommand = _service: cfg:
-    "curl -sf http://127.0.0.1:${toString cfg.port}/health > /dev/null";
+    let
+      addr = builtins.head cfg.listenAddresses;
+      host = if lib.hasInfix ":" addr then "[${addr}]" else addr;
+    in
+    "curl -sf http://${host}:${toString cfg.port}/health > /dev/null";
 }

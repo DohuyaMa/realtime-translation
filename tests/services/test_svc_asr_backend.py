@@ -68,7 +68,7 @@ def test_env_keys_cover_tunables_and_roundtrip():
     keys = AsrSettings.env_keys()
     assert AsrSettings.TUNABLE_FIELDS <= set(keys)
     assert keys["backend"] == "RT_ASR_BACKEND"
-    assert "host" in AsrSettings.bootstrap_fields()
+    assert "listen_addresses" in AsrSettings.bootstrap_fields()
     assert not AsrSettings.bootstrap_fields() & AsrSettings.TUNABLE_FIELDS
 
 

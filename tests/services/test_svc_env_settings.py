@@ -70,9 +70,9 @@ def test_env_int_range():
 
 def test_base_defaults():
     s = _base({})
-    assert (s.service, s.host, s.port, s.device) == (
+    assert (s.service, s.listen_addresses, s.port, s.device) == (
         "rt-asr",
-        "127.0.0.1",
+        ("127.0.0.1",),
         8091,
         "cpu",
     )
@@ -139,7 +139,7 @@ def test_tunable_and_reload_fields_have_env_keys():
 
 def test_bootstrap_fields():
     assert AsrSettings.bootstrap_fields() == {
-        "host",
+        "listen_addresses",
         "port",
         "api_token_file",
         "model_dir",
@@ -171,7 +171,7 @@ def test_base_from_env_ignores_os_environ(monkeypatch):
 
 def test_base_from_env_uses_subclass_env_keys():
     class Custom(AsrSettings):
-        ENV_KEYS = {**BaseSettings.ENV_KEYS, "host": "RT_CUSTOM_HOST"}
+        ENV_KEYS = {**BaseSettings.ENV_KEYS, "port": "RT_CUSTOM_PORT"}
 
     kw = dict(
         service="rt-asr",
@@ -182,5 +182,49 @@ def test_base_from_env_uses_subclass_env_keys():
         compute_gpu="float16",
         settings_cls=Custom,
     )
-    assert base_from_env({"RT_CUSTOM_HOST": "h"}, **kw)["host"] == "h"
-    assert base_from_env({"RT_HOST": "x"}, **kw)["host"] == "127.0.0.1"
+    assert base_from_env({"RT_CUSTOM_PORT": "9000"}, **kw)["port"] == 9000
+    assert base_from_env({"RT_PORT": "1"}, **kw)["port"] == 8091
+
+
+def test_listen_addresses_parsing():
+    kw = dict(
+        service="rt-asr",
+        backends=("fake",),
+        default_backend="fake",
+        default_model="m",
+        compute_cpu="int8",
+        compute_gpu="float16",
+        settings_cls=AsrSettings,
+    )
+    env = {"RT_LISTEN_ADDRESSES": " 127.0.0.1, 100.69.30.96,127.0.0.1,::1 "}
+    assert base_from_env(env, **kw)["listen_addresses"] == (
+        "127.0.0.1",
+        "100.69.30.96",
+        "::1",
+    )
+    for bad in ("localhost", "127.0.0.1,example.org", " , "):
+        with pytest.raises(SettingsError):
+            base_from_env({"RT_LISTEN_ADDRESSES": bad}, **kw)
+
+
+def test_bind_sockets_one_socket_per_address():
+    import socket
+
+    from src.services.common.serve import bind_sockets
+
+    probe = socket.socket()
+    probe.bind(("127.0.0.1", 0))
+    port = probe.getsockname()[1]
+    probe.close()
+    socks = bind_sockets(["127.0.0.1", "127.0.0.2"], port)
+    try:
+        assert [s.getsockname() for s in socks] == [
+            ("127.0.0.1", port),
+            ("127.0.0.2", port),
+        ]
+        for addr in ("127.0.0.1", "127.0.0.2"):
+            with socket.create_connection((addr, port), timeout=2):
+                pass
+    finally:
+        for s in socks:
+            s.close()

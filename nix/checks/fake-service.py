@@ -2,6 +2,7 @@
 import json
 import os
 import sys
+import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 TOKEN_FILE = os.environ.get("RT_API_TOKEN_FILE")
@@ -71,4 +72,9 @@ class Handler(BaseHTTPRequestHandler):
         return self._send(404, {"error": "not found"})
 
 
-ThreadingHTTPServer((os.environ.get("RT_HOST", "127.0.0.1"), int(os.environ["RT_PORT"])), Handler).serve_forever()
+PORT = int(os.environ["RT_PORT"])
+ADDRESSES = os.environ.get("RT_LISTEN_ADDRESSES", "127.0.0.1").split(",")
+servers = [ThreadingHTTPServer((a, PORT), Handler) for a in ADDRESSES]
+for s in servers[1:]:
+    threading.Thread(target=s.serve_forever, daemon=True).start()
+servers[0].serve_forever()
