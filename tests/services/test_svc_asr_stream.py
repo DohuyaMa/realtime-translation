@@ -2,6 +2,7 @@
 
 import pytest
 
+import src.services.asr.stream as st
 from src.services.asr.backend import FakeAsrBackend, Segment, TimedWord
 from src.services.asr.stream import AsrStreamSession
 from src.services.asr.whisper_engine import SegmentStats
@@ -76,10 +77,19 @@ def test_commits_longest_common_prefix_of_two_hypotheses():
 
 
 def test_agreement_ignores_case_and_punctuation_but_takes_the_newer_text():
-    b = Scripted(["hello world", "Hello, world."])
+    b = Scripted(["hello world", "Hello, world. Next"])
     s = session(b)
     out = run_ticks(s, 2)
     assert [m["text"] for m in finals(out)] == ["Hello, world."]
+
+
+def test_last_word_of_the_newer_hypothesis_stays_open():
+    b = Scripted(["one two", "one two.", "one two. three"])
+    s = session(b)
+    out = run_ticks(s, 2)
+    assert [m["text"] for m in finals(out)] == ["one"]
+    out = run_ticks(s, 1)
+    assert [m["text"] for m in finals(out)] == ["two."]
 
 
 def test_endpoint_commits_everything_up_to_speech_end():
@@ -114,7 +124,7 @@ def test_hypothesis_filters_hallucination_repetition_and_echo():
     b = Scripted(
         [
             [seg("thanks for watching", 0.0), seg("good good good morning", 1.0)],
-            [seg("good morning", 1.0)],
+            [seg("good morning all", 1.0)],
         ]
     )
     s = session(b)
@@ -133,7 +143,10 @@ def test_hypothesis_filters_hallucination_repetition_and_echo():
     assert finals(out) == [] and s3.stats()["prompt_echo"] == 3
 
 
-def test_prompt_is_committed_text_before_the_buffer_and_buffer_trims_at_sentence_end():
+def test_prompt_is_committed_text_before_the_buffer_and_buffer_trims_at_sentence_end(
+    monkeypatch,
+):
+    monkeypatch.setattr(st, "SENTENCE_TRIM_SECONDS", 0.0)
     b = Scripted(["Hi there. How", "Hi there. How are", "Hi there. How are"])
     s = session(b, prompt="ctx")
     out = run_ticks(s, 2)
@@ -147,7 +160,8 @@ def test_prompt_is_committed_text_before_the_buffer_and_buffer_trims_at_sentence
     assert b.lengths[-1] == int(1.5 * SR) - int(0.6 * SR)
 
 
-def test_words_repeated_from_the_committed_tail_are_not_committed_twice():
+def test_words_repeated_from_the_committed_tail_are_not_committed_twice(monkeypatch):
+    monkeypatch.setattr(st, "SENTENCE_TRIM_SECONDS", 0.0)
     # after the trim whisper re-hears "How" at the buffer start
     b = Scripted(
         ["Hi there. How", "Hi there. How are", "How are you", "How are you doing"]
@@ -156,6 +170,13 @@ def test_words_repeated_from_the_committed_tail_are_not_committed_twice():
     out = run_ticks(s, 4)
     text = " ".join(m["text"] for m in finals(out))
     assert text == "Hi there. How are you"
+
+
+def test_short_buffer_is_not_trimmed_at_a_sentence_end():
+    b = Scripted(["Hi there. How", "Hi there. How are", "Hi there. How are"])
+    s = session(b)
+    run_ticks(s, 3)
+    assert b.lengths[-1] == int(1.5 * SR)  # < SENTENCE_TRIM_SECONDS
 
 
 def test_auto_language_detected_once_with_enough_speech():
@@ -178,8 +199,6 @@ def test_finish_commits_the_rest_as_eos():
 
 
 def test_forced_commit_when_whisper_never_agrees(monkeypatch):
-    import src.services.asr.stream as st
-
     monkeypatch.setattr(st, "MAX_BUFFER_SECONDS", 1.2)
     b = Scripted(["a", "b", "c", "d"])
     s = session(b)

@@ -5,11 +5,14 @@ Pure class (no asyncio): ``feed`` runs on the event loop (VAD only), ``step``
 drives it). Every tick re-decodes the growing speech buffer (greedy, word
 timestamps, ``initial_prompt`` = committed text before the buffer, <= 200
 chars) and commits the longest common prefix of the last two hypotheses
-(normalized words; text and times from the newer one). A VAD endpoint
+(normalized words; text and times from the newer one), never the newer
+hypothesis' last word (its punctuation is not settled). A VAD endpoint
 (``STREAMING_VAD``: >= 500 ms silence) commits the whole hypothesis up to the
 end of speech (``eos``) and sends ``endpoint``.
 
-The buffer is trimmed at the end of the last committed sentence; above
+Once the buffer is >= ``SENTENCE_TRIM_SECONDS`` long (shorter buffers cut
+whisper's context: turbo then split "System. Powinien." on a live replay)
+it is trimmed at the end of the last committed sentence; above
 ``TRIM_SECONDS`` at the end of the last fully committed whisper segment;
 above ``MAX_BUFFER_SECONDS`` (whisper sees <= 30 s) the hypothesis is
 committed as is (``forced_commits``, logged).
@@ -44,6 +47,7 @@ from .whisper_engine import STREAMING_VAD, VadProfile
 
 PROMPT_CHARS = 200
 TRIM_SECONDS = 15.0
+SENTENCE_TRIM_SECONDS = 8.0
 MAX_BUFFER_SECONDS = 28.0
 DETECT_SECONDS = 1.0  # auto language: detected once this much speech is buffered
 OVERLAP_NGRAM = 5  # committed tail words a new hypothesis may repeat
@@ -231,9 +235,12 @@ class AsrStreamSession:
                 self._trim_to(endpoint)
                 self._speech_in_buf = self._in_speech or bool(self._endpoints)
             return out
+        # The newest hypothesis' last word stays open: whisper ends a buffer
+        # with a period, a committed artificial "System." would also cut the
+        # buffer mid-sentence (live run on turbo, 2026-10-31).
         agreed = 0
         while (
-            agreed < min(len(hyp), len(self._prev))
+            agreed < min(len(hyp) - 1, len(self._prev))
             and hyp[agreed].norm == self._prev[agreed].norm
         ):
             agreed += 1
@@ -368,6 +375,8 @@ class AsrStreamSession:
         TRIM_SECONDS at the end of the last fully committed segment."""
         buf_t = self._t(start)
         cut: Optional[float] = None
+        if (stop - start) / SAMPLE_RATE < SENTENCE_TRIM_SECONDS:
+            return  # short buffer: whisper needs the context more
         for w in reversed(self._committed):
             if w.end <= buf_t:
                 break
