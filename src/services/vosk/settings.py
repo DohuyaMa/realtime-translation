@@ -40,11 +40,13 @@ def parse_model(key: str, raw: str) -> str:
 @dataclass(frozen=True)
 class VoskSettings(BaseSettings):
     max_upload_mb: int = 100
+    max_sessions: int = 4
 
     BACKEND_ENV: ClassVar[Optional[str]] = "RT_VOSK_BACKEND"
     ENV_KEYS: ClassVar[Mapping[str, str]] = {
         **BaseSettings.ENV_KEYS,
         "max_upload_mb": "RT_VOSK_MAX_UPLOAD_MB",
+        "max_sessions": "RT_VOSK_MAX_SESSIONS",
     }
     TUNABLE_FIELDS: ClassVar[frozenset[str]] = BaseSettings.TUNABLE_FIELDS | {
         "max_upload_mb"
@@ -92,5 +94,8 @@ class VoskSettings(BaseSettings):
             **base,
             max_upload_mb=env_int(
                 env, keys["max_upload_mb"], 100, min_value=1, max_value=1000
+            ),
+            max_sessions=env_int(
+                env, keys["max_sessions"], 4, min_value=1, max_value=64
             ),
         )

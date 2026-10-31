@@ -98,8 +98,10 @@ rt-models --model-dir /var/lib/rt-asr/models list
 | `RT_ASR_CHUNK_SECONDS` | `600.0` | TUNABLE |
 | `RT_ASR_LANGUAGE` | `(не задано)` | TUNABLE |
 | `RT_ASR_LANGUAGES` | `pl,uk,ru,en` | TUNABLE |
+| `RT_ASR_MAX_SESSIONS` | `4` | BOOTSTRAP |
 | `RT_ASR_MAX_UPLOAD_MB` | `100` | TUNABLE |
 | `RT_ASR_REALTIME_MAX_SECONDS` | `30.0` | TUNABLE |
+| `RT_ASR_STREAM_TICK_MS` | `500` | BOOTSTRAP |
 | `RT_ASR_VAD` | `true` | TUNABLE |
 | `RT_COMPUTE_TYPE` | `int8` | RELOAD |
 | `RT_CONFIG_STATE` | `(не задано)` | BOOTSTRAP |
@@ -130,6 +132,7 @@ rt-models --model-dir /var/lib/rt-asr/models list
 | `RT_MODEL_DIR` | `(не задано)` | BOOTSTRAP |
 | `RT_PORT` | `8092` | BOOTSTRAP |
 | `RT_VOSK_BACKEND` | `vosk` | RELOAD |
+| `RT_VOSK_MAX_SESSIONS` | `4` | BOOTSTRAP |
 | `RT_VOSK_MAX_UPLOAD_MB` | `100` | TUNABLE |
 
 **rt-tts**
@@ -192,11 +195,17 @@ curl -s -X POST http://127.0.0.1:8091/model/load -H "$H"     # завантаж�
 
 - `model`: `{id, state, error, download, device}`; `state` - `unloaded` | `downloading` | `loading` | `ready` | `error`; `download` - `{done_mb, total_mb}` лише під час скачування;
 - `memory`: `{rss_mb, swap_mb, vram_mb}` процесу (`vram_mb` - `null`, якщо `nvidia-smi` не відповідає);
-- `ready`, `pending`, `config_version`; rt-asr ще `dropped_segments: {hallucination, low_confidence}`.
+- `ready`, `pending`, `config_version`; rt-asr ще `dropped_segments: {hallucination, low_confidence}`;
+- rt-asr і rt-vosk: `sessions` - `{active, max, opened, tick_ms, open: [...]}`, для кожної відкритої WS-сесії `ticks`, `skipped_ticks`, `busy_ticks`, `step_ms_p50/max`, `finals`; rt-asr ще `commit_lag_p50/p90`, `buffer_s`, `dropped_segments`, `prompt_echo`, `forced_commits`, `language`.
 
 Поки модель не `ready`, `/v1/audio/*` одразу відповідає 503 з кодом `model_unloaded` / `model_downloading` / `model_loading` / `model_error` (чекає лише запит, що сам розбудив вивантажену за простоєм модель). Невдале або покинуте за таймаутом завантаження й вивантажена модель звільняють пам'ять одразу (`unload` моделі CTranslate2, `gc`, `malloc_trim`); покинуте завантаження блокує нові (409), доки не завершиться.
 
 Галюцинації Whisper (rt-asr): сегмент відкидається, якщо `no_speech_prob > 0.6`, `avg_logprob < -1.0` або `compression_ratio > 2.4` (пороги faster-whisper, тут кожен окремо), або якщо весь сегмент - відома фраза-галюцинація (титри/фінал відео uk/pl/ru/en: «Дякую за перегляд», «Napisy stworzone przez społeczność Amara.org», ...; список - `src/services/asr/textfilter.py`). Кожне відкидання - INFO у лозі й лічильник у `/status`.
+
+**Стрімінг `WS /v1/audio/stream` (rt-asr і rt-vosk, один протокол;** дизайн - `docs/superpowers/specs/2026-10-31-streaming-asr-simultaneous-translation.md` §1-3). Клієнт: `{"type":"start","language":"pl"|null,"sample_rate":16000,"prompt"?:str,"t0"?:сек}`, далі binary PCM16LE mono 16 кГц (будь-якої довжини, типово по 100 мс), `{"type":"stop"}`. Сервер: `ready{session_id, model}`, `final{seq, text, words:[{word,start,end,conf}], start, end, eos, language}` (лише дописується), `partial{text, start}` (замінює незафіксований хвіст; у Vosk ще `words`), `endpoint{at}` (кінець мовлення), `error{code, state, message}`, `done`; кожне повідомлення несе `audio_end`. Час - секунди `t0` + семпли від `start`, тож слова обох сервісів на одній шкалі.
+- токен - заголовок `Authorization` handshake-у (невірний - close 1008 до accept); сесій більше за `RT_ASR_MAX_SESSIONS` / `RT_VOSK_MAX_SESSIONS` (4) - close 1013; модель не готова (вивантажена за простоєм - handshake її вантажить і чекає) - `error model_not_ready` + 1013; відкрита сесія не дає вивантажити модель за простоєм; `POST /model/unload` або зміна моделі - `error model_unloaded` + 1012; помилки протоколу (`binary` до `start`, невідомий `type`, `sample_rate` не 16000, невідома мова, для Vosk - мова не моделі `model_language_mismatch`) - `error` + 1003; `stop` - решта фіналів, `done`, close 1000. Після `ready` сервер робить фіктивний декод 1 с тиші (прогрів);
+- rt-asr (LocalAgreement-2): Silero VAD (з faster-whisper), кожні `RT_ASR_STREAM_TICK_MS` (500) перекодовує буфер мовлення (`beam 1`, `temperature 0`, часи слів, `initial_prompt` = вже зафіксований текст ≤ 200 символів) і фіксує спільний префікс двох останніх гіпотез; тиша ≥ 500 мс - фіксує все до кінця мовлення (`eos`) і шле `endpoint`. Тік, що випав на ще не закінчений декод, пропускається (`skipped_ticks`). Фільтр галюцинацій і повторів - на кожну гіпотезу, повтор `prompt` (echo) відкидається. Буфер обрізається по кінцю зафіксованого речення (> 15 с - по кінцю сегмента; > 28 с без згоди - фіксація гіпотези як є, WARNING, `forced_commits`). `language: null` - мова визначається один раз (≥ 1 с мовлення, серед `RT_ASR_LANGUAGES`) і фіксується на сесію;
+- rt-vosk: `KaldiRecognizer` на сесію (`SetWords`, `SetPartialWords`), кінець репліки визначає Kaldi: `final` (`eos: true`) + `endpoint`; `partial` - не частіше ніж раз на 300 мс аудіо і лише при зміні.
 
 **Звірка Vosk (режим `translate`).** Стадія ASR шле той самий аудіосегмент у whisper і `rt-vosk` паралельно (затримка = довший із двох). Vosk не вигадує слів (але спотворює їх, без пунктуації), whisper пише грамотно, але може вигадати фразу («Дякую за перегляд!»). Тому:
 - **гейт у коді, на рівні сегмента** (`core/crosscheck.py`, `gate_reason`): Vosk може відкинути фразу цілком, але ніколи не видаляє з неї слів. Сегмент не йде в LLM лише коли whisper явно вигадав його: у Vosk немає жодного слова з >= 2 літер (тиша, філер «е»; причина `no_word`) або жодне слово whisper з >= 3 літер не збіглося (нечітко, `difflib` >= 0.67, також зі злитими сусідніми словами Vosk) з жодним словом Vosk (`disagree`). Хоч один збіг - уся фраза whisper іде далі (`agree`). Слова whisper, написані не абеткою моделі Vosk (латиниця «TypeScript, Docker» для uk/ru-моделі, кирилиця для pl/en-моделі), не рахуються ні за, ні проти: модель не вміє їх записати (live test §12: рядок зі стеком технологій відкидався як `disagree`); сегмент лише з такими словами проходить (`foreign_terms`, лічильник `vosk_gate_foreign_terms`). Відкинуте - INFO-рядок у лозі, подія в журналі UI, лічильники `vosk_gate_dropped` / `vosk_gate_disagree`. Окремого гейта для частини фрази після розрізу по реченнях немає (часи слів whisper інтерпольовані - порожній відрізок Vosk не означає, що слів не казали);
@@ -379,7 +388,7 @@ curl -s -F file=@/tmp/hello.wav http://127.0.0.1:8091/audio/transcriptions
 
 ## 9. Що відкладено
 
-- WS-стрімінг ASR;
+- edge-клієнт WS-стрімінгу, одночасний переклад і transcribe на стрімі (кроки S3-S5 `2026-10-31-streaming-asr-simultaneous-translation.md`; сервіси - S1/S2 - готові);
 - серверна частина (Django `app-services`, воркер `/app-session` і пауза задач під сесією) - у swarm-nix;
 - Django/engine: воркери tier 2, озвучка з engine на ПК, пул TTS/ASR для engine;
 - harness і калібрування, ROCm spike, torch TTS.

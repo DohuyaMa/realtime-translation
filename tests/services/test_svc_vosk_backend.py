@@ -26,6 +26,9 @@ class FakeRecognizer:
     def SetWords(self, on):
         self.words = on
 
+    def SetPartialWords(self, on):
+        self.partial_words = on
+
     def AcceptWaveform(self, data):
         self.fed += 1
         return self.fed == 1

@@ -60,13 +60,21 @@ class KaldiVoskBackend:
         # vosk.Model frees the Kaldi model when the last reference goes
         self._model = None
 
-    def transcribe(self, audio: np.ndarray, language: str) -> Transcript:
+    def recognizer(self) -> Any:
+        """A fresh KaldiRecognizer with per-word results (final and partial)."""
         from vosk import KaldiRecognizer
 
         if self._model is None:
-            raise RuntimeError("transcribe() before load()")
+            raise RuntimeError("recognizer() before load()")
         rec = KaldiRecognizer(self._model, TARGET_RATE)
         rec.SetWords(True)
+        rec.SetPartialWords(True)
+        return rec
+
+    def transcribe(self, audio: np.ndarray, language: str) -> Transcript:
+        if self._model is None:
+            raise RuntimeError("transcribe() before load()")
+        rec = self.recognizer()
         pcm = float_to_pcm16(audio)
         results: List[Dict[str, Any]] = []
         for i in range(0, len(pcm), FEED_BYTES):
