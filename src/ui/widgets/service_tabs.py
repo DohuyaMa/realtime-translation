@@ -13,7 +13,7 @@ from __future__ import annotations
 import threading
 from typing import Any, Callable, Dict, List, Optional
 
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -23,6 +23,8 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QPlainTextEdit,
     QPushButton,
     QSpinBox,
@@ -35,7 +37,7 @@ from ...core.prompt import (
     DEFAULT_USER_TEMPLATE,
     asr_prompt_errors,
     build_messages,
-    render_asr_prompt,
+    render_asr_prompt_counted,
     split_words,
     template_errors,
 )
@@ -89,46 +91,101 @@ def _size(n: int) -> str:
 
 
 class _Editor:
-    """One runtime config field: widget + typed read-back."""
+    """One runtime config field: a control derived from the service's field
+    schema (GET /config ``schema``) + typed read-back. Free text only for
+    ``text`` fields (or a service that publishes no schema)."""
 
-    def __init__(self, name: str, value: Any, models: Optional[dict] = None):
+    def __init__(
+        self,
+        name: str,
+        value: Any,
+        meta: Optional[dict] = None,
+        models: Optional[dict] = None,
+    ):
         self.name, self.value = name, value
-        if name == "model" and models is not None:
+        self.meta = meta or {}
+        kind = self.meta.get("type") or _type_of(value)
+        self.kind = kind
+        if kind == "model":
             box = QComboBox()
-            box.setEditable(True)  # absolute model directory also allowed
-            for m in models.get("models", []):
-                state = "кеш" if m["cached"] else f"завантажити ~{_size(m['size'])}"
-                box.addItem(f"{m['id']} ({state})", m["id"])
-            idx = box.findData(value)
-            if idx < 0:
-                box.addItem(str(value), value)
-                idx = box.count() - 1
-            box.setCurrentIndex(idx)
+            listed = {m["id"]: m for m in (models or {}).get("models", [])}
+            for mid in dict.fromkeys([*listed, *self.meta.get("choices", ())]):
+                m = listed.get(mid)
+                if m is None:
+                    label = mid
+                elif m["cached"]:
+                    label = f"{mid} (кеш)"
+                else:
+                    label = f"{mid} (завантажити ~{_size(m['size'])})"
+                if m and m.get("warning"):
+                    label += f" ⚠ {m['warning']}"
+                box.addItem(label, mid)
+            self._select(box, value)
             self.widget: QWidget = box
-        elif isinstance(value, bool):
+        elif kind == "choice":
+            box = QComboBox()
+            for c in self.meta.get("choices", ()):
+                box.addItem(c if c != "" else "auto / не задано", c)
+            self._select(box, "" if value is None else value)
+            self.widget = box
+        elif kind == "multichoice":
+            lst = QListWidget()
+            lst.setFixedHeight(110)
+            chosen = set(value or ())
+            for c in self.meta.get("choices", ()):
+                item = QListWidgetItem(c)
+                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                item.setCheckState(
+                    Qt.CheckState.Checked if c in chosen else Qt.CheckState.Unchecked
+                )
+                lst.addItem(item)
+            self.widget = lst
+        elif kind == "bool":
             self.widget = QCheckBox()
-            self.widget.setChecked(value)
-        elif isinstance(value, int):
+            self.widget.setChecked(bool(value))
+        elif kind == "int":
             self.widget = QSpinBox()
-            self.widget.setRange(0, 10_000_000)
-            self.widget.setValue(value)
-        elif isinstance(value, float):
+            self.widget.setRange(
+                int(self.meta.get("min", 0)), int(self.meta.get("max", 10_000_000))
+            )
+            self.widget.setValue(int(value))
+        elif kind == "float":
             self.widget = QDoubleSpinBox()
-            self.widget.setRange(0.0, 1_000_000.0)
-            self.widget.setDecimals(3)
-            self.widget.setValue(value)
-        elif isinstance(value, (list, tuple)):
-            self.widget = QLineEdit(",".join(str(v) for v in value))
+            self.widget.setDecimals(2)
+            self.widget.setRange(
+                float(self.meta.get("min", 0.0)),
+                float(self.meta.get("max", 1_000_000.0)),
+            )
+            self.widget.setSingleStep(0.05 if self.meta.get("max", 10) <= 10 else 1.0)
+            self.widget.setValue(float(value))
         else:
-            self.widget = QLineEdit("" if value is None else str(value))
+            self.widget = QLineEdit(
+                ",".join(map(str, value))
+                if isinstance(value, (list, tuple))
+                else ("" if value is None else str(value))
+            )
+        if self.meta.get("description"):
+            self.widget.setToolTip(self.meta["description"])
+
+    @staticmethod
+    def _select(box: QComboBox, value: Any) -> None:
+        idx = box.findData(value)
+        if idx < 0:  # current value outside the published choices: keep it
+            box.addItem(f"{value} (поточне)", value)
+            idx = box.count() - 1
+        box.setCurrentIndex(idx)
 
     def read(self) -> Any:
         w, v = self.widget, self.value
         if isinstance(w, QComboBox):
-            text = w.currentText().strip()
-            if w.itemText(w.currentIndex()) == text and w.currentData() is not None:
-                return w.currentData()
-            return text
+            data = w.currentData()
+            return None if data == "" and self.meta.get("nullable") else data
+        if isinstance(w, QListWidget):
+            return [
+                w.item(i).text()
+                for i in range(w.count())
+                if w.item(i).checkState() == Qt.CheckState.Checked
+            ]
         if isinstance(w, QCheckBox):
             return w.isChecked()
         if isinstance(w, (QSpinBox, QDoubleSpinBox)):
@@ -139,6 +196,16 @@ class _Editor:
         if v is None and not text:
             return None
         return text
+
+
+def _type_of(value: Any) -> str:
+    if isinstance(value, bool):
+        return "bool"
+    if isinstance(value, int):
+        return "int"
+    if isinstance(value, float):
+        return "float"
+    return "text"
 
 
 class ServiceConfigPanel(QGroupBox):
@@ -222,15 +289,25 @@ class ServiceConfigPanel(QGroupBox):
         config, models = result
         self._clear()
         self.config = config
+        schema = config.get("schema")
         for name, value in sorted(config.get("values", {}).items()):
-            editor = _Editor(name, value, models if name == "model" else None)
+            meta = (schema or {}).get(name)
+            if meta is None and name == "model":
+                meta = {"type": "model"}
+            editor = _Editor(name, value, meta, models if name == "model" else None)
             self.editors[name] = editor
             source = config.get("source", {}).get(name)
             label = f"{name}{' *' if source == 'override' else ''}:"
             self.form.addRow(label, editor.widget)
         self.apply_button.setEnabled(True)
+        note = (
+            ""
+            if schema
+            else "; сервіс не публікує схему полів (стара версія) - частина полів"
+            " як текст, оновіть сервіс"
+        )
         self.status.setText(
-            f"версія {config.get('version')}; * = змінено на вузлі (не з env)"
+            f"версія {config.get('version')}; * = змінено на вузлі (не з env){note}"
         )
         self.loaded.emit(self.endpoint())
 
@@ -304,14 +381,14 @@ class AsrTab(QWidget):
         self.preview.setReadOnly(True)
         self.preview.setFixedHeight(80)
         form.addRow("Шаблон prompt:", self.prompt)
+        form.addRow("Слів у {{previous_text}}:", self.previous_words)
         form.addRow(
             "",
             QLabel(
-                "Змінні (необов'язкові): {{previous_text}} - попередні слова,"
-                " {{source_lang}}"
+                "Змінні (необов'язкові): {{previous_text}} - попередні слова"
+                " (0 = жодних), {{source_lang}}; без змінних текст іде як є"
             ),
         )
-        form.addRow("Попередніх слів:", self.previous_words)
         form.addRow("Попередній перегляд:", self.preview)
         self._source_lang = settings.source_language
         self.prompt.textChanged.connect(self.update_preview)
@@ -329,10 +406,13 @@ class AsrTab(QWidget):
             self.preview.setPlainText("\n".join(errors))
             return
         lang = None if self._source_lang == "auto" else self._source_lang
-        prompt = render_asr_prompt(
+        prompt, used = render_asr_prompt_counted(
             template, PREVIEW_PREVIOUS.split(), self.previous_words.value(), lang
         )
-        self.preview.setPlainText(prompt or "(без prompt)")
+        self.preview.setPlainText(
+            f"{prompt or '(без prompt)'}\n[у {{{{previous_text}}}} підставлено"
+            f" {used} слів]"
+        )
 
     def values(self) -> Dict[str, Any]:
         return {
@@ -507,6 +587,7 @@ class LlmTab(QWidget):
         form.addRow("", self.models_status)
         form.addRow("System prompt:", self.system_prompt)
         form.addRow("Шаблон запиту:", self.user_template)
+        form.addRow("Слів у {{text}}:", self.words_per_request)
         form.addRow(
             "",
             QLabel(
@@ -515,7 +596,6 @@ class LlmTab(QWidget):
             ),
         )
         form.addRow("", reset)
-        form.addRow("Слів на запит:", self.words_per_request)
         form.addRow("Temperature:", self.temperature)
         form.addRow("Max tokens:", self.max_tokens_cap)
         form.addRow("Контекст (пар фраз):", self.context_pairs)
@@ -580,7 +660,10 @@ class LlmTab(QWidget):
         lines = [f"[system] {build_messages(system, template, '', 'pl')[0]['content']}"]
         for n, chunk in enumerate(chunks, 1):
             user = build_messages(system, template, chunk, "pl")[-1]["content"]
-            lines.append(f"[запит {n}/{len(chunks)}] {user}")
+            words = len(chunk.split())
+            lines.append(
+                f"[запит {n}/{len(chunks)}, {{{{text}}}} = {words} слів] {user}"
+            )
         self.preview.setPlainText("\n".join(lines))
 
     def reset_prompts(self) -> None:

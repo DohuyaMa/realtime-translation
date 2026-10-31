@@ -8,7 +8,8 @@ from typing import ClassVar, Mapping, Optional
 
 from ..common.device import default_model
 from ..common.env import SettingsError, env_choice, env_float, env_int, env_str
-from ..common.settings import DEVICES, BaseSettings, base_from_env
+from ..common.model_registry import specs_for
+from ..common.settings import DEVICES, BaseSettings, FieldMeta, base_from_env
 from .engines import DEFAULT_TTS_ENGINE
 from .voices import KOKORO_VOICES
 
@@ -40,6 +41,24 @@ class TtsSettings(BaseSettings):
         "max_chars",
     }
     RELOAD_FIELDS: ClassVar[frozenset[str]] = BaseSettings.RELOAD_FIELDS | {"engine"}
+    FIELD_META: ClassVar[Mapping[str, FieldMeta]] = {
+        **BaseSettings.FIELD_META,
+        "device": FieldMeta("choice", "compute device", ("cpu", "cuda")),
+        "compute_type": FieldMeta(
+            "choice",
+            "ONNX precision (cpu: float32/int8, cuda: float32/float16)",
+            ("float32", "float16", "int8"),
+        ),
+        "backend": FieldMeta("choice", "TTS backend", TTS_BACKENDS),
+        "engine": FieldMeta("choice", "TTS engine", TTS_ENGINES),
+        "model": FieldMeta(
+            "model", "TTS model", tuple(s.alias for s in specs_for("tts"))
+        ),
+        "voice": FieldMeta("choice", "default voice", tuple(sorted(KOKORO_VOICES))),
+        "speed": FieldMeta("float", "default speed", min=0.25, max=4.0),
+        "sample_rate": FieldMeta("int", "output sample rate, Hz", min=8000, max=48000),
+        "max_chars": FieldMeta("int", "max input characters", min=1, max=1_000_000),
+    }
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] = os.environ) -> "TtsSettings":
@@ -69,5 +88,7 @@ class TtsSettings(BaseSettings):
             sample_rate=env_int(
                 env, keys["sample_rate"], 24000, min_value=8000, max_value=48000
             ),
-            max_chars=env_int(env, keys["max_chars"], 4096, min_value=1),
+            max_chars=env_int(
+                env, keys["max_chars"], 4096, min_value=1, max_value=1_000_000
+            ),
         )

@@ -236,3 +236,35 @@ def test_models_lists_registry_with_cache_state(tmp_path, monkeypatch):
         assert m["size"] > 0
         monkeypatch.setattr(ModelStore, "verify", lambda self, s, full=False: [])
         assert client.get("/v1/models").json()["models"][0]["cached"] is True
+
+
+def test_models_warn_large_on_cpu(tmp_path):
+    from src.services.common.model_store import ModelSettings
+    from src.services.common.models_http import list_models
+
+    ms = ModelSettings(tmp_path, download=True, full_verify=False, token_file=None)
+    cpu = {m["id"]: m for m in list_models("asr", "whisper-small", ms, "cpu")["models"]}
+    assert "warning" in cpu["whisper-large-v3"] and "warning" not in cpu["whisper-tiny"]
+    assert all(not m["cached"] for m in cpu.values())
+    gpu = list_models("asr", "whisper-small", ms, "cuda")["models"]
+    assert not any("warning" in m for m in gpu)
+
+
+def test_download_any_catalog_model_via_config_reload(tmp_path, monkeypatch):
+    """POST /config model=<alias> -> reload -> prepare_model downloads it."""
+    from src.services.common import model_store
+    from src.services.common.model_registry import get_spec
+
+    fetched = []
+
+    def fake_download(spec, target, token):
+        fetched.append(spec.alias)
+        for f in spec.files:
+            (target / f.path).parent.mkdir(parents=True, exist_ok=True)
+            (target / f.path).write_bytes(b"x" * 0)
+
+    spec = get_spec("whisper-tiny")
+    store = model_store.ModelStore(tmp_path, downloader=fake_download)
+    with pytest.raises(model_store.ModelIntegrityError):
+        store.ensure(spec, download=True)  # fake bytes: integrity check runs
+    assert fetched == ["whisper-tiny"]

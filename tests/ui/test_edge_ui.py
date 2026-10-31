@@ -289,7 +289,10 @@ class FakeServiceClient:
     """rt-asr / rt-tts admin API stand-in for the settings tabs."""
 
     def __init__(self):
+        from src.services.asr.settings import AsrSettings
+
         self.config = {
+            "schema": AsrSettings.field_schema(),
             "values": {
                 "model": "whisper-small",
                 "beam_size": 1,
@@ -368,11 +371,13 @@ def test_asr_panel_lists_cached_models_and_applies_changes(app):
     assert panel.changes() == {}
     model.setCurrentIndex(1)
     panel.editors["beam_size"].widget.setValue(5)
-    panel.editors["languages"].widget.setText("pl, uk, en")
+    langs = panel.editors["languages"].widget
+    en = [langs.item(i).text() for i in range(langs.count())].index("en")
+    langs.item(en).setCheckState(Qt.CheckState.Checked)
     assert panel.changes() == {
         "model": "whisper-large-v3-turbo",
         "beam_size": 5,
-        "languages": ["pl", "uk", "en"],
+        "languages": ["en", "pl", "uk"],
     }
     panel.apply()
     values, version, timeout = client.posted[0]
@@ -533,10 +538,15 @@ def test_llm_tab_preview_and_words_per_request(app):
     assert tab.words_per_request.value() == 40
     text = tab.preview.toPlainText()
     assert "[system] You are a professional interpreter" in text and "Polish" in text
-    assert "[запит 1/1] [Polish->English] Dzień dobry wszystkim." in text
+    assert (
+        "[запит 1/1, {{text}} = 16 слів] [Polish->English] Dzień dobry wszystkim."
+        in text
+    )
     tab.words_per_request.setValue(3)
     lines = tab.preview.toPlainText().splitlines()
-    assert lines[1] == "[запит 1/6] [Polish->English] Dzień dobry wszystkim."
+    assert lines[1] == (
+        "[запит 1/6, {{text}} = 3 слів] [Polish->English] Dzień dobry wszystkim."
+    )
     assert tab.values()["services.llm.words_per_request"] == 3
     tab.user_template.setPlainText("no placeholder")
     assert "must contain {{text}}" in tab.preview.toPlainText()
@@ -616,18 +626,68 @@ def test_asr_tab_template_previous_words_and_preview(app):
     assert s.asr.prompt == "{{previous_text}}" and s.asr.previous_words == 30
     tab = AsrTab(s, [], lambda e: None, Background(sync=True))
     tab.previous_words.setValue(3)
-    assert tab.preview.toPlainText() == "сервісів розпізнавання мовлення"
-    tab.prompt.setPlainText("NixOS, Kubernetes ({{source_lang}}). {{previous_text}}")
     assert tab.preview.toPlainText() == (
+        "сервісів розпізнавання мовлення\n[у {{previous_text}} підставлено 3 слів]"
+    )
+    tab.prompt.setPlainText("NixOS, Kubernetes ({{source_lang}}). {{previous_text}}")
+    assert tab.preview.toPlainText().splitlines()[0] == (
         "NixOS, Kubernetes (Ukrainian). сервісів розпізнавання мовлення"
     )
     tab.prompt.setPlainText("Тільки словник")  # no variables: sent as-is
-    assert tab.preview.toPlainText() == "Тільки словник"
+    assert tab.preview.toPlainText() == (
+        "Тільки словник\n[у {{previous_text}} підставлено 0 слів]"
+    )
     tab.prompt.setPlainText("{{previous}}")
     assert "unknown placeholder(s) previous" in tab.preview.toPlainText()
     tab.prompt.setPlainText("")
-    assert tab.preview.toPlainText() == "(без prompt)"
+    assert tab.preview.toPlainText().startswith("(без prompt)")
     assert tab.values() == {
         "services.asr.prompt": "",
         "services.asr.previous_words": 3,
     }
+
+
+def test_node_editor_controls_follow_schema(app):
+    from PySide6.QtWidgets import QCheckBox, QComboBox, QListWidget, QSpinBox
+
+    from src.ui.widgets.service_tabs import Background, ServiceConfigPanel
+
+    client = FakeServiceClient()
+    panel = ServiceConfigPanel(
+        "asr",
+        [_ep("cyborg", "http://127.0.0.1:8091", True)],
+        lambda e: client,
+        Background(sync=True),
+    )
+    panel.load()
+    ed = panel.editors
+    assert isinstance(ed["model"].widget, QComboBox)
+    assert isinstance(ed["language"].widget, QComboBox)
+    assert ed["language"].widget.currentText() == "auto / не задано"
+    assert ed["language"].read() is None
+    assert isinstance(ed["languages"].widget, QListWidget)
+    assert isinstance(ed["vad_filter"].widget, QCheckBox)
+    beam = ed["beam_size"].widget
+    assert isinstance(beam, QSpinBox) and (beam.minimum(), beam.maximum()) == (1, 10)
+    model = ed["model"].widget
+    ids = [model.itemData(i) for i in range(model.count())]
+    assert "whisper-medium" in ids and "whisper-tiny" in ids  # full catalog
+    lang = ed["language"].widget
+    lang.setCurrentIndex(lang.findData("uk"))
+    assert panel.changes() == {"language": "uk"}
+    assert "схему" not in panel.status.text()
+
+
+def test_node_editor_without_schema_says_so(app):
+    from src.ui.widgets.service_tabs import Background, ServiceConfigPanel
+
+    client = FakeServiceClient()
+    del client.config["schema"]
+    panel = ServiceConfigPanel(
+        "asr",
+        [_ep("cyborg", "http://127.0.0.1:8091", True)],
+        lambda e: client,
+        Background(sync=True),
+    )
+    panel.load()
+    assert "не публікує схему" in panel.status.text()

@@ -139,12 +139,26 @@ def render_asr_prompt(
 ) -> str | None:
     """Rendered Whisper prompt; ``{{previous_text}}`` = the last ``count``
     words, dropped from the oldest (whole words) until within ``max_chars``."""
-    words = list(previous_words[-count:]) if count > 0 else []
+    return render_asr_prompt_counted(
+        template, previous_words, count, source_lang, max_chars
+    )[0]
+
+
+def render_asr_prompt_counted(
+    template: str,
+    previous_words: list[str],
+    count: int,
+    source_lang: str | None,
+    max_chars: int = ASR_PROMPT_MAX_CHARS,
+) -> tuple[str | None, int]:
+    """(prompt, number of words actually substituted into {{previous_text}})."""
+    uses = "previous_text" in {m.group(1) for m in _PLACEHOLDER.finditer(template)}
+    words = list(previous_words[-count:]) if count > 0 and uses else []
     lang = LANGUAGE_NAMES.get(source_lang or "", "")
     while True:
         text = render(
             template, {"previous_text": " ".join(words), "source_lang": lang}
         ).strip()
         if len(text) <= max_chars or not words:
-            return text or None
+            return text or None, len(words)
         words.pop(0)

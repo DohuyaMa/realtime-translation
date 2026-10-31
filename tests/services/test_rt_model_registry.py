@@ -38,9 +38,25 @@ def test_unknown_alias():
 
 
 def test_specs_for_service():
+    # the faster-whisper catalog (faster_whisper.utils._MODELS, aliases deduped)
     assert {s.alias for s in mr.specs_for("asr")} == {
+        "whisper-tiny",
+        "whisper-tiny.en",
+        "whisper-base",
+        "whisper-base.en",
         "whisper-small",
+        "whisper-small.en",
+        "whisper-medium",
+        "whisper-medium.en",
+        "whisper-large-v1",
+        "whisper-large-v2",
+        "whisper-large-v3",
         "whisper-large-v3-turbo",
+        "whisper-distil-large-v2",
+        "whisper-distil-large-v3",
+        "whisper-distil-large-v3.5",
+        "whisper-distil-medium.en",
+        "whisper-distil-small.en",
     }
     assert {s.alias for s in mr.specs_for("tts")} == {"kokoro-82m-v1.0-onnx"}
 
@@ -60,3 +76,13 @@ def test_onnx_spec_has_required_files():
 def test_allow_patterns_are_file_paths():
     spec = mr.get_spec("whisper-small")
     assert spec.allow_patterns == [f.path for f in spec.files]
+
+
+def test_every_faster_whisper_repo_is_pinned():
+    pytest.importorskip("faster_whisper")
+    from faster_whisper.utils import _MODELS
+
+    pinned = {s.repo_id for s in mr.specs_for("asr")}
+    # large-v3-turbo is pinned from the dropbox-dash mirror of the same weights
+    expected = set(_MODELS.values()) - {"mobiuslabsgmbh/faster-whisper-large-v3-turbo"}
+    assert expected <= pinned

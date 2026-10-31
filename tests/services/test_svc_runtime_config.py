@@ -8,12 +8,13 @@ from fastapi.testclient import TestClient
 from src.services.common.app import create_service_app
 from src.services.common.runtime import ServiceRuntime
 from src.services.common.runtime_config import RuntimeConfig, build_config_router
-from src.services.common.settings import BaseSettings, base_from_env
+from src.services.common.settings import BaseSettings, FieldMeta, base_from_env
 
 
 class AsrSettings(BaseSettings):
     BACKEND_ENV = "RT_ASR_BACKEND"
     TUNABLE_FIELDS = frozenset({"log_level", "max_pending"})
+    FIELD_META = {**BaseSettings.FIELD_META, "max_pending": FieldMeta("int", min=1)}
 
     @classmethod
     def from_env(cls, env):
@@ -37,7 +38,15 @@ def _cfg(state_path=None, env=None):
 
 def test_effective_shape_bootstrap_only():
     eff = _cfg().effective()
-    assert set(eff) == {"values", "source", "bootstrap", "version"}
+    assert set(eff) == {"values", "source", "bootstrap", "version", "schema"}
+    assert eff["schema"]["max_pending"] == {
+        "type": "int",
+        "description": "",
+        "min": 1,
+        "nullable": False,
+        "reload": False,
+    }
+    assert eff["schema"]["model"]["reload"] is True
     assert eff["version"] == 0
     assert eff["values"] == eff["bootstrap"]
     assert set(eff["values"]) == {

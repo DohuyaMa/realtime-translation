@@ -15,7 +15,8 @@ from ..common.env import (
     env_int,
     env_str,
 )
-from ..common.settings import DEVICES, BaseSettings, base_from_env
+from ..common.model_registry import specs_for
+from ..common.settings import DEVICES, BaseSettings, FieldMeta, base_from_env
 
 ASR_BACKENDS = ("faster-whisper", "fake")
 
@@ -78,6 +79,38 @@ class AsrSettings(BaseSettings):
         "chunk_seconds": "RT_ASR_CHUNK_SECONDS",
         "chunk_lookback_seconds": "RT_ASR_CHUNK_LOOKBACK_SECONDS",
         "realtime_max_seconds": "RT_ASR_REALTIME_MAX_SECONDS",
+    }
+    FIELD_META: ClassVar[Mapping[str, FieldMeta]] = {
+        **BaseSettings.FIELD_META,
+        "backend": FieldMeta("choice", "ASR backend", ASR_BACKENDS),
+        "model": FieldMeta(
+            "model",
+            "Whisper model (downloaded on apply if not cached)",
+            tuple(s.alias for s in specs_for("asr")),
+        ),
+        "language": FieldMeta(
+            "choice",
+            "default language; empty = auto-detect",
+            ("", *sorted(WHISPER_LANGUAGES)),
+            nullable=True,
+        ),
+        "languages": FieldMeta(
+            "multichoice",
+            "languages auto-detection may pick",
+            tuple(sorted(WHISPER_LANGUAGES)),
+        ),
+        "beam_size": FieldMeta("int", "beam search width", min=1, max=10),
+        "vad_filter": FieldMeta("bool", "skip silence (Silero VAD)"),
+        "max_upload_mb": FieldMeta("int", "max upload, MB", min=1, max=1000),
+        "chunk_seconds": FieldMeta(
+            "float", "batch chunk length, s", min=30.0, max=900.0
+        ),
+        "chunk_lookback_seconds": FieldMeta(
+            "float", "batch chunk overlap, s", min=5.0, max=120.0
+        ),
+        "realtime_max_seconds": FieldMeta(
+            "float", "max realtime phrase, s", min=5.0, max=120.0
+        ),
     }
     TUNABLE_FIELDS: ClassVar[frozenset[str]] = BaseSettings.TUNABLE_FIELDS | {
         "language",

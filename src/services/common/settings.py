@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import ipaddress
 import os
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import (
     Any,
     ClassVar,
@@ -21,6 +21,38 @@ DEFAULT_PORTS = {"rt-asr": 8091, "rt-tts": 8093}
 DEFAULT_LISTEN_ADDRESSES = ("127.0.0.1",)
 DEVICES = ("cpu", "cuda", "rocm")
 LOG_LEVELS = ("trace", "debug", "info", "warning", "error", "critical")
+
+
+CT2_COMPUTE_TYPES = (
+    "int8",
+    "int8_float16",
+    "int8_float32",
+    "int8_bfloat16",
+    "float16",
+    "bfloat16",
+    "float32",
+)
+
+
+@dataclass(frozen=True)
+class FieldMeta:
+    """Schema of one runtime field, published in ``GET /config``.
+
+    type: bool | int | float | choice | multichoice | model | text.
+    ``choices`` for choice/multichoice ("" = unset/auto when ``nullable``);
+    ``model``: choices are the service's pinned models (see GET /v1/models).
+    Ranges must match the env readers (checked by tests).
+    """
+
+    type: str
+    description: str = ""
+    choices: Optional[tuple[str, ...]] = None
+    min: Optional[float] = None
+    max: Optional[float] = None
+    nullable: bool = False
+
+    def as_dict(self) -> dict:
+        return {k: v for k, v in asdict(self).items() if v is not None}
 
 
 def render_env_value(value: object) -> str:
@@ -66,6 +98,14 @@ class BaseSettings:
         "config_state": "RT_CONFIG_STATE",
         "idle_unload_minutes": "RT_IDLE_UNLOAD_MINUTES",
     }
+    # Schema of the runtime (TUNABLE | RELOAD) fields; subclasses extend it.
+    FIELD_META: ClassVar[Mapping[str, FieldMeta]] = {
+        "log_level": FieldMeta("choice", "log level", LOG_LEVELS),
+        "device": FieldMeta("choice", "compute device", DEVICES),
+        "compute_type": FieldMeta("choice", "precision", CT2_COMPUTE_TYPES),
+        "backend": FieldMeta("text", "backend"),
+        "model": FieldMeta("text", "model alias or absolute directory"),
+    }
     # Changeable at runtime without reloading the model.
     BACKEND_ENV: ClassVar[Optional[str]] = None
     TUNABLE_FIELDS: ClassVar[frozenset[str]] = frozenset({"log_level"})
@@ -93,6 +133,17 @@ class BaseSettings:
                 " (set BACKEND_ENV?)"
             )
         return keys - cls.TUNABLE_FIELDS - cls.RELOAD_FIELDS
+
+    @classmethod
+    def field_schema(cls) -> Dict[str, dict]:
+        """Runtime fields -> FieldMeta dict + ``reload`` flag (GET /config)."""
+        out = {}
+        for name in sorted(cls.TUNABLE_FIELDS | cls.RELOAD_FIELDS):
+            meta = cls.FIELD_META.get(name)
+            if meta is None:
+                raise TypeError(f"{cls.__name__}: no FIELD_META for {name!r}")
+            out[name] = meta.as_dict() | {"reload": name in cls.RELOAD_FIELDS}
+        return out
 
     @property
     def is_gpu(self) -> bool:

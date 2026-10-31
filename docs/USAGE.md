@@ -21,7 +21,7 @@
 - `translate` - короткі фрази: ASR -> LLM -> TTS; потребує джерела LLM і TTS (`local.llm`/`local.tts` або `django_urls`);
 - `auto` (default) - `translate`, якщо є джерела LLM і TTS, інакше `transcribe`.
 
-Сервіси доступні лише через HTTP (OpenAI-сумісний стиль): `POST /audio/transcriptions`, `POST /audio/speech`, `GET /audio/voices`, `GET /models` (pinned моделі сервісу, `cached`), `GET /health`, `GET /status`, `GET|POST /config`. Опційний токен: `RT_API_TOKEN_FILE` (заголовок `Authorization: Bearer <token>` або `Token <token>`; edge шле `Token`).
+Сервіси доступні лише через HTTP (OpenAI-сумісний стиль): `POST /audio/transcriptions`, `POST /audio/speech`, `GET /audio/voices`, `GET /models` (pinned моделі сервісу: `cached`, `size`, `warning` для великих моделей на CPU-вузлі), `GET /health`, `GET /status`, `GET|POST /config` (`GET` віддає також `schema`: для кожного поля тип `bool|int|float|choice|multichoice|model|text`, `choices`, `min`/`max`, опис, `reload` - з неї діалог будує випадаючі списки, лічильники й прапорці). Опційний токен: `RT_API_TOKEN_FILE` (заголовок `Authorization: Bearer <token>` або `Token <token>`; edge шле `Token`).
 
 Пакети flake: `rt-edge` (default package, `nix run .`), `rt-asr-{cpu,gpu}`, `rt-tts-{cpu,gpu}` (також ROCm-варіант ASR, якщо не `broken`), `nixosModules.rt-speech`, `nixosModules.virtual-sinks`, `overlays.default` (`pkgs.rtSpeech.{asr,tts}.<variant>`), `lib.rtSpeech`.
 
@@ -59,7 +59,7 @@ Edge говорить з воркером через app-сесію (розді�
 
 ## 3. Моделі
 
-Моделі закріплені в реєстрі (`whisper-small`, `whisper-large-v3-turbo`, `kokoro-82m-v1.0-onnx`) і зберігаються в `$RT_MODEL_DIR` (default `~/.cache/rt-speech/models`).
+Моделі закріплені в реєстрі (revision + sha256 кожного файлу): увесь каталог faster-whisper - `whisper-{tiny,base,small,medium}[.en]`, `whisper-large-v1/v2/v3`, `whisper-large-v3-turbo`, `whisper-distil-{large-v2,large-v3,large-v3.5,medium.en,small.en}` - і `kokoro-82m-v1.0-onnx`. `.en` - лише англійська і зберігаються в `$RT_MODEL_DIR` (default `~/.cache/rt-speech/models`).
 
 ```bash
 rt-models list                         # alias, сервіс, ліцензія, ok|missing
@@ -176,9 +176,9 @@ curl -s -X POST http://127.0.0.1:8091/config -H "$H" \
 | `services.llm.{max_tokens_cap,temperature,context_pairs,timeout_s}` | - | 512 / 0.1 / 3 / 15 |
 | `services.llm.system_prompt` | - | system prompt перекладу; змінні `{{source_lang}}`, `{{target_lang}}`; `""` = вбудований |
 | `services.llm.user_template` | - | шаблон запиту до LLM: `{{text}}` (обов'язкова - куди вставляються слова), `{{source_lang}}`, `{{target_lang}}`; `""` = `{{text}}`. Старий синтаксис `{lang}`/`{text}` - WARNING, використовується типовий шаблон (видно в діалозі) |
-| `services.llm.words_per_request` | - | скільки слів розпізнаного тексту в одному запиті до LLM (default 40, >= 1); довший текст ділиться по кінцях речень (якщо вміщаються, інакше по словах), кожна частина йде через шаблон, результати з'єднуються по порядку. Вкладка «Переклад» показує попередній перегляд запитів для зразкового речення |
+| `services.llm.words_per_request` | - | («Слів у {{text}}» поряд із шаблоном) скільки слів розпізнаного тексту в одному запиті до LLM (default 40, >= 1); довший текст ділиться по кінцях речень (якщо вміщаються, інакше по словах), кожна частина йде через шаблон, результати з'єднуються по порядку. Вкладка «Переклад» показує попередній перегляд запитів для зразкового речення |
 | `services.asr.prompt` | - | шаблон Whisper prompt (словник, імена, стиль); необов'язкові змінні `{{previous_text}}` (останні `previous_words` розпізнаних слів) і `{{source_lang}}`. Без змінних текст іде як є, попередні слова не додаються; `""` - без prompt; `null` = `{{previous_text}}`. Обрізається до ~300 символів (найстаріші слова цілими). Невідомі змінні - помилка збереження; у вкладці «Розпізнавання» попередній перегляд |
-| `services.asr.previous_words` | - | скільки останніх розпізнаних слів іде в `{{previous_text}}` (default 30, 0 = жодних) |
+| `services.asr.previous_words` | - | скільки останніх розпізнаних слів іде в `{{previous_text}}` (default 30, 0 = жодних); в UI - «Слів у {{previous_text}}» поряд із шаблоном, перегляд показує фактично підставлену кількість |
 | `services.tts.{voice,speed}` | - | голос (з `GET /v1/audio/voices`) і швидкість; `null` = типові сервісу |
 | `segmentation.translate.*` | - | `threshold, min_speech_ms, end_silence_ms, soft_max_ms, soft_silence_ms, hard_max_ms, lookback_ms, preroll_ms` |
 | `segmentation.transcribe.*` | - | `chunk_min_s` (300), `chunk_max_s` (600, <= 900), `soft_silence_ms, lookback_ms, keep_silence_ms` |

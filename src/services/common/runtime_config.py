@@ -70,6 +70,7 @@ class RuntimeConfig(Generic[S]):
                 },
                 "bootstrap": self._values(self._bootstrap),
                 "version": self._version,
+                "schema": self._cls.field_schema(),
             }
 
     def apply(

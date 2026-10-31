@@ -16,17 +16,21 @@ from .model_registry import specs_for
 from .model_store import ModelSettings
 from .runtime_config import RuntimeConfig
 
+# Above this size a model is too slow for realtime use on a CPU node.
+CPU_HEAVY_BYTES = 1_000_000_000
 
-def list_models(kind: str, current: str, settings: ModelSettings) -> dict:
+
+def list_models(
+    kind: str, current: str, settings: ModelSettings, device: str = "cpu"
+) -> dict:
     store = settings.store()
-    models = [
-        {
-            "id": spec.alias,
-            "cached": not store.verify(spec),
-            "size": sum(f.size for f in spec.files),
-        }
-        for spec in specs_for(kind)
-    ]
+    models = []
+    for spec in specs_for(kind):
+        size = sum(f.size for f in spec.files)
+        entry = {"id": spec.alias, "cached": not store.verify(spec), "size": size}
+        if device == "cpu" and size > CPU_HEAVY_BYTES:
+            entry["warning"] = "large model on a CPU node: slow, not realtime"
+        models.append(entry)
     return {"models": models, "current": current, "download": settings.download}
 
 
@@ -35,8 +39,9 @@ def build_models_router(kind: str, config: RuntimeConfig[Any]) -> APIRouter:
 
     @router.get("/models")
     async def models() -> dict:
+        s = config.current()
         return await run_in_threadpool(
-            list_models, kind, config.current().model, ModelSettings.from_env()
+            list_models, kind, s.model, ModelSettings.from_env(), s.device
         )
 
     return router
