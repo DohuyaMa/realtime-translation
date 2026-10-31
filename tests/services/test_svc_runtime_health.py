@@ -1,6 +1,7 @@
 import asyncio
 import threading
 import time
+import weakref
 
 import pytest
 from fastapi import APIRouter
@@ -8,8 +9,9 @@ from fastapi.testclient import TestClient
 
 from src.services.common.app import create_service_app
 from src.services.common.env import SettingsError
+from src.services.common.errors import ApiError
 from src.services.common.gpu import VramProbe
-from src.services.common.runtime import ModelState, ServiceRuntime
+from src.services.common.runtime import MB, ModelBusy, ModelState, ServiceRuntime
 from src.services.common.serve import run_service
 from src.services.common.settings import BaseSettings, base_from_env
 
@@ -26,6 +28,13 @@ class GatedBackend:
         self.gate = gate
         self.fail = fail
         self.loaded_on = None
+        self.unloaded = False
+
+    def fetch(self, progress=None):
+        pass
+
+    def unload(self):
+        self.unloaded = True
 
     def load(self):
         if self.gate is not None:
@@ -104,21 +113,27 @@ def test_health_ok_while_loading_and_status_transitions():
     with TestClient(app) as client:
         assert client.get("/health").json() == {
             "status": "ok",
-            "model": {"loaded": False, "state": "loading"},
+            "model": {"state": "loading"},
         }
         status = client.get("/status").json()
         assert status["ready"] is False and status["model"]["state"] == "loading"
         r = client.get("/v1/echo", params={"x": "a"})
-        assert r.status_code == 503 and r.json()["error"]["code"] == "model_not_ready"
+        assert r.status_code == 503 and r.json()["error"]["code"] == "model_loading"
         assert r.headers["retry-after"] == "5"
         gate.set()
         assert runtime.wait_ready(5)
         status = client.get("/status").json()
         assert status["service"] == "rt-asr" and status["version"] == "0.1.0"
-        assert status["device"] == "cpu" and status["backend"] == "fake"
-        assert status["model"]["id"] == "gated-model"
-        assert status["model"]["loaded"] is True
-        assert status["ready"] is True and status["vram_mb"] is None
+        assert status["backend"] == "fake"
+        assert status["model"] == {
+            "id": "gated-model",
+            "state": "ready",
+            "error": None,
+            "download": None,
+            "device": "cpu",
+        }
+        assert status["ready"] is True and status["memory"]["vram_mb"] is None
+        assert status["memory"]["rss_mb"] > 0 and "swap_mb" in status["memory"]
         assert status["pending"] == 0
         assert client.get("/v1/echo", params={"x": "a"}).json() == {"x": "a"}
 
@@ -128,10 +143,10 @@ def test_failed_load_reported():
     with TestClient(app) as client:
         assert not runtime.wait_ready(5)
         status = client.get("/status").json()
-        assert status["ready"] is False and status["model"]["state"] == "failed"
+        assert status["ready"] is False and status["model"]["state"] == "error"
         assert "no weights" in status["model"]["error"]
         r = client.get("/v1/echo", params={"x": "a"})
-        assert r.status_code == 503 and r.json()["error"]["code"] == "model_failed"
+        assert r.status_code == 503 and r.json()["error"]["code"] == "model_error"
 
 
 def test_lifespan_hooks_started_and_stopped():
@@ -158,20 +173,20 @@ def test_vram_probe_parses_own_pid_and_caches():
         return Result()
 
     clock = iter([0.0, 1.0, 10.0])
-    probe = VramProbe("cuda", runner=runner, clock=lambda: next(clock), pid=111)
-    assert probe.read() == 512
-    assert probe.read() == 512
+    probe = VramProbe(runner=runner, clock=lambda: next(clock), pid=111)
+    assert probe.read("cuda") == 512
+    assert probe.read("cuda") == 512
     assert len(calls) == 1
-    probe.read()
+    probe.read("cuda")
     assert len(calls) == 2
-    assert VramProbe("cpu", runner=runner).read() is None
+    assert VramProbe(runner=runner).read("cpu") is None
 
 
 def test_vram_probe_handles_missing_nvidia_smi():
     def runner(*args, **kwargs):
         raise FileNotFoundError("nvidia-smi")
 
-    assert VramProbe("cuda", runner=runner).read() is None
+    assert VramProbe(runner=runner).read("cuda") is None
 
 
 def test_full_queue_returns_503_server_busy():
@@ -216,7 +231,7 @@ def test_status_has_pending_and_config_version():
         status = client.get("/status").json()
         assert status["config_version"] == 7
         assert status["backend"] == "reloaded"
-        assert status["device"] == "cuda"
+        assert status["model"]["device"] == "cuda"
         assert status["model"]["id"] == "new-model"
         assert app.state.config is config
 
@@ -232,150 +247,333 @@ def test_status_pending_counts_queued_jobs():
         blocker.result(5)
 
 
-def test_reload_swaps_backend_on_success(started):
-    old, new = GatedBackend(), GatedBackend()
-    runtime = started(old)
-    runtime.reload(lambda: new)
-    assert runtime.backend is new and runtime.require_ready() is new
-    assert runtime.state is ModelState.READY and runtime.error is None
-    assert runtime.load_seconds is not None
-    # loaded off the caller and off the inference thread
-    assert new.loaded_on == "rt-asr-loader"
-    assert runtime.submit_threadsafe(runtime.backend.echo, "x").result(5) == "x"
+class Backends:
+    """Backend factory handing out queued backends (or raising)."""
+
+    def __init__(self, *backends):
+        self.queue = list(backends)
+        self.built = []
+
+    def __call__(self):
+        item = self.queue.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        self.built.append(item)
+        return item
 
 
-def _factory_raises():
-    raise ValueError("bad backend")
-
-
-@pytest.mark.parametrize(
-    "factory, exc, match",
-    [
-        (lambda: GatedBackend(fail="out of memory"), RuntimeError, "out of memory"),
-        (_factory_raises, ValueError, "bad backend"),
-    ],
-)
-def test_reload_failure_keeps_old_backend(started, factory, exc, match):
-    old = GatedBackend()
-    runtime = started(old)
-    with pytest.raises(exc, match=match):
-        runtime.reload(factory)
-    assert runtime.backend is old and runtime.require_ready() is old
-    assert runtime.state is ModelState.READY and runtime.error is None
-    assert runtime.submit_threadsafe(old.echo, "still").result(5) == "still"
-
-
-def test_reload_after_failed_load_recovers():
-    runtime = ServiceRuntime("rt-asr", lambda: GatedBackend(fail="no weights"), 4)
+def _runtime(*backends, **kw):
+    runtime = ServiceRuntime("rt-asr", Backends(*backends), 4, **kw)
     runtime.start()
+    return runtime
+
+
+def _load_when_free(runtime, timeout=5.0):
+    """load() once the abandoned load has released the model slot."""
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            return runtime.load()
+        except ModelBusy:
+            assert time.monotonic() < deadline
+            time.sleep(0.005)
+
+
+def _settle(runtime, timeout=5.0):
+    assert _until(
+        lambda: runtime.state in (ModelState.READY, ModelState.ERROR), timeout
+    ), runtime.state
+    return runtime.state
+
+
+def test_reload_unloads_old_model_before_loading_new():
+    old = GatedBackend()
+    gate = threading.Event()
+    new = GatedBackend(gate)
+    runtime = _runtime(old, new)
     try:
-        assert not runtime.wait_ready(5)
-        with pytest.raises(RuntimeError, match="again"):
-            runtime.reload(lambda: GatedBackend(fail="again"))
-        assert runtime.state is ModelState.FAILED and "again" in runtime.error
-        new = GatedBackend()
-        runtime.reload(lambda: new)
-        assert runtime.state is ModelState.READY and runtime.error is None
-        assert runtime.require_ready() is new
+        assert runtime.wait_ready(5)
+        runtime.reload()  # returns at once: the load is async
+        # the old model is gone before the new one loads: never two in memory
+        assert old.unloaded and runtime.backend is None
+        assert _until(lambda: runtime.state is ModelState.LOADING)
+        with pytest.raises(ApiError) as err:
+            runtime.require_ready()
+        assert err.value.status == 503 and err.value.code == "model_loading"
+        gate.set()
+        assert _settle(runtime) is ModelState.READY
+        assert runtime.backend is new and runtime.error is None
+        assert new.loaded_on == "rt-asr-loader"
+        assert runtime.submit_threadsafe(new.echo, "x").result(5) == "x"
     finally:
         runtime.stop()
 
 
-def test_reload_shows_loading_while_old_backend_serves():
+@pytest.mark.parametrize(
+    "second, match",
+    [
+        (GatedBackend(fail="CUDA failed with error out of memory"), "out of memory"),
+        (ValueError("bad backend"), "bad backend"),
+    ],
+)
+def test_reload_failure_is_explicit_error_without_old_model(second, match):
     old = GatedBackend()
+    runtime = _runtime(old, second, GatedBackend())
+    try:
+        assert runtime.wait_ready(5)
+        runtime.reload()
+        assert _settle(runtime) is ModelState.ERROR
+        assert match in runtime.error and runtime.backend is None
+        assert old.unloaded  # no keeping/restoring the old model
+        with pytest.raises(ApiError) as err:
+            runtime.require_ready()
+        assert err.value.code == "model_error" and match in err.value.message
+        assert runtime.load() is True  # explicit retry
+        assert _settle(runtime) is ModelState.READY and runtime.error is None
+    finally:
+        runtime.stop()
+
+
+def test_reload_unload_waits_for_running_job():
+    old, new = GatedBackend(), GatedBackend()
+    runtime = _runtime(old, new)
+    try:
+        assert runtime.wait_ready(5)
+        seen = []
+        in_job, release = threading.Event(), threading.Event()
+
+        def job():
+            seen.append(runtime.backend)
+            in_job.set()
+            assert release.wait(5)
+            seen.append(runtime.backend)
+
+        fut = runtime.submit_threadsafe(job)
+        assert in_job.wait(5)
+        thread = threading.Thread(target=runtime.reload)
+        thread.start()
+        time.sleep(0.05)
+        assert not old.unloaded  # never under a running job
+        release.set()
+        fut.result(5)
+        thread.join(5)
+        assert seen == [old, old] and old.unloaded
+        assert _settle(runtime) is ModelState.READY and runtime.backend is new
+    finally:
+        runtime.stop()
+
+
+def test_load_timeout_covers_load_only_and_abandoned_load_is_discarded():
     gate = threading.Event()
-    new = GatedBackend(gate)
-    app, runtime = _app(old)
-    errors = []
+    slow = GatedBackend(gate)
+    runtime = _runtime(slow, GatedBackend(), load_timeout_s=0.1)
+    try:
+        assert _settle(runtime) is ModelState.ERROR
+        assert "did not finish within" in runtime.error
+        # the abandoned load still runs: no second load may start next to it
+        with pytest.raises(ModelBusy, match="abandoned"):
+            runtime.load()
+        with pytest.raises(ModelBusy):
+            runtime.unload()
+        gate.set()
+        assert _until(lambda: slow.unloaded)  # discarded when it ends
+        assert runtime.backend is None and runtime.state is ModelState.ERROR
+        assert _load_when_free(runtime)
+        assert _settle(runtime) is ModelState.READY
+    finally:
+        runtime.stop()
 
-    def do_reload():
-        try:
-            runtime.reload(lambda: new)
-        except Exception as exc:  # pragma: no cover - surfaced below
-            errors.append(exc)
 
+def test_download_is_not_bounded_by_load_timeout_and_reports_progress():
+    fetching, release = threading.Event(), threading.Event()
+
+    class Downloading(GatedBackend):
+        def fetch(self, progress=None):
+            progress(0, 300 * MB)
+            fetching.set()
+            assert release.wait(5)
+            progress(150 * MB, 300 * MB)
+            assert release.wait(5)
+
+    runtime = _runtime(Downloading(), load_timeout_s=0.05)
+    try:
+        assert fetching.wait(5)
+        time.sleep(0.2)  # well past the load timeout
+        assert runtime.state is ModelState.DOWNLOADING
+        assert runtime.download == {"done_mb": 0.0, "total_mb": 300.0}
+        with pytest.raises(ApiError) as err:
+            runtime.require_ready()
+        assert err.value.code == "model_downloading" and "0/300 MB" in str(
+            err.value.message
+        )
+        release.set()
+        assert _settle(runtime) is ModelState.READY and runtime.download is None
+    finally:
+        runtime.stop()
+
+
+def test_unload_and_load_explicitly():
+    runtime = _runtime(GatedBackend(), GatedBackend())
+    try:
+        assert runtime.wait_ready(5)
+        first = runtime.backend
+        assert runtime.load() is False  # already ready
+        assert runtime.unload() is True
+        assert first.unloaded and runtime.backend is None
+        assert runtime.state is ModelState.UNLOADED and not runtime.ready
+        assert runtime.unload() is False
+        with pytest.raises(ApiError) as err:
+            runtime.require_ready()
+        assert err.value.code == "model_unloaded"
+        assert runtime.load() is True
+        assert _settle(runtime) is ModelState.READY
+    finally:
+        runtime.stop()
+
+
+def test_model_endpoints_and_503_with_state():
+    gate = threading.Event()
+    factory = Backends(GatedBackend(), GatedBackend(gate))
+    runtime = ServiceRuntime("rt-asr", factory, 4)
+    router = APIRouter()
+
+    @router.get("/echo")
+    async def echo(x: str):
+        b = await runtime.acquire()
+        return {"x": await runtime.run(b.echo, x)}
+
+    app = create_service_app(
+        settings=_settings(), runtime=runtime, token="t", routers=[router]
+    )
+    auth = {"Authorization": "Bearer t"}
     with TestClient(app) as client:
         assert runtime.wait_ready(5)
-        thread = threading.Thread(target=do_reload)
-        thread.start()
-        assert _until(lambda: runtime.state is ModelState.LOADING)
+        assert client.post("/model/unload").status_code == 401
+        r = client.post("/model/unload", headers=auth)
+        assert r.status_code == 200 and r.json()["model"]["state"] == "unloaded"
+        r = client.get("/v1/echo", params={"x": "a"}, headers=auth)
+        assert r.status_code == 503
+        assert r.json()["error"]["code"] == "model_unloaded"
         status = client.get("/status").json()
-        assert status["model"]["state"] == "loading" and status["ready"] is False
-        assert status["model"]["loaded"] is True
-        assert client.get("/v1/echo", params={"x": "a"}).json() == {"x": "a"}
-        assert runtime.require_ready() is old
+        assert status["ready"] is False and status["model"]["state"] == "unloaded"
+        r = client.post("/model/load", headers=auth)
+        assert r.status_code == 200 and r.json()["model"]["state"] == "loading"
+        r = client.post("/model/load", headers=auth)
+        assert r.status_code == 409 and r.json()["error"]["code"] == "model_busy"
+        r = client.get("/v1/echo", params={"x": "a"}, headers=auth)
+        assert r.status_code == 503 and r.json()["error"]["code"] == "model_loading"
         gate.set()
-        thread.join(5)
-        assert not thread.is_alive()
-        assert not errors
-        assert client.get("/status").json()["model"]["state"] == "ready"
-        assert runtime.backend is new
+        assert runtime.wait_ready(5)
+        assert client.get("/v1/echo", params={"x": "b"}, headers=auth).json() == {
+            "x": "b"
+        }
 
 
-def test_reload_swap_waits_for_running_job(started):
-    old, new = GatedBackend(), GatedBackend()
-    runtime = started(old)
-    seen = []
-    in_job = threading.Event()
-    release = threading.Event()
-
-    def job():
-        seen.append(runtime.backend)
-        in_job.set()
-        assert release.wait(5)
-        seen.append(runtime.backend)
-
-    fut = runtime.submit_threadsafe(job)
-    assert in_job.wait(5)
-    thread = threading.Thread(target=runtime.reload, args=(lambda: new,))
-    thread.start()
-    # new model loaded, swap queued behind the running job
-    assert _until(lambda: new.loaded_on is not None and runtime.worker.pending == 2)
-    assert runtime.backend is old
-    release.set()
-    fut.result(5)
-    thread.join(5)
-    assert not thread.is_alive()
-    assert seen == [old, old]
-    assert runtime.backend is new and runtime.state is ModelState.READY
+# --- memory: no backend outlives its unload --------------------------------
 
 
-def test_reload_timeout_keeps_old_backend(started):
-    old = GatedBackend()
-    gate = threading.Event()
-    new = GatedBackend(gate)
-    runtime = started(old)
-    with pytest.raises(TimeoutError):
-        runtime.reload(lambda: new, timeout_s=0.1)
-    assert runtime.backend is old and runtime.state is ModelState.READY
-    gate.set()
-    assert _until(lambda: new.loaded_on is not None)
-    # the abandoned load never gets swapped in; a later reload still works
-    newer = GatedBackend()
-    runtime.reload(lambda: newer)
-    assert runtime.backend is newer
+class Heavy(GatedBackend):
+    """Backend holding 'weights'; tracked by weakref."""
+
+    def __init__(self, gate=None, fail=None):
+        super().__init__(gate, fail)
+        self.weights = bytearray(1024)
 
 
-def test_reload_timeout_blocks_further_loads_until_abandoned_load_ends(started):
-    old = GatedBackend()
-    gate = threading.Event()
-    runtime = started(old)
-    with pytest.raises(TimeoutError, match="did not finish"):
-        runtime.reload(lambda: GatedBackend(gate), timeout_s=0.1)
-    built = []
+def _alive(refs):
+    """Live backends WITHOUT a gc pass here: the runtime frees them itself."""
+    return [r for r in refs if r() is not None]
+
+
+def test_no_backend_survives_reloads_failures_and_abandoned_loads():
+    refs = []
 
     def factory():
-        built.append(True)
-        return GatedBackend()
+        backend = Heavy(fail="CUDA failed with error out of memory" if fail else None)
+        refs.append(weakref.ref(backend))
+        return backend
 
-    # the abandoned load still runs: no second load may start next to it
-    with pytest.raises(TimeoutError, match="another model load is still running"):
-        runtime.reload(factory, timeout_s=0.1)
-    assert built == []
-    assert runtime.backend is old and runtime.state is ModelState.READY
-    gate.set()
-    runtime.reload(factory, timeout_s=5)  # waits for the abandoned load to end
-    assert built == [True] and runtime.state is ModelState.READY
+    fail = False
+    runtime = ServiceRuntime("rt-asr", factory, 4, load_timeout_s=5)
+    runtime.start()
+    try:
+        assert runtime.wait_ready(5)
+        for i in range(6):
+            fail = i % 2 == 1
+            runtime.reload()
+            _settle(runtime)
+            assert runtime.state is (ModelState.ERROR if fail else ModelState.READY)
+        fail = False
+        assert runtime.load() is True and _settle(runtime) is ModelState.READY
+        # only the current backend is alive: old and failed ones are freed
+        assert [r() for r in _alive(refs)] == [runtime.backend]
+        assert len(refs) == 8
+        current = runtime.backend
+        current_ref = weakref.ref(current)
+        del current
+        runtime.unload()
+        assert current_ref() is None and _alive(refs) == []
+    finally:
+        runtime.stop()
+
+
+def test_abandoned_load_backend_is_freed_when_it_ends():
+    gate = threading.Event()
+    refs = []
+
+    def factory():
+        backend = Heavy(gate)
+        refs.append(weakref.ref(backend))
+        return backend
+
+    runtime = ServiceRuntime("rt-asr", factory, 4, load_timeout_s=0.05)
+    runtime.start()
+    try:
+        assert _settle(runtime) is ModelState.ERROR
+        abandoned = refs[0]
+        gate.set()
+        assert _load_when_free(runtime)
+        assert abandoned() is None  # freed as soon as the load ended
+        assert _settle(runtime) is ModelState.READY
+        assert [r() for r in _alive(refs)] == [runtime.backend]
+    finally:
+        runtime.stop()
+
+
+@pytest.mark.slow
+@pytest.mark.timeout(900)
+def test_real_whisper_rss_stays_flat_over_model_switches(real_model_dir):
+    """faster-whisper tiny/base switched 20 times: RSS plateaus (allocator
+    noise only), no growth by a model per switch."""
+    from src.services.asr.backend import make_backend
+    from src.services.asr.settings import AsrSettings
+    from src.services.common.memory import process_memory
+
+    models = ["whisper-tiny", "whisper-base"]
+    current = {"i": 0}
+
+    def factory():
+        model = models[current["i"] % 2]
+        return make_backend(
+            AsrSettings.from_env(
+                {"RT_ASR_BACKEND": "faster-whisper", "RT_MODEL": model}
+            )
+        )
+
+    runtime = ServiceRuntime("rt-asr", factory, 4, load_timeout_s=600)
+    runtime.start()
+    try:
+        assert runtime.wait_ready(600), runtime.error
+        rss = []
+        for i in range(1, 21):
+            current["i"] = i
+            runtime.reload()
+            assert _settle(runtime, 600) is ModelState.READY, runtime.error
+            rss.append(process_memory()["rss_mb"])
+        # whisper-base alone is ~150 MB of RSS: a leak would add that per switch
+        assert max(rss[12:]) - max(rss[2:8]) < 100, rss
+    finally:
+        runtime.stop()
 
 
 @pytest.mark.asyncio
@@ -494,16 +692,13 @@ def test_lazy_load_on_first_request_and_health_never_loads():
     with TestClient(app) as client:
         for _ in range(3):
             health = client.get("/health").json()
-            assert health["model"] == {"loaded": False, "state": "unloaded"}
+            assert health["model"] == {"state": "unloaded"}
         status = client.get("/status").json()
         assert status["ready"] is True and status["model"]["state"] == "unloaded"
         assert loads == []
         assert client.get("/v1/echo", params={"x": "a"}).json() == {"x": "a"}
         assert loads == [1]
-        assert client.get("/health").json()["model"] == {
-            "loaded": True,
-            "state": "ready",
-        }
+        assert client.get("/health").json()["model"] == {"state": "ready"}
 
 
 def test_idle_unload_after_timeout_then_reload_on_demand():
@@ -519,9 +714,15 @@ def test_idle_unload_after_timeout_then_reload_on_demand():
         clock.t += 2
         assert runtime.check_idle() is True
         assert runtime.backend is None and runtime.state.value == "unloaded"
-        assert client.get("/health").json()["model"]["loaded"] is False
+        assert client.get("/health").json()["model"]["state"] == "unloaded"
+        assert client.get("/status").json()["ready"] is True  # wakes on request
         assert client.get("/v1/echo", params={"x": "c"}).json() == {"x": "c"}
         assert loads == [1, 1]
+        # an explicit unload is not undone by the next request
+        assert runtime.unload() is True
+        r = client.get("/v1/echo", params={"x": "d"})
+        assert r.status_code == 503 and r.json()["error"]["code"] == "model_unloaded"
+        assert client.get("/status").json()["ready"] is False and loads == [1, 1]
 
 
 def test_idle_unload_zero_loads_at_start_and_never_unloads(started):

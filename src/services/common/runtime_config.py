@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
 from .env import SettingsError
+from .errors import ApiError, error_body
 from .settings import BaseSettings, render_env_value
 
 log = logging.getLogger(__name__)
@@ -158,7 +159,11 @@ def build_config_router(
     cfg: RuntimeConfig[Any],
     on_reload: Optional[Callable[[Any], None]] = None,
 ) -> APIRouter:
-    """GET/POST /config. Without on_reload nothing is ever reported reloaded."""
+    """GET/POST /config. Without on_reload nothing is ever reported reloaded.
+
+    ``on_reload`` only starts the model change (unload, then an async load:
+    progress and errors are in /status); a refusal to start (e.g. 409
+    ``model_busy`` while another load runs) rolls the config back."""
     router = APIRouter()
     # Serializes snapshot + apply + reload + rollback of concurrent POSTs.
     update_lock = asyncio.Lock()
@@ -180,12 +185,16 @@ def build_config_router(
                 try:
                     await run_in_threadpool(on_reload, cfg.current())
                 except Exception as exc:  # noqa: BLE001 - report any reload failure
-                    detail = str(exc)
                     try:
                         cfg.rollback(snap)
                     except Exception:  # noqa: BLE001
                         log.exception("runtime config rollback failed")
-                    return JSONResponse({"detail": detail}, status_code=500)
+                    if isinstance(exc, ApiError):
+                        return JSONResponse(
+                            error_body(exc.status, exc.code, exc.message),
+                            status_code=exc.status,
+                        )
+                    return JSONResponse({"detail": str(exc)}, status_code=500)
                 reloaded = True
             return cfg.effective() | {"reloaded": reloaded}
 

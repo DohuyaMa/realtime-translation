@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Callable, Iterator, List, Optional
 
 import numpy as np
 
 from ..common.device import default_threads
-from ..common.model_store import ModelSettings, prepare_model
+from ..common.model_store import ModelSettings, Progress, prepare_model
 from .backend import UnsupportedVoiceLanguage
 from .engines import create_synthesizer
 from .g2p import UnknownVoice, lang_code_for_voice
@@ -30,18 +31,29 @@ class KokoroBackend:
         self.model_id = settings.model
         self._synth_factory = synth_factory
         self._prepare = prepare
+        self._path: Optional[Path] = None
         self._synth: Optional[Any] = None
 
+    def fetch(self, progress: Optional[Progress] = None) -> None:
+        self._path = self._prepare(
+            self._settings.model, ModelSettings.from_env(), progress
+        )
+
     def load(self) -> None:
-        path = self._prepare(self._settings.model, ModelSettings.from_env())
+        if self._path is None:
+            raise RuntimeError("load() before fetch()")
         self._synth = self._synth_factory(
             self._settings.engine,
-            path,
+            self._path,
             self._settings.device,
             self._settings.compute_type,
             default_threads(),
         )
         self.prepare_voice(self._settings.voice)
+
+    def unload(self) -> None:
+        # the ONNX session frees its arena when the last reference goes
+        self._synth = None
 
     def voices(self) -> List[Voice]:
         available = set(self._synth.voices())

@@ -268,3 +268,32 @@ def test_download_any_catalog_model_via_config_reload(tmp_path, monkeypatch):
     with pytest.raises(model_store.ModelIntegrityError):
         store.ensure(spec, download=True)  # fake bytes: integrity check runs
     assert fetched == ["whisper-tiny"]
+
+
+def test_tts_shares_the_model_lifecycle():
+    """rt-tts: explicit unload/load, 503 model_unloaded, model change via
+    /config = unload then load (shared ServiceRuntime)."""
+    import time
+
+    env = {"RT_TTS_BACKEND": "fake"}
+    app = create_app(TtsSettings.from_env(env), bootstrap_env=env, state_path=None)
+    runtime = app.state.runtime
+    with running(app) as client:
+        first = runtime.backend
+        r = client.post("/model/unload")
+        assert r.status_code == 200 and r.json()["model"]["state"] == "unloaded"
+        r = speech(client, input="hi")
+        assert r.status_code == 503 and r.json()["error"]["code"] == "model_unloaded"
+        assert client.post("/model/load").json()["model"]["state"] == "loading"
+        assert runtime.wait_ready(5)
+        r = client.post("/config", json={"version": 1, "values": {"model": "y"}})
+        assert r.status_code == 200 and r.json()["reloaded"] is True
+        deadline = time.monotonic() + 5
+        while runtime.state.value != "ready":
+            assert time.monotonic() < deadline
+            time.sleep(0.005)
+        assert runtime.backend is not first and runtime.backend.model_id == "y"
+        status = client.get("/status").json()
+        assert status["model"]["id"] == "y" and status["model"]["state"] == "ready"
+        assert "dropped_segments" not in status
+        assert speech(client, input="hi").status_code == 200

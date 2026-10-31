@@ -69,7 +69,7 @@ rt-models path <alias>
 rt-models --model-dir /var/lib/rt-asr/models list
 ```
 
-- Автозавантаження: під час старту сервіс сам завантажує відсутню модель (`RT_MODEL_DOWNLOAD=true`, default). Перевірка цілісності: `RT_MODEL_VERIFY=quick|full`.
+- Автозавантаження: під час старту сервіс сам завантажує відсутню модель (`RT_MODEL_DOWNLOAD=true`, default). Перевірка цілісності: `RT_MODEL_VERIFY=quick|full`. Скачування не обмежене таймаутом: `/status` показує `model.state = "downloading"` і `model.download = {done_mb, total_mb}`; таймаут (300 с) діє лише на завантаження готових файлів у RAM/VRAM.
 - Офлайн-режим: `rt-models fetch ...` наперед, потім `RT_MODEL_DOWNLOAD=false`. Токен HuggingFace (за потреби) - файл у `RT_HF_TOKEN_FILE`.
 - У `devShell` команда `rt-models` також доступна як `python -m src.services.common.models_cli`.
 
@@ -77,10 +77,10 @@ rt-models --model-dir /var/lib/rt-asr/models list
 
 ### 4.1 Env
 
-Класи: **BOOTSTRAP** - лише через env/рестарт; **TUNABLE** - змінюється через `/config` без перезавантаження моделі; **RELOAD** - змінюється через `/config`, але модель перезавантажується (при помилці - автоматичний rollback). Default-и нижче - для `RT_DEVICE=cpu` (на `cuda` default `RT_MODEL` для ASR - `whisper-large-v3-turbo`, beam 3, compute `int8_float16`).
+Класи: **BOOTSTRAP** - лише через env/рестарт; **TUNABLE** - змінюється через `/config` без перезавантаження моделі; **RELOAD** - змінюється через `/config`, модель перезавантажується: стара вивантажується, потім вантажиться нова (асинхронно; помилка - стан `error`, див. 4.2). Default-и нижче - для `RT_DEVICE=cpu` (на `cuda` default `RT_MODEL` для ASR - `whisper-large-v3-turbo`, beam 3, compute `int8_float16`).
 Таблиця згенерована (виконувати всередині `nix develop`): `python -m scripts.gen_env_table`.
 
-`RT_IDLE_UNLOAD_MINUTES` (NixOS: `services.rtSpeech.{asr,tts}.idleUnloadMinutes`): модель вантажиться першим запитом і вивантажується після N хвилин без запитів (кожне завантаження/вивантаження - у лозі); `0` - завантажити на старті й не вивантажувати. `/health` модель не вантажить, показує `model.loaded`/`model.state`; `/status` вважає вивантажену модель `ready` (перший запит після простою чекає завантаження).
+`RT_IDLE_UNLOAD_MINUTES` (NixOS: `services.rtSpeech.{asr,tts}.idleUnloadMinutes`): модель вантажиться першим запитом і вивантажується після N хвилин без запитів (кожне завантаження/вивантаження - у лозі); `0` - завантажити на старті й не вивантажувати. `/health` модель не вантажить, показує `model.state`; `/status` вважає вивантажену за простоєм модель `ready` (перший запит після простою чекає завантаження з диска). Явне `POST /model/unload` запитами не скасовується: модель лишається вивантаженою до `POST /model/load` або зміни моделі.
 
 **rt-asr**
 
@@ -153,9 +153,26 @@ curl -s -X POST http://127.0.0.1:8091/config -H "$H" \
   -d '{"version": 3, "values": {}, "reset": ["chunk_seconds", "model"]}'
 ```
 
-Помилки: 422 - невалідне значення або BOOTSTRAP-поле (`... is not runtime-configurable`); 500 - не вдалося перезавантажити модель (конфіг відкотився). Overrides зберігаються у файлі `RT_CONFIG_STATE` і переживають рестарт.
+Зміна моделі/пристрою: `POST /config` одразу відповідає `"reloaded": true`, сервіс вивантажує стару модель (у пам'яті ніколи немає двох) і асинхронно вантажить нову - стан у `/status`. Невдале завантаження (напр. CUDA OOM) - `model.state = "error"` і текст у `model.error`; старої моделі вже немає, конфіг не відкочується, тихого відкату на cpu немає: оберіть іншу модель/пристрій або `POST /model/load` ще раз.
 
-Статус: `curl -s http://127.0.0.1:8091/health` (liveness), `curl -s http://127.0.0.1:8091/status` (готовність моделі, VRAM, `pending`, `config_version`).
+Помилки: 422 - невалідне значення або BOOTSTRAP-поле (`... is not runtime-configurable`); 409 `model_busy` - інше завантаження/вивантаження ще триває (конфіг відкотився). Overrides зберігаються у файлі `RT_CONFIG_STATE` і переживають рестарт.
+
+Керування моделлю (та сама авторизація, що й `/config`):
+
+```bash
+curl -s -X POST http://127.0.0.1:8091/model/unload -H "$H"   # звільнити RAM/VRAM
+curl -s -X POST http://127.0.0.1:8091/model/load -H "$H"     # завантажити налаштовану модель (асинхронно)
+```
+
+Статус: `curl -s http://127.0.0.1:8091/health` (liveness), `curl -s http://127.0.0.1:8091/status`:
+
+- `model`: `{id, state, error, download, device}`; `state` - `unloaded` | `downloading` | `loading` | `ready` | `error`; `download` - `{done_mb, total_mb}` лише під час скачування;
+- `memory`: `{rss_mb, swap_mb, vram_mb}` процесу (`vram_mb` - `null`, якщо `nvidia-smi` не відповідає);
+- `ready`, `pending`, `config_version`; rt-asr ще `dropped_segments: {hallucination, low_confidence}`.
+
+Поки модель не `ready`, `/v1/audio/*` одразу відповідає 503 з кодом `model_unloaded` / `model_downloading` / `model_loading` / `model_error` (чекає лише запит, що сам розбудив вивантажену за простоєм модель). Невдале або покинуте за таймаутом завантаження й вивантажена модель звільняють пам'ять одразу (`unload` моделі CTranslate2, `gc`, `malloc_trim`); покинуте завантаження блокує нові (409), доки не завершиться.
+
+Галюцинації Whisper (rt-asr): сегмент відкидається, якщо `no_speech_prob > 0.6`, `avg_logprob < -1.0` або `compression_ratio > 2.4` (пороги faster-whisper, тут кожен окремо), або якщо весь сегмент - відома фраза-галюцинація (титри/фінал відео uk/pl/ru/en: «Дякую за перегляд», «Napisy stworzone przez społeczność Amara.org», ...; список - `src/services/asr/textfilter.py`). Кожне відкидання - INFO у лозі й лічильник у `/status`.
 
 ## 5. Конфіг edge
 
@@ -230,7 +247,7 @@ HM-модуль edge: `homeManagerModules.rt-translator` (також `default`),
 }
 ```
 
-Спільні опції: `enable, package, deployRsPath, listenAddresses, port, device (cpu|cuda|rocm), devices, model, configState, modelDir, apiTokenFile, openFirewall, firewallInterfaces, logLevel, rocmGfxVersion, memoryDenyWriteExecute, extraEnv`. ASR: `computeType, language, languages, beamSize, vad, chunkSeconds`. TTS: `voice, speed, sampleRate`. `devices` (default `[ device ]`, env `RT_DEVICES`) - між якими пристроями сервіс перемикається без redeploy: `devices = [ "cpu" "cuda" ]` ставить GPU-бандл (він працює і на cpu) і GPU-sandbox навіть при старті на cpu; `device` - стартовий. Перемикання - поле `device` у діалозі налаштувань вузла (`POST /config`, модель перезавантажується; default-и моделі/beam/compute переобчислюються для нового пристрою, якщо не задані явно). Помилка (напр. CUDA OOM) - явна: `POST /config` 500 з текстом, `/status` `model.reload_error`, стара модель лишається на старому пристрої; тихого відкату на cpu немає. Потрібен overlay: `nixpkgs.overlays = [ inputs.realtime-translation.overlays.default ];` і `nixosModules.rt-speech` в `imports`.
+Спільні опції: `enable, package, deployRsPath, listenAddresses, port, device (cpu|cuda|rocm), devices, model, configState, modelDir, apiTokenFile, openFirewall, firewallInterfaces, logLevel, rocmGfxVersion, memoryDenyWriteExecute, extraEnv`. ASR: `computeType, language, languages, beamSize, vad, chunkSeconds`. TTS: `voice, speed, sampleRate`. `devices` (default `[ device ]`, env `RT_DEVICES`) - між якими пристроями сервіс перемикається без redeploy: `devices = [ "cpu" "cuda" ]` ставить GPU-бандл (він працює і на cpu) і GPU-sandbox навіть при старті на cpu; `device` - стартовий. Перемикання - поле `device` у діалозі налаштувань вузла (`POST /config`, модель перезавантажується; default-и моделі/beam/compute переобчислюються для нового пристрою, якщо не задані явно). Помилка (напр. CUDA OOM) - явна: `/status` `model.state = "error"` з текстом у `model.error` (стара модель уже вивантажена, див. 4.2); тихого відкату на cpu немає. Потрібен overlay: `nixpkgs.overlays = [ inputs.realtime-translation.overlays.default ];` і `nixosModules.rt-speech` в `imports`.
 
 ### (b) deploy-rs (покроково, в інфрі swarm-nix)
 
@@ -309,7 +326,7 @@ curl -s -F file=@/tmp/hello.wav http://127.0.0.1:8091/audio/transcriptions
 Типові помилки:
 
 - `401` від rt-*/воркера - токен зі списку Django не збігається (оновіть список: перезапуск/налаштування) або застарів `local_token_file`;
-- `/status` `ready: false` - модель ще завантажується або відсутня (`rt-models list`, `RT_MODEL_DOWNLOAD`);
+- `/status` `ready: false` - див. `model.state`/`model.error`: модель скачується, вантажиться, вивантажена (`POST /model/load`) або не завантажилась (`rt-models list`, `RT_MODEL_DOWNLOAD`);
 - `no llm worker available` - жоден дозволений воркер не відкрив сесію (див. лог WARNING по вузлах);
 - `PipeWire preflight` - немає `rt_virtual_output`/`rt_virtual_input` (`nix develop` або virtual-sinks);
 - `422` на `/config` - BOOTSTRAP-поле або значення поза межами.

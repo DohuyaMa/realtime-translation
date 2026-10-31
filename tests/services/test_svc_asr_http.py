@@ -27,6 +27,22 @@ def make(backend=None, state_path=None, **env):
     return app, backend
 
 
+def make_live(**env):
+    """App with the real factory: every model/device change builds a new
+    backend from the live config (fake backend)."""
+    env = {"RT_ASR_BACKEND": "fake", **env}
+    return create_app(AsrSettings.from_env(env), bootstrap_env=env, state_path=None)
+
+
+def settle(app, timeout=5.0):
+    runtime = app.state.runtime
+    deadline = time.monotonic() + timeout
+    while runtime.state.value not in ("ready", "error"):
+        assert time.monotonic() < deadline, runtime.state
+        time.sleep(0.005)
+    return runtime.state.value
+
+
 def post(client, data=None, **form):
     data = wav_file(tone(16000)) if data is None else data
     return client.post(
@@ -289,11 +305,13 @@ def test_realtime_request_overtakes_running_batch():
 
 
 def test_config_endpoint_mounted_and_reload_swaps_backend():
-    app, backend = make()
+    app = make_live()
     with running(app) as client:
+        backend = app.state.runtime.backend
         body = set_config(client, model="x")
         assert body["reloaded"] is True
         assert body["values"]["model"] == "x"
+        assert settle(app) == "ready"
         status = client.get("/status").json()
         r = post(client)
     assert status["model"]["id"] == "x" and status["ready"] is True
@@ -341,9 +359,10 @@ def test_client_disconnect_stops_batch_between_chunks():
 
 
 def test_config_device_change_rederives_device_defaults():
-    app, _ = make(RT_DEVICES="cpu,cuda")
+    app = make_live(RT_DEVICES="cpu,cuda")
     with running(app) as client:
         body = set_config(client, device="cuda")
+        assert settle(app) == "ready"
     assert body["values"]["model"] == default_model("asr", "cuda")
     assert body["values"]["compute_type"] == "int8_float16"
     assert body["values"]["beam_size"] == default_beams("asr", "cuda")
@@ -363,12 +382,13 @@ def test_config_device_choices_are_the_node_devices():
         assert client.get("/config").json()["schema"]["device"]["choices"] == ["cpu"]
         r = client.post("/config", json={"version": 1, "values": {"device": "cuda"}})
         assert r.status_code == 422 and "not available on this node" in r.text
-        assert client.get("/status").json()["device"] == "cpu"
+        assert client.get("/status").json()["model"]["device"] == "cpu"
 
 
 def test_config_device_switch_failure_is_explicit(monkeypatch):
-    """CUDA OOM on switch: 500 + /status reload_error, old model keeps serving
-    on cpu; no silent fallback. The next good switch clears the error."""
+    """CUDA OOM on switch: the old model is unloaded first, the new load fails
+    -> state "error" with the text, no model, 503 model_error; no silent
+    fallback to cpu, no restored old model. The next good switch recovers."""
     import src.services.asr.app as asr_app
 
     real = asr_app.make_backend
@@ -379,17 +399,65 @@ def test_config_device_switch_failure_is_explicit(monkeypatch):
         return real(settings)
 
     monkeypatch.setattr(asr_app, "make_backend", make_backend)
-    app, _ = make(RT_DEVICES="cpu,cuda")
+    app = make_live(RT_DEVICES="cpu,cuda")
     with running(app) as client:
-        r = client.post("/config", json={"version": 1, "values": {"device": "cuda"}})
-        assert r.status_code == 500 and "out of memory" in r.text
+        body = set_config(client, device="cuda")
+        assert body["reloaded"] is True and settle(app) == "error"
         status = client.get("/status").json()
-        assert status["device"] == "cpu" and status["ready"] is True
-        assert "out of memory" in status["model"]["reload_error"]
-        assert client.get("/config").json()["values"]["device"] == "cpu"
+        assert status["model"]["device"] == "cuda" and status["ready"] is False
+        assert status["model"]["state"] == "error"
+        assert "out of memory" in status["model"]["error"]
+        assert app.state.runtime.backend is None
+        r = post(client)
+        assert r.status_code == 503 and r.json()["error"]["code"] == "model_error"
+        set_config(client, version=2, device="cpu")
+        assert settle(app) == "ready"
+        assert client.get("/status").json()["model"]["error"] is None
         assert post(client).status_code == 200
-        set_config(client, model="whisper-base")
-        assert client.get("/status").json()["model"]["reload_error"] is None
+
+
+def test_config_model_change_refused_while_a_load_runs():
+    """409 model_busy and the config is rolled back (no half-applied change)."""
+    app = make_live()
+    with running(app) as client:
+        runtime = app.state.runtime
+        gate = threading.Event()
+
+        def slow_factory():
+            assert gate.wait(5)
+            return FakeAsrBackend()
+
+        runtime._factory = slow_factory
+        set_config(client, model="x")
+        r = client.post("/config", json={"version": 2, "values": {"model": "y"}})
+        assert r.status_code == 409 and r.json()["error"]["code"] == "model_busy"
+        assert client.get("/config").json()["values"]["model"] == "x"
+        gate.set()
+        assert settle(app) == "ready"
+
+
+def test_hallucinated_and_low_confidence_segments_dropped_and_counted():
+    from src.services.asr.whisper_engine import SegmentStats
+
+    good = SegmentStats(0.1, -0.3, 1.2)
+    segments = [
+        Segment(0.0, 1.0, "Дякую за перегляд!", good),
+        Segment(1.0, 2.0, "що можна зробити", good),
+        Segment(2.0, 3.0, "шум", SegmentStats(0.9, -0.2, 1.0)),
+        Segment(3.0, 4.0, "Napisy stworzone przez społeczność Amara.org", None),
+    ]
+
+    class Hallucinating(FakeAsrBackend):
+        def transcribe(self, audio, opts):
+            return Transcription("ignored", "uk", 4.0, segments)
+
+    app, _ = make(Hallucinating(), RT_ASR_LANGUAGE="uk")
+    with running(app) as client:
+        r = post(client, response_format="verbose_json")
+        status = client.get("/status").json()
+    assert r.json()["text"] == "що можна зробити"
+    assert [s["text"] for s in r.json()["segments"]] == ["що можна зробити"]
+    assert status["dropped_segments"] == {"hallucination": 2, "low_confidence": 1}
 
 
 def spy_runtime(runtime):

@@ -8,6 +8,7 @@ from typing import Iterator, List, Optional, Protocol, Sequence, Tuple
 
 import numpy as np
 
+from ..common.model_store import Progress
 from .settings import TtsSettings
 from .voices import Voice, catalog
 
@@ -28,7 +29,17 @@ class TtsBackend(Protocol):
     model_id: str
     sample_rate: int
 
-    def load(self) -> None: ...
+    def fetch(self, progress: Optional[Progress] = None) -> None:
+        """Provision the model files (may download; no timeout)."""
+        ...
+
+    def load(self) -> None:
+        """Load the fetched model (bounded by the load timeout)."""
+        ...
+
+    def unload(self) -> None:
+        """Free the model memory now."""
+        ...
 
     def voices(self) -> List[Voice]: ...
 
@@ -56,10 +67,16 @@ class FakeTtsBackend:
         self._unsupported = tuple(unsupported_prefixes)
         self.calls: List[Tuple[str, str, float]] = []
 
+    def fetch(self, progress: Optional[Progress] = None) -> None:
+        pass  # nothing to provision
+
     def load(self) -> None:
         time.sleep(self._load_delay)
         if self._fail_on_load:
             raise RuntimeError(self._fail_on_load)
+
+    def unload(self) -> None:
+        pass  # holds no model
 
     def voices(self) -> List[Voice]:
         return catalog()

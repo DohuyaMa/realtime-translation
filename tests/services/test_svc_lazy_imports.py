@@ -29,7 +29,7 @@ import src.services.common.model_store  # noqa: F401
 
 for app in (asr_app(AsrSettings.from_env({})), tts_app(TtsSettings.from_env({}))):
     assert TestClient(app).get("/health").json() == {
-        "status": "ok", "model": {"loaded": False, "state": "unloaded"}
+        "status": "ok", "model": {"state": "unloaded"}
     }
 heavy = (
     "torch", "ctranslate2", "faster_whisper", "transformers", "kokoro", "misaki",

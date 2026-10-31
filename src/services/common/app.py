@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, FastAPI
 from .auth import make_bearer_dependency
 from .errors import install_error_handlers
 from .gpu import VramProbe
-from .health import build_health_router
+from .health import StatusExtra, build_health_router, build_model_router
 from .models_http import build_models_router
 from .runtime_config import RuntimeConfig, build_config_router
 from .runtime import ServiceRuntime
@@ -32,6 +32,7 @@ def create_service_app(
     vram: Optional[VramProbe] = None,
     config: Optional[RuntimeConfig[Any]] = None,
     on_reload: Optional[Callable[[Any], None]] = None,
+    status_extra: Optional[StatusExtra] = None,
 ) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -51,11 +52,12 @@ def create_service_app(
     install_error_handlers(app)
     app.include_router(
         build_health_router(
-            runtime, settings, vram or VramProbe(settings.device), config
+            runtime, settings, vram or VramProbe(), config, status_extra
         )
     )
 
     auth = [Depends(make_bearer_dependency(token))]
+    app.include_router(build_model_router(runtime, settings, config), dependencies=auth)
     if config is not None:
         app.include_router(
             build_config_router(config, on_reload),

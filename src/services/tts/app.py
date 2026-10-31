@@ -43,5 +43,5 @@ def create_app(
         routers=[build_http_router(config, runtime)],
         lifespan_hooks=lifespan_hooks,
         config=config,
-        on_reload=lambda s: runtime.reload(lambda: make_backend(s)),
+        on_reload=lambda _s: runtime.reload(),
     )

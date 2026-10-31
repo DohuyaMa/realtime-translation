@@ -135,6 +135,9 @@ class _Engine:
         cls.created = (path, device, compute_type, threads)
         return cls()
 
+    def close(self):
+        self.closed = True
+
     def transcribe(self, audio, **kw):
         self.last = kw
         return we.TranscriptionResult(
@@ -153,13 +156,14 @@ class _Engine:
 def _backend(env=None):
     prepared = []
 
-    def prepare(value, _settings):
+    def prepare(value, _settings, progress):
         prepared.append(value)
         return "/models/x"
 
     b = FasterWhisperBackend(
         AsrSettings.from_env(env or {}), engine_cls=_Engine, prepare=prepare
     )
+    b.fetch(None)
     b.load()
     return b, prepared
 
@@ -199,6 +203,20 @@ def test_faster_whisper_iter_and_detect_delegate():
     assert b.detect_language(audio, ["pl", "uk"]) == "uk"
     with pytest.raises(ValueError):
         b.transcribe_iter(audio, DecodeOptions(None, None))
+
+
+def test_faster_whisper_load_requires_fetch_and_unload_closes_engine():
+    b = FasterWhisperBackend(
+        AsrSettings.from_env({}), engine_cls=_Engine, prepare=lambda *a: "/m"
+    )
+    with pytest.raises(RuntimeError, match="before fetch"):
+        b.load()
+    b.fetch(None)
+    b.load()
+    engine = b._engine
+    b.unload()
+    assert engine.closed and b._engine is None
+    b.unload()  # idempotent
 
 
 def test_fake_does_not_import_faster_whisper():

@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Callable, Iterator, Optional, Sequence
 
 import numpy as np
 
 from ..common.device import default_threads
-from ..common.model_store import ModelSettings, prepare_model
+from ..common.model_store import ModelSettings, Progress, prepare_model
 from .backend import DecodeOptions, Segment, Transcription
 from .settings import AsrSettings
 from .whisper_engine import FILE_VAD, WhisperEngine
@@ -27,14 +28,29 @@ class FasterWhisperBackend:
         self.model_id = settings.model
         self._engine_cls = engine_cls
         self._prepare = prepare
+        self._path: Optional[Path] = None
         self._engine: Optional[Any] = None
 
+    def fetch(self, progress: Optional[Progress] = None) -> None:
+        self._path = self._prepare(
+            self._settings.model, ModelSettings.from_env(), progress
+        )
+
     def load(self) -> None:
-        path = self._prepare(self._settings.model, ModelSettings.from_env())
+        if self._path is None:
+            raise RuntimeError("load() before fetch()")
         cls = self._engine_cls or WhisperEngine
         self._engine = cls.from_settings(
-            path, self._settings.device, self._settings.compute_type, default_threads()
+            self._path,
+            self._settings.device,
+            self._settings.compute_type,
+            default_threads(),
         )
+
+    def unload(self) -> None:
+        engine, self._engine = self._engine, None
+        if engine is not None:
+            engine.close()
 
     def transcribe(self, audio: np.ndarray, opts: DecodeOptions) -> Transcription:
         partial = (
@@ -52,7 +68,7 @@ class FasterWhisperBackend:
             text=r.text,
             language=r.language or opts.language,
             duration=r.duration,
-            segments=[Segment(s.start, s.end, s.text) for s in r.segments],
+            segments=[Segment(s.start, s.end, s.text, s.stats) for s in r.segments],
         )
 
     def transcribe_iter(
@@ -67,7 +83,7 @@ class FasterWhisperBackend:
             vad=FILE_VAD if opts.vad_filter else None,
             initial_prompt=opts.prompt,
         )
-        return (Segment(s.start, s.end, s.text) for s in segments)
+        return (Segment(s.start, s.end, s.text, s.stats) for s in segments)
 
     def detect_language(self, audio: np.ndarray, allowed: Sequence[str]) -> str:
         return self._engine.detect_language(audio, allowed)[0]

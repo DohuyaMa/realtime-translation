@@ -9,7 +9,9 @@ from typing import Callable, Iterator, List, Optional, Protocol, Sequence, Tuple
 import numpy as np
 
 from ..common.audio import TARGET_RATE
+from ..common.model_store import Progress
 from .settings import AsrSettings, normalize_language
+from .whisper_engine import SegmentStats
 
 __all__ = [
     "AsrBackend",
@@ -37,6 +39,7 @@ class Segment:
     start: float
     end: float
     text: str
+    stats: Optional[SegmentStats] = None  # None: the backend has no confidences
 
 
 @dataclass(frozen=True)
@@ -51,7 +54,17 @@ class AsrBackend(Protocol):
     name: str
     model_id: str
 
-    def load(self) -> None: ...
+    def fetch(self, progress: Optional[Progress] = None) -> None:
+        """Provision the model files (may download; no timeout)."""
+        ...
+
+    def load(self) -> None:
+        """Load the fetched model into RAM/VRAM (bounded by the load timeout)."""
+        ...
+
+    def unload(self) -> None:
+        """Free the model memory now."""
+        ...
 
     def transcribe(self, audio: np.ndarray, opts: DecodeOptions) -> Transcription: ...
 
@@ -91,10 +104,16 @@ class FakeAsrBackend:
         self.segment_seconds = segment_seconds
         self.calls: List[Tuple[int, DecodeOptions]] = []
 
+    def fetch(self, progress: Optional[Progress] = None) -> None:
+        pass  # nothing to provision
+
     def load(self) -> None:
         time.sleep(self._load_delay)
         if self._fail_on_load:
             raise RuntimeError(self._fail_on_load)
+
+    def unload(self) -> None:
+        pass  # holds no model
 
     def _text(self, audio: np.ndarray, opts: DecodeOptions) -> str:
         if self._text_fn:

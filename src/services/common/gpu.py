@@ -11,13 +11,11 @@ from typing import Callable, Optional
 class VramProbe:
     def __init__(
         self,
-        device: str,
         runner: Callable = subprocess.run,
         clock: Callable[[], float] = time.monotonic,
         ttl: float = 5.0,
         pid: Optional[int] = None,
     ) -> None:
-        self._device = device
         self._runner = runner
         self._clock = clock
         self._ttl = ttl
@@ -25,8 +23,9 @@ class VramProbe:
         self._at: Optional[float] = None
         self._value: Optional[int] = None
 
-    def read(self) -> Optional[int]:
-        if self._device != "cuda":
+    def read(self, device: str) -> Optional[int]:
+        """MB on the GPU; None on cpu or when nvidia-smi cannot tell."""
+        if device != "cuda":
             return None
         now = self._clock()
         if self._at is not None and now - self._at < self._ttl:

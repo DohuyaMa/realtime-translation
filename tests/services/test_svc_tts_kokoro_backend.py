@@ -40,7 +40,7 @@ def _backend(settings=None, synth=None):
         seen["args"] = (engine, path, device, compute, threads)
         return synth
 
-    def prepare(model, model_settings):
+    def prepare(model, model_settings, progress):
         seen["model"] = model
         return "/models/x"
 
@@ -113,6 +113,7 @@ def test_make_backend():
 
 def test_kokoro_backend_delegates_to_synthesizer():
     b, synth, seen = _backend()
+    b.fetch(None)
     b.load()
     assert seen["model"] == "kokoro-82m-v1.0-onnx"
     assert seen["args"][:4] == ("onnx", "/models/x", "cpu", "float32")
@@ -123,16 +124,26 @@ def test_kokoro_backend_delegates_to_synthesizer():
 
 def test_kokoro_backend_voices_intersect_catalog():
     b, _, _ = _backend()
+    b.fetch(None)
     b.load()
     assert [v.id for v in b.voices()] == ["af_heart", "bf_emma"]
 
 
 def test_kokoro_backend_unsupported_language():
     b, _, _ = _backend()
+    b.fetch(None)
     b.load()
     b.prepare_voice("bf_emma")
     with pytest.raises(UnsupportedVoiceLanguage):
         b.prepare_voice("zf_xiaobei")
+
+
+def test_kokoro_backend_unload_drops_synthesizer():
+    b, _, _ = _backend()
+    b.fetch(None)
+    b.load()
+    b.unload()
+    assert b._synth is None
 
 
 def test_fake_backend_synthesizes_and_rejects_prefix():

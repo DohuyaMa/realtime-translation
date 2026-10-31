@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import shutil
+import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -23,6 +24,9 @@ log = logging.getLogger(__name__)
 MANIFEST = ".rt-manifest.json"
 Downloader = Callable[[ModelSpec, Path, Optional[str]], None]
 Problem = tuple[str, str]  # (kind: "missing" | "mismatch", message)
+Progress = Callable[[int, int], None]  # (done_bytes, total_bytes)
+# How often a running download reports the bytes on disk.
+DOWNLOAD_POLL_S = 1.0
 
 _TRUE = {"1", "true", "yes", "on"}
 _FALSE = {"0", "false", "no", "off"}
@@ -63,6 +67,41 @@ def hf_downloader(spec: ModelSpec, target_dir: Path, token: str | None) -> None:
         allow_patterns=spec.allow_patterns,
         token=token,
     )
+
+
+def _bytes_under(path: Path) -> int:
+    """Bytes on disk below ``path`` (the HF ``*.incomplete`` files included)."""
+    total = 0
+    for root, _dirs, files in os.walk(path):
+        for name in files:
+            try:
+                total += os.stat(os.path.join(root, name)).st_size
+            except OSError:
+                pass  # renamed/removed mid-walk by the downloader
+    return total
+
+
+@contextmanager
+def _reporting(path: Path, total: int, progress: Progress | None) -> Iterator[None]:
+    """Report the bytes under ``path`` every DOWNLOAD_POLL_S while running."""
+    if progress is None:
+        yield
+        return
+    stop = threading.Event()
+
+    def poll() -> None:
+        while True:
+            progress(min(_bytes_under(path), total), total)
+            if stop.wait(DOWNLOAD_POLL_S):
+                return
+
+    thread = threading.Thread(target=poll, name="model-download", daemon=True)
+    thread.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        thread.join()
 
 
 class ModelStore:
@@ -115,6 +154,7 @@ class ModelStore:
         download: bool,
         token: str | None = None,
         full_verify: bool = False,
+        progress: Progress | None = None,
     ) -> Path:
         path = self.model_path(spec.alias)
         with self._lock(spec.alias):
@@ -126,17 +166,20 @@ class ModelStore:
                     f"model {spec.alias} not provisioned in {path}: {problems[0][1]}; "
                     f"run: rt-models fetch {spec.alias}"
                 )
-            self._install(spec, token)
+            self._install(spec, token, progress)
             return path
 
-    def _install(self, spec: ModelSpec, token: str | None) -> None:
+    def _install(
+        self, spec: ModelSpec, token: str | None, progress: Progress | None = None
+    ) -> None:
         final = self.model_path(spec.alias)
         partial = final.with_name(final.name + ".partial")
         if partial.exists():
             shutil.rmtree(partial)
         partial.mkdir(parents=True)
         try:
-            self._downloader(spec, partial, token)
+            with _reporting(partial, sum(f.size for f in spec.files), progress):
+                self._downloader(spec, partial, token)
         except Exception as exc:
             shutil.rmtree(partial, ignore_errors=True)
             raise ModelNotProvisioned(
@@ -193,6 +236,7 @@ def resolve_model(
     token: str | None = None,
     full_verify: bool = False,
     lookup: Callable[[str], ModelSpec] = get_spec,
+    progress: Progress | None = None,
 ) -> Path:
     if os.path.isabs(value):
         path = Path(value)
@@ -206,7 +250,11 @@ def resolve_model(
             log.warning("unmanaged model directory (no %s): %s", MANIFEST, path)
         return path
     return store.ensure(
-        lookup(value), download=download, token=token, full_verify=full_verify
+        lookup(value),
+        download=download,
+        token=token,
+        full_verify=full_verify,
+        progress=progress,
     )
 
 
@@ -241,8 +289,12 @@ class ModelSettings:
         return read_token_file(self.token_file)
 
 
-def prepare_model(value: str, settings: ModelSettings) -> Path:
-    """Loader entry point: HF_HOME -> resolve/provision -> HF_HUB_OFFLINE=1."""
+def prepare_model(
+    value: str, settings: ModelSettings, progress: Progress | None = None
+) -> Path:
+    """Loader entry point: HF_HOME -> resolve/provision -> HF_HUB_OFFLINE=1.
+
+    ``progress`` gets (done, total) bytes while a download runs."""
     configure_hf_home(settings.model_dir)
     if settings.download:
         set_online()  # an earlier load left the process offline
@@ -253,6 +305,7 @@ def prepare_model(value: str, settings: ModelSettings) -> Path:
             download=settings.download,
             token=settings.token(),
             full_verify=settings.full_verify,
+            progress=progress,
         )
     finally:
         set_offline()  # also after a failed download

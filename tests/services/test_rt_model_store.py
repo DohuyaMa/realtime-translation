@@ -297,3 +297,32 @@ def test_prepare_model_download_online_then_offline_even_on_failure(
     assert seen == [(None, False)]
     assert os.environ["HF_HUB_OFFLINE"] == "1"
     assert constants.HF_HUB_OFFLINE is True
+
+
+def test_ensure_reports_download_progress_from_bytes_on_disk(tmp_path, monkeypatch):
+    monkeypatch.setattr(ms, "DOWNLOAD_POLL_S", 0.01)
+    seen = []
+    half = threading.Event()
+
+    def downloader(spec, target, token):
+        # HF writes into <local_dir>/.cache/huggingface/download/*.incomplete
+        tmp = Path(target) / ".cache" / "huggingface" / "download" / "x.incomplete"
+        tmp.parent.mkdir(parents=True)
+        tmp.write_bytes(b"w" * 5)
+        assert half.wait(5)
+        FakeDownloader()(spec, target, token)
+
+    def progress(done, total):
+        seen.append((done, total))
+        if done == 5:
+            half.set()
+
+    store = ms.ModelStore(tmp_path, downloader=downloader)
+    total = sum(len(b) for b in FILES.values())
+    store.ensure(make_spec(), download=True, progress=progress)
+    assert (5, total) in seen
+    assert all(t == total and 0 <= d <= total for d, t in seen)
+    # already provisioned: no download, no progress
+    seen.clear()
+    store.ensure(make_spec(), download=True, progress=progress)
+    assert seen == []

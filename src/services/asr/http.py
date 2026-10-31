@@ -19,7 +19,7 @@ from ..common.worker import Priority
 from .backend import DecodeOptions, Segment
 from .chunking import split_for_transcription
 from .settings import AsrSettings, normalize_language
-from .textfilter import filter_repetitions
+from .textfilter import SegmentFilter, filter_repetitions
 
 RESPONSE_FORMATS = ("json", "verbose_json", "text")
 PRIORITIES = ("auto", "realtime", "batch")
@@ -33,9 +33,14 @@ def _join(segments: List[Segment]) -> str:
 
 
 def build_http_router(
-    config: RuntimeConfig[AsrSettings], runtime: ServiceRuntime
+    config: RuntimeConfig[AsrSettings],
+    runtime: ServiceRuntime,
+    segment_filter: SegmentFilter,
 ) -> APIRouter:
     router = APIRouter()
+
+    def kept(segments: List[Segment]) -> List[Segment]:
+        return [s for s in segments if segment_filter.keep(s.text, s.stats)]
 
     @router.post("/audio/transcriptions")
     async def transcriptions(
@@ -109,7 +114,8 @@ def build_http_router(
             result = await runtime.run(
                 backend.transcribe, audio, opts, priority=Priority.REQUEST
             )
-            segments, text_raw = result.segments, result.text
+            segments = kept(result.segments)
+            text_raw = _join(segments)
             lang, duration, chunks = result.language, result.duration, 1
         else:
             bounds = await asyncio.to_thread(
@@ -122,12 +128,14 @@ def build_http_router(
                 if i > 0 and await request.is_disconnected():
                     cancel.set()
                     return Response(status_code=499)  # nobody is listening
-                segs = await runtime.run_iter(
-                    backend.transcribe_iter,
-                    audio[a:b],
-                    chunk_opts,
-                    priority=Priority.BATCH,
-                    cancel=cancel,
+                segs = kept(
+                    await runtime.run_iter(
+                        backend.transcribe_iter,
+                        audio[a:b],
+                        chunk_opts,
+                        priority=Priority.BATCH,
+                        cancel=cancel,
+                    )
                 )
                 offset = a / TARGET_RATE
                 segments.extend(

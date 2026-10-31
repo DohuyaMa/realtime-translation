@@ -12,6 +12,7 @@ from src.services.common.device import DeviceError
 class FakeSeg:
     def __init__(self, start, end, text):
         self.start, self.end, self.text = start, end, text
+        self.no_speech_prob, self.avg_logprob, self.compression_ratio = 0.1, -0.2, 1.1
 
 
 class FakeModel:
@@ -209,3 +210,24 @@ def test_detect_language_empty_allowed_raises(tmp_path):
     engine = we.WhisperEngine(tmp_path, "cpu", "int8", 1, model_factory=DetectModel)
     with pytest.raises(ValueError):
         engine.detect_language(np.zeros(100, dtype=np.float32), [])
+
+
+def test_segments_carry_decoding_stats(engine):
+    result = engine.transcribe(np.zeros(16000, dtype=np.float32), language="uk")
+    assert result.segments[0].stats == we.SegmentStats(0.1, -0.2, 1.1)
+
+
+def test_close_unloads_ctranslate2_model(tmp_path):
+    unloaded = []
+
+    class Ct2:
+        def unload_model(self):
+            unloaded.append(True)
+
+    class Model(FakeModel):
+        model = Ct2()
+
+    engine = we.WhisperEngine(tmp_path, "cpu", "int8", 1, model_factory=Model)
+    engine.close()
+    engine.close()
+    assert unloaded == [True] and engine._model is None

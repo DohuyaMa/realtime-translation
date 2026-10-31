@@ -16,6 +16,7 @@ from ..common.settings import render_env_value
 from .backend import AsrBackend, make_backend
 from .http import build_http_router
 from .settings import AsrSettings
+from .textfilter import SegmentFilter
 
 
 def _settings_env(settings: AsrSettings) -> Dict[str, str]:
@@ -54,12 +55,14 @@ def create_app(
         settings.max_pending,
         idle_unload_s=settings.idle_unload_minutes * 60.0,
     )
+    segment_filter = SegmentFilter()
     return create_service_app(
         settings=settings,
         runtime=runtime,
         token=token,
-        routers=[build_http_router(config, runtime)],
+        routers=[build_http_router(config, runtime, segment_filter)],
         lifespan_hooks=lifespan_hooks,
         config=config,
-        on_reload=lambda s: runtime.reload(lambda: make_backend(s)),
+        on_reload=lambda _s: runtime.reload(),
+        status_extra=lambda: {"dropped_segments": segment_filter.counts()},
     )

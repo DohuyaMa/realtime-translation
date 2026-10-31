@@ -18,6 +18,7 @@ PHRASE = "Hello world, this is a test."
 
 def _speech_16k() -> np.ndarray:
     tts = KokoroBackend(TtsSettings.from_env({}))
+    tts.fetch()
     tts.load()
     speech = np.concatenate(list(tts.synthesize(PHRASE, "af_heart", 1.0)))
     return resample(speech, tts.sample_rate, 16000)
@@ -28,6 +29,7 @@ def _speech_16k() -> np.ndarray:
 def test_faster_whisper_small_transcribes_kokoro_speech(real_model_dir):
     audio = _speech_16k()
     asr = FasterWhisperBackend(AsrSettings.from_env({"RT_MODEL": "whisper-small"}))
+    asr.fetch()
     asr.load()
     t0 = time.monotonic()
     result = asr.transcribe(

@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Callable, Iterator, Sequence
+from typing import Any, Callable, Iterator, Sequence
 
 import numpy as np
 
@@ -43,10 +43,31 @@ FILE_VAD = VadProfile(0.5, None, 0, 500, 300, 30.0)
 
 
 @dataclass(frozen=True)
+class SegmentStats:
+    """faster-whisper decoding confidence of one segment (textfilter uses it)."""
+
+    no_speech_prob: float
+    avg_logprob: float
+    compression_ratio: float
+
+
+@dataclass(frozen=True)
 class Segment:
     start: float
     end: float
     text: str
+    stats: SegmentStats | None = None
+
+
+def _segment(s) -> Segment:
+    return Segment(
+        float(s.start),
+        float(s.end),
+        s.text.strip(),
+        SegmentStats(
+            float(s.no_speech_prob), float(s.avg_logprob), float(s.compression_ratio)
+        ),
+    )
 
 
 @dataclass(frozen=True)
@@ -82,13 +103,19 @@ class WhisperEngine:
             model_factory = WhisperModel
         self.device = device
         self.compute_type = compute_type
-        self._model = model_factory(
+        self._model: Any = model_factory(
             str(model_dir),
             device=backend_device(device),
             compute_type=compute_type,
             cpu_threads=threads,
             num_workers=1,
         )
+
+    def close(self) -> None:
+        """Free the CTranslate2 weights (RAM/VRAM) now, not at some later GC."""
+        model, self._model = self._model, None
+        if model is not None:
+            model.model.unload_model()
 
     @classmethod
     def from_settings(
@@ -139,7 +166,7 @@ class WhisperEngine:
         kwargs = self._final_kwargs(language, beam_size, vad, initial_prompt)
         segments, _info = self._model.transcribe(samples, **kwargs)
         for s in segments:
-            yield Segment(float(s.start), float(s.end), s.text.strip())
+            yield _segment(s)
 
     def detect_language(self, audio, allowed: Sequence[str]) -> tuple[str, float]:
         """Most probable language among `allowed`, from the first <= 30 s of audio."""
@@ -184,9 +211,7 @@ class WhisperEngine:
             if partial:
                 kwargs.update(beam_size=1, temperature=0.0, without_timestamps=True)
             segments, info = self._model.transcribe(samples, **kwargs)
-            parsed = [
-                Segment(float(s.start), float(s.end), s.text.strip()) for s in segments
-            ]
+            parsed = [_segment(s) for s in segments]
             info_language = info.language
         text = " ".join(s.text for s in parsed if s.text)
         return TranscriptionResult(text, info_language, parsed, duration)
