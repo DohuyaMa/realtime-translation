@@ -147,3 +147,15 @@ def test_asr_settings_resolve_and_validate():
     errors = bad.validate()
     assert any("asr.prompt: unknown placeholder(s) foo" in e for e in errors)
     assert "asr.previous_words must be >= 0" in errors
+
+
+def test_default_system_prompt_forbids_untranslated_words():
+    # live test 2026-10-31 §2-§4: "Chikaie DOKI", "Promd", ("Niшки")
+    from src.core.prompt import DEFAULT_SYSTEM_PROMPT, render
+
+    text = render(
+        DEFAULT_SYSTEM_PROMPT, {"source_lang": "Ukrainian", "target_lang": "English"}
+    )
+    assert "Never keep or transliterate a source word" in text
+    assert "no Ukrainian words or letters" in text
+    assert "{{" not in text

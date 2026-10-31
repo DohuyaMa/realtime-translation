@@ -165,3 +165,47 @@ def test_local_worker_restart_uses_local_token_file(workers, tmp_path):
         client.translate("x", "pl")
     # failed over; no other worker -> explicit error, no session
     assert e.value.kind == "unreachable" and ws.snapshot()["active"] is None
+
+
+def test_switch_to_another_worker_notifies_on_switch(workers):
+    # the edge warms the new worker up (live test 2026-10-31 §6)
+    clock = Clock()
+    workers.add("local")
+    workers.add("cyborg")
+    ws = sessions(workers, ep("local", local=True), ep("cyborg"), clock=clock)
+    switched = []
+    ws.on_switch = switched.append
+    ws.start()
+    assert switched == []  # start is warmed up by the edge itself
+    del workers.up["local"]
+    ws.tick()
+    assert switched == ["http://cyborg:8080"]
+    workers.up["cyborg"]["sessions"].clear()  # expired: reopened on the same worker
+    ws.tick()
+    assert switched == ["http://cyborg:8080"]
+    workers.add("local")
+    clock.t = 31.0
+    ws.tick()
+    assert switched == ["http://cyborg:8080", "http://local:8080"]
+    ws.stop()
+
+
+def test_llm_warm_up_is_one_tiny_completion(workers):
+    workers.add("local")
+    ws = sessions(workers, ep("local", local=True))
+    ws.start()
+    bodies = []
+
+    def handle(req):
+        bodies.append(json.loads(req.content))
+        return workers(req)
+
+    client = LlmClient(ws, LlmSettings(), transport=httpx.MockTransport(handle))
+    client.warm_up()
+    assert len(bodies) == 1
+    assert bodies[0]["max_tokens"] == 1 and "stream" not in bodies[0]
+    del workers.up["local"]
+    with pytest.raises(ServiceError):  # explicit error, no failover
+        client.warm_up()
+    assert ws.snapshot()["node"] == "local"
+    ws.stop()

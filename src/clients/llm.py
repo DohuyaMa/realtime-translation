@@ -11,6 +11,8 @@ from ..core.runtime import LlmSettings
 from .base import ServiceError, json_body, raise_for_response
 
 SOURCE_LANGUAGES = ("pl", "uk", "ru")
+# a cold worker loads the model on the first request (11 s live, 2026-10-31)
+WARM_UP_TIMEOUT_S = 120.0
 _THINK = re.compile(r"(?s)<think>.*?</think>")
 _SENTENCE = re.compile(r"(?s)(.*?[.!?…]+[\"')\]]*)(\s+|$)")
 
@@ -83,6 +85,21 @@ class LlmClient:
             raise ServiceError(self.service, "busy", "HTTP 503", 503)
         raise_for_response(self.service, resp)
         return resp
+
+    def warm_up(self) -> None:
+        """One tiny completion (1 token) so the worker loads the model now,
+        not on the first phrase. Single attempt: never fails the target over;
+        errors are raised to the caller."""
+        s = self._settings
+        body = {
+            "model": s.model,
+            "messages": [{"role": "user", "content": "Hi"}],
+            "max_tokens": 1,
+            "temperature": 0,
+            "chat_template_kwargs": {"enable_thinking": False},
+        }
+        timeout = max(WARM_UP_TIMEOUT_S, s.timeout_s)
+        self._send("POST", "/v1/chat/completions", json=body, timeout=timeout)
 
     def translate(
         self, text: str, source_lang: str, context: Sequence[tuple[str, str]] = ()

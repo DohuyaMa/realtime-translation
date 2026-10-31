@@ -9,6 +9,7 @@ from src.segmentation.pause import (
     Segment,
     SegmenterConfig,
 )
+from src.segmentation.text import ends_sentence, split_complete
 
 __all__ = [
     "SAMPLE_RATE",
@@ -17,5 +18,7 @@ __all__ = [
     "PauseSegmenter",
     "Segment",
     "SegmenterConfig",
+    "ends_sentence",
     "plan_chunks",
+    "split_complete",
 ]

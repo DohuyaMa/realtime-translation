@@ -57,10 +57,10 @@ class SegmenterConfig:
     threshold: float = 0.5
     min_speech_ms: int = 400
     end_silence_ms: int | None = 700
-    soft_max_ms: int = 8_000
+    soft_max_ms: int = 6_000
     soft_silence_ms: int = 250
-    hard_max_ms: int = 20_000
-    lookback_ms: int = 1_500
+    hard_max_ms: int = 12_000
+    lookback_ms: int = 2_000
     keep_silence_ms: int | None = None
     preroll_ms: int = 300
 
@@ -190,6 +190,11 @@ class PauseSegmenter:
         if len_ms >= cfg.hard_max_ms:
             return self._cut(self._hard_cut_index(), "hard")
         return []
+
+    @property
+    def in_speech(self) -> bool:
+        """A segment with speech is being collected (not emitted yet)."""
+        return bool(self._seg) and self._speech > 0
 
     def flush(self) -> Segment | None:
         """Return the pending segment if it may be emitted; go idle."""

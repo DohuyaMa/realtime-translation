@@ -155,6 +155,9 @@ class WorkerSessions:
         self._started = False
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        # called with the new worker url after a switch to another worker
+        # (failover, return to the preferred one); the edge warms it up
+        self.on_switch: Optional[Callable[[str], None]] = None
 
     # -- selection ---------------------------------------------------------
 
@@ -195,6 +198,9 @@ class WorkerSessions:
                 self._api.close(old)
             except ServiceError as e:
                 logger.info("llm: closing session on {} failed: {}", old.url, e)
+        switched = new is not None and reason != "start"
+        if switched and (old is None or old.url != new.url) and self.on_switch:
+            self.on_switch(new.url)
 
     def _failover(self, reason: str) -> None:
         with self._lock:

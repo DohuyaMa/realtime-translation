@@ -9,6 +9,13 @@ explicit, logged drop-oldest policy of the segment queue in translate mode.
 The LLM output is streamed: each finished sentence goes to TTS at once and
 playback starts with the first synthesized sentence.
 
+Only complete sentences go to the LLM (live test 2026-10-31): the ASR stage
+holds a recognized tail that does not end a sentence (``split_complete``) and
+prepends it to the next recognized segment. The hold is bounded - it is sent
+alone once no speech follows within ``end_silence_ms`` and never spans more
+than ``hard_max_ms`` of speech - and every hold/merge/flush is logged and
+counted (``asr_merged``, ``asr_held_flushed``).
+
 Capture and pause segmentation run locally; ASR/TTS go through endpoint pools
 and translation through an app session on an llama worker (ordered worker
 list with failover, no Django). In transcribe mode long chunks are sent to
@@ -43,7 +50,7 @@ from .clients.discovery import choices
 from .core.output_guard import reject_reason
 from .core.prompt import render_asr_prompt
 from .core.runtime import KINDS, EdgeSettings, LlmSettings
-from .segmentation import Segment, SegmenterConfig
+from .segmentation import Segment, SegmenterConfig, split_complete
 
 CAPTURE_RATE = 48000
 BLOCKSIZE = 1024
@@ -56,6 +63,10 @@ PREVIOUS_WORDS_MAX = 1000
 # sources of at most this many words are translated whole before TTS gets
 # anything (see _translate)
 SHORT_SOURCE_WORDS = 3
+# how often the ASR stage re-checks a held incomplete text
+HOLD_POLL_S = 0.05
+# playback that returns this much earlier than its audio lasts is reported
+PLAYBACK_SHORT_S = 0.3
 
 # LlmSettings fields that only shape the prompt/request; everything else
 # changes where/how the LLM is reached and requires a restart.
@@ -88,6 +99,7 @@ class _Phrase:
     e2e_ms: Optional[float] = None
     pieces: int = 0  # sentences sent to TTS
     played: bool = False
+    played_pieces: int = 0
 
 
 @dataclass
@@ -204,7 +216,15 @@ class TranslationSystem:
         self._timing: Dict[str, Any] = {}
         self._backpressure: Dict[str, int] = {"llm": 0, "tts": 0, "playback": 0}
         self._dropped = 0
+        self._playback_short = 0
         self._asr_no_words = 0
+        self._asr_merged = 0
+        self._asr_held_flushed = 0
+        # incomplete recognized text waiting for the next segment (ASR stage)
+        self._held: Optional[_Phrase] = None
+        self._held_since = 0.0  # time.monotonic() when it was held
+        self._held_start_s = 0.0  # stream time where the held speech began
+        self._llm_warmup: Optional[Dict[str, Any]] = None
         self._audio_q: queue.Queue = queue.Queue()
         self._capturing = False
         self._threads: Dict[str, threading.Thread] = {}
@@ -230,6 +250,8 @@ class TranslationSystem:
         self._directory.start_periodic()
         self._pools = self._pools_factory(self.settings, self._directory)
         self._llm_target = self._llm_target_factory(self.settings, self._directory)
+        if isinstance(self._llm_target, WorkerSessions):
+            self._llm_target.on_switch = self._warm_up_async
         self._llm = (
             self._llm_factory(self._llm_target, self.settings.llm)
             if self._llm_target is not None
@@ -331,6 +353,7 @@ class TranslationSystem:
         self._playback_queue = queue.Queue(maxsize=PLAYBACK_QUEUE_MAX)
         self._recognized.clear()
         self._translation_context.clear()
+        self._held = None
         try:  # open the mic synchronously so a failure aborts the start
             self._stream = self._capture_factory(self._on_block)
             self._stream.start()
@@ -542,9 +565,14 @@ class TranslationSystem:
     def _chunk_worker_loop(self) -> None:
         q = self._chunk_queue
         while True:
-            item = q.get()
+            try:
+                item = q.get(timeout=HOLD_POLL_S if self._held is not None else None)
+            except queue.Empty:
+                self._release_held_if_due()
+                continue
             try:
                 if item is _STOP:
+                    self._flush_held("stop")
                     self._llm_q.put(_STOP)
                     return
                 self._process_segment(item)
@@ -556,6 +584,8 @@ class TranslationSystem:
                 q.task_done()
 
     def _llm_worker(self) -> None:
+        if self._mode == "translate" and self._llm is not None:
+            self._warm_up("start")
         while True:
             item = self._llm_q.get()
             if item is _STOP:
@@ -591,10 +621,33 @@ class TranslationSystem:
                 phrase.played = True
                 phrase.e2e_ms = _ms(self._clock() - phrase.t_end)
                 self._record_timing(phrase)
-            try:
-                self._playback_sink(audio, sr)
-            except Exception as e:
-                logger.exception("playback error: {}", e)
+            self._play(phrase, audio, sr)
+
+    def _play(self, phrase: Optional[_Phrase], audio: np.ndarray, sr: int) -> None:
+        """Play one piece; each piece is logged with its length, and a sink
+        that returns before the audio could have played is reported (live
+        test 2026-10-31 §1: a reply was heard only partly)."""
+        duration = len(audio) / float(sr) if sr else 0.0
+        label = "external audio"
+        if phrase is not None:
+            phrase.played_pieces += 1
+            label = f"phrase #{phrase.seq} piece {phrase.played_pieces}"
+        logger.info("playback: {} ({:.2f} s audio)", label, duration)
+        t0 = time.monotonic()
+        try:
+            self._playback_sink(audio, sr)
+        except Exception as e:
+            logger.exception("playback error: {}", e)
+            return
+        took = time.monotonic() - t0
+        if took < duration - PLAYBACK_SHORT_S:
+            self._playback_short += 1
+            logger.warning(
+                "playback: {} returned after {:.2f} s of {:.2f} s audio",
+                label,
+                took,
+                duration,
+            )
 
     def _record_timing(self, phrase: _Phrase) -> None:
         t = {
@@ -715,9 +768,135 @@ class TranslationSystem:
         if not phrase.src:
             logger.warning("source language unknown - skipping translation")
             return
+        segment, phrase.segment = phrase.segment, None  # audio no longer needed
         phrase.text = text
-        phrase.segment = None  # audio no longer needed
-        self._put(self._llm_q, phrase, "llm")
+        self._route_text(phrase, segment)
+
+    # -- incomplete sentences (ASR stage) -----------------------------------
+
+    def _hold_wait_s(self) -> float:
+        end_silence = self.settings.segmentation.translate.end_silence_ms
+        return (end_silence or 0) / 1000.0
+
+    def _route_text(self, phrase: _Phrase, segment: Segment) -> None:
+        """Complete sentences go on to the LLM, an incomplete tail is held
+        and prepended to the next recognized segment."""
+        start_s = segment.start_s
+        merged = False
+        held, self._held = self._held, None
+        if held is not None:
+            if held.src != phrase.src:
+                self._held = held
+                self._flush_held("language changed")
+            else:
+                phrase.text = f"{held.text} {phrase.text}"
+                start_s = self._held_start_s
+                merged = True
+                self._asr_merged += 1
+                logger.info(
+                    "phrase #{}: held text of #{} merged: {!r}",
+                    phrase.seq,
+                    held.seq,
+                    phrase.text,
+                )
+        cut = segment.reason in ("soft", "hard")
+        ready, rest = split_complete(phrase.text, cut)
+        # one segment's tail is always held; a tail that already was held
+        # and still has no sentence end after ``hard_max_ms`` is sent
+        max_s = self.settings.segmentation.translate.hard_max_ms / 1000.0
+        if merged and rest and not ready and segment.end_s - start_s >= max_s:
+            logger.info(
+                "phrase #{}: incomplete text spans {:.1f} s >= {:.1f} s - sent"
+                " without waiting: {!r}",
+                phrase.seq,
+                segment.end_s - start_s,
+                max_s,
+                rest,
+            )
+            ready, rest = phrase.text, ""
+        if rest:
+            self._held = _Phrase(phrase.seq, phrase.t_end, text=rest, src=phrase.src)
+            self._held.asr_ms = phrase.asr_ms
+            self._held_since = time.monotonic()
+            self._held_start_s = start_s if not ready else segment.start_s
+            logger.info(
+                "phrase #{}: holding incomplete text for the next segment: {!r}",
+                phrase.seq,
+                rest,
+            )
+        if ready:
+            phrase.text = ready
+            self._put(self._llm_q, phrase, "llm")
+
+    def _speech_in_progress(self) -> bool:
+        with self._vad_lock:
+            return self._vad is not None and self._vad.in_speech()
+
+    def _release_held_if_due(self) -> None:
+        if self._held is None:
+            return
+        if time.monotonic() - self._held_since < self._hold_wait_s():
+            return
+        if self._speech_in_progress():  # the continuation is being spoken
+            return
+        self._flush_held("no continuation")
+
+    def _flush_held(self, why: str) -> None:
+        """Send the held incomplete text alone - visibly."""
+        held, self._held = self._held, None
+        if held is None:
+            return
+        self._asr_held_flushed += 1
+        logger.info(
+            "phrase #{}: incomplete text sent alone ({}): {!r}",
+            held.seq,
+            why,
+            held.text,
+        )
+        self._put(self._llm_q, held, "llm")
+
+    # -- LLM warm-up ---------------------------------------------------------
+
+    def _warm_up(self, reason: str) -> None:
+        """One tiny explicit request so the worker has the model loaded
+        before the first phrase (live test 2026-10-31 §6: 11 s cold start)."""
+        llm = self._llm
+        if llm is None:
+            return
+        t0 = time.monotonic()
+        info: Dict[str, Any] = {"reason": reason, "url": None, "error": None}
+        try:
+            info["url"] = llm.base_url
+            llm.warm_up()
+        except Exception as e:  # reported below; never kills the LLM stage
+            info["error"] = f"{type(e).__name__}: {e}"
+        info["ms"] = _ms(time.monotonic() - t0)
+        self._llm_warmup = info
+        if info["error"]:
+            logger.warning(
+                "llm warm-up ({}) on {} failed after {} ms: {}",
+                reason,
+                info["url"],
+                info["ms"],
+                info["error"],
+            )
+        else:
+            logger.info(
+                "llm warm-up ({}) on {}: {} ms", reason, info["url"], info["ms"]
+            )
+        self._emit({"status": "llm_warmup", "warmup": dict(info)})
+
+    def _warm_up_async(self, url: str) -> None:
+        """WorkerSessions switched to another worker: warm it up off the
+        session thread (it holds the session lock)."""
+        if not self.is_running or self._mode != "translate":
+            return
+        threading.Thread(
+            target=self._warm_up,
+            args=(f"switched to {url}",),
+            daemon=True,
+            name="rt-llm-warmup",
+        ).start()
 
     def _translate(self, phrase: _Phrase) -> None:
         """LLM stage: stream the translation, each sentence on to TTS.
@@ -861,6 +1040,10 @@ class TranslationSystem:
             "backpressure": dict(self._backpressure),
             "dropped_segments": self._dropped,
             "asr_no_words": self._asr_no_words,
+            "asr_merged": self._asr_merged,
+            "asr_held_flushed": self._asr_held_flushed,
+            "playback_short": self._playback_short,
+            "llm_warmup": dict(self._llm_warmup) if self._llm_warmup else None,
             "use": {k: getattr(self.settings.use, k) for k in KINDS},
             "choices": {
                 k: [

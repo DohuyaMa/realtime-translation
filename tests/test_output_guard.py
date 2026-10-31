@@ -51,3 +51,21 @@ def test_output_over_three_times_the_source_is_rejected():
     source = "a b c d e"  # 5 words -> limit 15
     assert reject_reason(source, " ".join(["w"] * 15)) is None
     assert reject_reason(source, " ".join(["w"] * 16)) == "too_long"
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        # live test 2026-10-31 §4: "миші" -> ASR "Нишки" -> left in the output
+        'To move tabs, press the "Tabs" panel with the right mouse button'
+        ' ("Niшки") and select "Show Tabs Vertically".',
+        "Okay, привіт.",
+    ],
+)
+def test_cyrillic_in_the_english_translation_is_rejected(output):
+    source = "Щоб перемістити вкладки, натисніть панель вкладок правою кнопкою"
+    assert reject_reason(source, output) == "foreign_script"
+
+
+def test_latin_diacritics_and_dashes_pass():
+    assert reject_reason("kawiarnia", "Café — naïve façade.") is None

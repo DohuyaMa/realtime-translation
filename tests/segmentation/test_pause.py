@@ -9,6 +9,32 @@ from src.segmentation import (
 
 W = WINDOW_SAMPLES / 16000  # 0.032 s
 
+# The cut mechanics below are written against these limits (the translate
+# defaults before 2026-10-31); test_translate_defaults pins the current ones.
+CFG = SegmenterConfig(soft_max_ms=8_000, hard_max_ms=20_000, lookback_ms=1_500)
+
+
+def test_translate_defaults_keep_segments_short():
+    # live test 2026-10-31 §5: fast reading without pauses grew a segment to
+    # ~20 s; a phrase must not exceed ~12 s
+    cfg = SegmenterConfig.translate()
+    assert (cfg.soft_max_ms, cfg.hard_max_ms, cfg.lookback_ms) == (6000, 12000, 2000)
+    probs = [0.9] * 1000  # 32 s of speech, no pause at all
+    segs = feed_probs(PauseSegmenter(cfg), probs)
+    assert segs and all(s.end_s - s.start_s <= 12.0 for s in segs)
+    assert all(s.reason == "hard" for s in segs)
+
+
+def test_in_speech_while_collecting_a_segment():
+    seg = PauseSegmenter(CFG)
+    assert not seg.in_speech
+    feed_probs(seg, [0.0] * 5)
+    assert not seg.in_speech
+    feed_probs(seg, [0.9] * 20)
+    assert seg.in_speech
+    feed_probs(seg, [0.0] * 30)  # 700 ms pause ends the segment
+    assert not seg.in_speech
+
 
 def feed_probs(seg, probs):
     out = []
@@ -33,9 +59,7 @@ def window_ids(segment):
 
 def test_translate_phrase_ends_on_700ms_silence():
     # ~1 s speech, 704 ms silence
-    segs = feed_probs(
-        PauseSegmenter(SegmenterConfig.translate()), [0.9] * 31 + [0.0] * 22
-    )
+    segs = feed_probs(PauseSegmenter(CFG), [0.9] * 31 + [0.0] * 22)
     assert [s.reason for s in segs] == ["end"]
     # trailing silence trimmed to 300 ms -> 9 windows
     assert segs[0].start_s == 0.0
@@ -45,13 +69,13 @@ def test_translate_phrase_ends_on_700ms_silence():
 
 
 def test_short_blip_discarded():
-    seg = PauseSegmenter(SegmenterConfig.translate())
+    seg = PauseSegmenter(CFG)
     assert feed_probs(seg, [0.9] * 6 + [0.0] * 25) == []  # 0.2 s + 0.8 s
     assert seg.flush() is None
 
 
 def test_preroll_prepends_last_300ms_before_speech():
-    seg = PauseSegmenter(SegmenterConfig.translate())
+    seg = PauseSegmenter(CFG)
     feed_indexed(seg, [0.0] * 20 + [0.9] * 20)
     out = seg.flush()
     # 300 // 32 = 9 pre-roll windows: stream windows 11..19
@@ -63,12 +87,12 @@ def test_soft_cut_after_soft_max_on_short_pause():
     probs = (
         [0.9] * 260 + [0.0] * 9 + [0.9] * 40
     )  # 8.3 s speech, 288 ms pause, more speech
-    segs = feed_probs(PauseSegmenter(SegmenterConfig.translate()), probs)
+    segs = feed_probs(PauseSegmenter(CFG), probs)
     assert segs[0].reason == "soft" and 8.3 <= segs[0].end_s <= 8.6
 
 
 def test_soft_cut_in_middle_of_pause_and_tail_carried():
-    seg = PauseSegmenter(SegmenterConfig.translate())
+    seg = PauseSegmenter(CFG)
     segs = feed_indexed(seg, [0.9] * 260 + [0.0] * 9 + [0.9] * 40)
     # soft fires on window 267 (8 silent windows = 256 ms >= 250 ms);
     # the pause so far is windows 260..267, its middle is window 264.
@@ -84,7 +108,7 @@ def test_soft_cut_in_middle_of_pause_and_tail_carried():
 def test_hard_cut_at_quietest_window_in_lookback():
     probs = [0.9] * 625
     probs[600] = 0.1  # 20 s of speech, dip at 19.2 s
-    segs = feed_probs(PauseSegmenter(SegmenterConfig.translate()), probs)
+    segs = feed_probs(PauseSegmenter(CFG), probs)
     assert segs[0].reason == "hard" and abs(segs[0].end_s - 600 * 0.032) < 1e-6
     assert len(segs) == 1 and len(segs[0].audio) == 600 * WINDOW_SAMPLES
 
@@ -93,12 +117,12 @@ def test_hard_cut_ignores_dip_outside_lookback():
     probs = [0.9] * 625
     probs[500] = 0.0  # 3.9 s before the hard cut: outside the 1.5 s lookback
     probs[610] = 0.3
-    segs = feed_probs(PauseSegmenter(SegmenterConfig.translate()), probs)
+    segs = feed_probs(PauseSegmenter(CFG), probs)
     assert segs[0].reason == "hard" and segs[0].end_s == pytest.approx(610 * W)
 
 
 def test_hard_cut_carries_tail_without_loss():
-    seg = PauseSegmenter(SegmenterConfig.translate())
+    seg = PauseSegmenter(CFG)
     probs = [0.9] * 700 + [0.0] * 30
     segs = feed_probs(seg, probs)
     assert [s.reason for s in segs] == ["hard", "end"]
@@ -112,7 +136,7 @@ def test_hard_cut_carries_tail_without_loss():
 
 
 def test_hard_cut_samples_identity():
-    seg = PauseSegmenter(SegmenterConfig.translate())
+    seg = PauseSegmenter(CFG)
     segs = feed_indexed(seg, [0.9] * 700 + [0.0] * 30)
     ids = [i for s in segs for i in window_ids(s)]
     assert ids == list(range(709))
@@ -124,7 +148,7 @@ def ids_of(segs):
 
 def test_short_word_after_hard_cut_is_kept():
     # all probs tie -> cut before window 624; the speaker stops 384 ms later
-    seg = PauseSegmenter(SegmenterConfig.translate())
+    seg = PauseSegmenter(CFG)
     segs = feed_indexed(seg, [0.9] * 636 + [0.0] * 30)
     assert [s.reason for s in segs] == ["hard", "end"]
     assert segs[1].start_s == segs[0].end_s
@@ -132,7 +156,7 @@ def test_short_word_after_hard_cut_is_kept():
 
 
 def test_flush_right_after_hard_cut_keeps_short_tail():
-    seg = PauseSegmenter(SegmenterConfig.translate())
+    seg = PauseSegmenter(CFG)
     segs = feed_indexed(seg, [0.9] * 636)
     out = seg.flush()
     assert out.reason == "flush" and out.start_s == segs[0].end_s
@@ -140,7 +164,7 @@ def test_flush_right_after_hard_cut_keeps_short_tail():
 
 
 def test_short_word_after_soft_cut_is_kept():
-    seg = PauseSegmenter(SegmenterConfig.translate())
+    seg = PauseSegmenter(CFG)
     segs = feed_indexed(seg, [0.9] * 260 + [0.0] * 9 + [0.9] * 9 + [0.0] * 25)
     assert [s.reason for s in segs] == ["soft", "end"]
     assert segs[1].start_s == segs[0].end_s
@@ -149,7 +173,7 @@ def test_short_word_after_soft_cut_is_kept():
 
 
 def test_soft_tail_continues_exactly_across_a_long_pause():
-    seg = PauseSegmenter(SegmenterConfig.translate())
+    seg = PauseSegmenter(CFG)
     segs = feed_indexed(seg, [0.9] * 260 + [0.0] * 20 + [0.9] * 20)  # 640 ms pause
     out = seg.flush()
     assert out.start_s == segs[0].end_s
@@ -157,7 +181,7 @@ def test_soft_tail_continues_exactly_across_a_long_pause():
 
 
 def test_silent_soft_tail_dropped_after_end_silence():
-    seg = PauseSegmenter(SegmenterConfig.translate())
+    seg = PauseSegmenter(CFG)
     segs = feed_indexed(seg, [0.9] * 260 + [0.0] * 40 + [0.9] * 20)
     assert [s.reason for s in segs] == ["soft"]
     out = seg.flush()
@@ -202,7 +226,7 @@ def test_transcribe_trims_long_silence_to_keep_silence():
 
 
 def test_flush_returns_pending_speech_and_none_for_blip():
-    seg = PauseSegmenter(SegmenterConfig.translate())
+    seg = PauseSegmenter(CFG)
     feed_probs(seg, [0.0] * 3 + [0.9] * 20 + [0.0] * 5)  # 640 ms speech, short pause
     out = seg.flush()
     assert out.reason == "flush"
@@ -210,14 +234,14 @@ def test_flush_returns_pending_speech_and_none_for_blip():
     assert len(out.audio) == 28 * WINDOW_SAMPLES
     assert seg.flush() is None  # nothing pending any more
 
-    blip = PauseSegmenter(SegmenterConfig.translate())
+    blip = PauseSegmenter(CFG)
     feed_probs(blip, [0.9] * 5)  # 160 ms < min_speech_ms
     assert blip.flush() is None
 
 
 def test_reconfigure_applies_from_next_window():
     # switch translate -> transcribe mid-stream: no "end" on a 0.8 s pause
-    seg = PauseSegmenter(SegmenterConfig.translate())
+    seg = PauseSegmenter(CFG)
     assert feed_probs(seg, [0.9] * 50 + [0.0] * 21) == []  # 672 ms < 700 ms
     seg.reconfigure(SegmenterConfig.transcribe())
     assert feed_probs(seg, [0.0] * 4 + [0.9] * 50) == []  # pause reaches 800 ms
@@ -235,7 +259,7 @@ def test_reconfigure_applies_from_next_window():
 
 
 def test_reset_drops_pending_segment_and_restarts_clock():
-    seg = PauseSegmenter(SegmenterConfig.translate())
+    seg = PauseSegmenter(CFG)
     feed_probs(seg, [0.9] * 50)
     seg.reset()
     assert seg.flush() is None
@@ -245,7 +269,7 @@ def test_reset_drops_pending_segment_and_restarts_clock():
 
 
 def test_feed_rejects_bad_window():
-    seg = PauseSegmenter(SegmenterConfig.translate())
+    seg = PauseSegmenter(CFG)
     with pytest.raises(ValueError):
         seg.feed(np.zeros(100, np.int16), 0.9)
     with pytest.raises(ValueError):
@@ -270,7 +294,7 @@ def test_validate_rejects_bad_config():
             bad.validate()
     with pytest.raises(ValueError):
         PauseSegmenter(SegmenterConfig(soft_max_ms=5000, hard_max_ms=4000))
-    seg = PauseSegmenter(SegmenterConfig.translate())
+    seg = PauseSegmenter(CFG)
     with pytest.raises(ValueError):
         seg.reconfigure(SegmenterConfig(lookback_ms=30_000))
 

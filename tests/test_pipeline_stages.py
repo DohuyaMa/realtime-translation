@@ -62,6 +62,11 @@ class SlowLlm:
                 assert self.gate.wait(3)
             yield s
 
+    def warm_up(self):
+        pass
+
+    base_url = "http://llm"
+
     def close(self):
         pass
 
@@ -113,7 +118,7 @@ def system(asr, llm, tts, sink, clock=time.monotonic):
 
 def run_three(asr_delay=STAGE_S, llm_delay=STAGE_S, tts_delay=STAGE_S):
     played = []
-    asr = SlowAsr([AsrResult(f"p{i}", "pl") for i in (1, 2, 3)], asr_delay)
+    asr = SlowAsr([AsrResult(f"p{i}.", "pl") for i in (1, 2, 3)], asr_delay)
     llm = SlowLlm(llm_delay)
     tts = SlowTts(tts_delay)
     ts, vads, capture = system(asr, llm, tts, lambda a, sr: played.append(a[0]))
@@ -134,7 +139,7 @@ def test_stages_overlap_and_order_is_kept():
     sequential = 3 * 3 * STAGE_S  # old model: asr+llm+tts per phrase, one at a time
     # pipelined: first phrase 3 stages, then one stage per further phrase
     assert elapsed < 0.75 * sequential, (elapsed, sequential)
-    assert tts_calls == ["EN(p1)", "EN(p2)", "EN(p3)"]
+    assert tts_calls == ["EN(p1.)", "EN(p2.)", "EN(p3.)"]
     assert played == [1.0, 2.0, 3.0]
 
 
@@ -187,7 +192,7 @@ def test_full_stage_queue_is_backpressure_not_drop():
 
     played = []
     n = tsmod.STAGE_QUEUE_MAX + 3
-    asr = SlowAsr([AsrResult(f"p{i}", "pl") for i in range(n)], 0.0)
+    asr = SlowAsr([AsrResult(f"p{i}.", "pl") for i in range(n)], 0.0)
     llm = SlowLlm(0.0)
     tts = SlowTts(0.05)  # slowest stage
     events = []
@@ -337,3 +342,119 @@ def test_asr_output_without_words_never_reaches_llm(text):
         assert llm.calls == [] and tts.calls == [] and played == []
     finally:
         ts.stop()
+
+
+def test_long_translation_plays_every_sentence_even_when_next_phrase_comes():
+    # live test 2026-10-31 §1: a 3-sentence reply was shown whole but heard
+    # only up to "Okay, you impressed us, but"; the edge must hand every
+    # sentence to playback, in order, and the next phrase must not cut it
+    played = []
+
+    def sink(audio, sr):
+        time.sleep(0.05)  # playback takes time; next phrase arrives meanwhile
+        played.append(audio[0])
+
+    reply = [
+        "Okay, you impressed us, but there are still problems.",
+        "The real reason was found: the media model answered correctly.",
+        "It fails to recognize it when returning text without any letters at all.",
+    ]
+    source = (  # the owner's phrase, as recognized
+        "Добре, вразивіш ви, але все одно з проблемами. Справжня причина"
+        " знайшлася. На самому слові медіа модель відповідала правильно."
+        " Збійде її розпізнавати, коли повертає текст без жодної літери."
+    )
+    asr = SlowAsr([AsrResult(source, "uk"), AsrResult(source, "uk")], 0.0)
+    llm = SlowLlm(0.0, sentences=reply)
+    tts = SlowTts(0.0)
+    ts, vads, capture = system(asr, llm, tts, sink)
+    assert ts.start()
+    try:
+        vads[-1].pending.append(seg())
+        capture.push()
+        time.sleep(0.03)
+        vads[-1].pending.append(seg())
+        capture.push()
+        assert wait_for(lambda: len(played) == 6, timeout=5)
+    finally:
+        ts.stop()
+    assert tts.calls == reply + reply  # SlowLlm answers both phrases alike
+    assert played == [float(i) for i in range(1, 7)]
+    assert ts.get_stats()["playback_short"] == 0
+
+
+def test_playback_that_returns_early_is_reported():
+    asr = SlowAsr([AsrResult("raz dwa trzy cztery.", "pl")], 0.0)
+    llm = SlowLlm(0.0, sentences=["One two three four."])
+
+    class LongTts(SlowTts):
+        def synthesize(self, text, voice=None, speed=None):
+            self.calls.append(text)
+            return np.zeros(24000, dtype=np.float32), 24000  # 1 s of audio
+
+    played = []
+    ts, vads, capture = system(asr, llm, LongTts(0.0), lambda a, sr: played.append(1))
+    assert ts.start()
+    try:
+        vads[-1].pending.append(seg())
+        capture.push()
+        assert wait_for(lambda: played)
+    finally:
+        ts.stop()
+    assert ts.get_stats()["playback_short"] == 1  # sink returned at once
+
+
+def test_llm_is_warmed_up_when_the_pipeline_starts():
+    events = []
+
+    class WarmLlm(SlowLlm):
+        warmups = 0
+
+        def warm_up(self):
+            WarmLlm.warmups += 1
+
+    asr = SlowAsr([], 0.0)
+    ts, vads, capture = system(asr, WarmLlm(0.0), SlowTts(0.0), lambda a, sr: None)
+    ts.set_status_callback(events.append)
+    assert ts.start()
+    try:
+        assert wait_for(lambda: ts.get_stats()["llm_warmup"])
+    finally:
+        ts.stop()
+    w = ts.get_stats()["llm_warmup"]
+    assert WarmLlm.warmups == 1
+    assert w["reason"] == "start" and w["url"] == "http://llm" and w["error"] is None
+    assert any(e.get("status") == "llm_warmup" for e in events)
+
+
+def test_failed_warm_up_is_reported_and_the_stage_keeps_working():
+    from src.clients import ServiceError
+
+    class ColdLlm(SlowLlm):
+        def warm_up(self):
+            raise ServiceError("llm", "timeout", "cold")
+
+    played = []
+    asr = SlowAsr([AsrResult("raz.", "pl")], 0.0)
+    ts, vads, capture = system(
+        asr, ColdLlm(0.0), SlowTts(0.0), lambda a, sr: played.append(1)
+    )
+    assert ts.start()
+    try:
+        vads[-1].pending.append(seg())
+        capture.push()
+        assert wait_for(lambda: played)
+    finally:
+        ts.stop()
+    assert "cold" in ts.get_stats()["llm_warmup"]["error"]
+
+
+def test_cyrillic_in_translation_is_rejected_as_foreign_script():
+    llm = MetaLlm(['Press the right mouse button ("Niшки") and select it.'])
+    tts_calls, played, events, stats, context = _run_one(
+        llm, "натисніть правою кнопкою Нишки і виберіть."
+    )
+    assert tts_calls == [] and played == [] and context == []
+    rejected = [e for e in events if e.get("status") == "translation_rejected"]
+    assert rejected[0]["reason"] == "foreign_script"
+    assert stats["llm_rejected"] == 1

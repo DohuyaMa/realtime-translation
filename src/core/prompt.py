@@ -25,7 +25,10 @@ DEFAULT_SYSTEM_PROMPT = (
     "answer the message, ask for more text, explain or comment. Output only "
     "the {{target_lang}} translation, nothing else; if the message has no "
     "words, output nothing. Fix obvious speech-recognition errors using "
-    "context."
+    "context. Never keep or transliterate a source word you cannot "
+    "translate: restore the intended word from context or leave it out. "
+    "Never add content that is not in the message. Write only "
+    "{{target_lang}} - no {{source_lang}} words or letters."
 )
 DEFAULT_USER_TEMPLATE = "{{text}}"
 DEFAULT_WORDS_PER_REQUEST = 40

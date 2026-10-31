@@ -106,5 +106,9 @@ class VadStream:
     def reconfigure(self, cfg: SegmenterConfig) -> None:
         self._segmenter.reconfigure(cfg)
 
+    def in_speech(self) -> bool:
+        """Speech is being collected into a segment that is not emitted yet."""
+        return self._segmenter.in_speech
+
     def last_level(self) -> float:
         return self._level

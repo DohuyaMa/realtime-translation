@@ -54,10 +54,10 @@ segmentation:
     threshold: 0.5
     min_speech_ms: 400
     end_silence_ms: 700
-    soft_max_ms: 8000
+    soft_max_ms: 6000            # after this, cut at the first soft_silence_ms pause
     soft_silence_ms: 250
-    hard_max_ms: 20000
-    lookback_ms: 1500
+    hard_max_ms: 12000           # no pause: cut at the quietest window of the last lookback_ms
+    lookback_ms: 2000
     preroll_ms: 300
   transcribe:                   # long chunks, chunk_max_s <= 900
     chunk_min_s: 300

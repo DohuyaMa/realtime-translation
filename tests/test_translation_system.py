@@ -96,6 +96,11 @@ class FakeLlm:
     def translate_stream(self, text, source_lang, context=()):
         yield self.translate(text, source_lang, context)
 
+    base_url = "http://llm"
+
+    def warm_up(self):
+        self.warmups = getattr(self, "warmups", 0) + 1
+
     def close(self):
         pass
 
@@ -157,6 +162,11 @@ class FakeVad:
 
     def last_level(self):
         return 0.1
+
+    def in_speech(self):
+        return self.speaking
+
+    speaking = False
 
 
 class FakeCapture:
@@ -306,7 +316,7 @@ def test_translate_start_fails_cleanly_without_worker():
 def test_llm_context_carries_previous_pairs():
     ts, _, llm, vads, capture, sink, _ = make(
         translate_settings(source_language="uk"),
-        [AsrResult("один", "uk"), AsrResult("два", "uk")],
+        [AsrResult("odyn.", "uk"), AsrResult("dva.", "uk")],
     )
     ts.start()
     try:
@@ -315,7 +325,7 @@ def test_llm_context_carries_previous_pairs():
     finally:
         ts.stop()
     assert llm.calls[0][2] == []
-    assert llm.calls[1] == ("два", "uk", [("один", "EN(один)")])
+    assert llm.calls[1] == ("dva.", "uk", [("odyn.", "EN(odyn.)")])
 
 
 def test_transcribe_mode_uses_batch_priority_scaled_timeout_and_no_session():
@@ -366,7 +376,7 @@ def test_service_error_skips_phrase_and_continues():
     llm = FakeLlm(errors=[ServiceError("llm", "http", "HTTP 500"), None])
     ts, _, llm, vads, capture, sink, events = make(
         translate_settings(),
-        [AsrResult("раз", "uk"), AsrResult("два", "uk")],
+        [AsrResult("raz.", "uk"), AsrResult("dva.", "uk")],
         llm=llm,
     )
     ts.start()
@@ -376,7 +386,7 @@ def test_service_error_skips_phrase_and_continues():
     finally:
         ts.stop()
     assert ts.last_error == "llm: http"
-    assert [c[0] for c in llm.calls] == ["раз", "два"]
+    assert [c[0] for c in llm.calls] == ["raz.", "dva."]
     assert llm.calls[1][2] == []  # failed phrase not added to context
     assert any(e["status"] == "error" for e in events)
     stats = ts.get_stats()
@@ -467,7 +477,7 @@ def test_capture_failure_aborts_start_and_closes_session():
 
 
 def test_llm_context_evicts_beyond_context_pairs():
-    texts = ["a", "b", "c", "d", "e"]
+    texts = ["a.", "b.", "c.", "d.", "e."]
     ts, _, llm, vads, capture, sink, _ = make(
         translate_settings(source_language="uk"),
         [AsrResult(t, "uk") for t in texts],
@@ -486,7 +496,7 @@ def test_llm_context_evicts_beyond_context_pairs():
 def test_start_clears_prompt_and_translation_context():
     ts, pools, llm, vads, capture, sink, _ = make(
         translate_settings(source_language="uk"),
-        [AsrResult("один", "uk"), AsrResult("два", "uk")],
+        [AsrResult("odyn.", "uk"), AsrResult("dva.", "uk")],
     )
     for _ in range(2):
         ts.start()
@@ -496,7 +506,7 @@ def test_start_clears_prompt_and_translation_context():
         finally:
             ts.stop()
         sink.played.clear()
-    assert llm.calls[1] == ("два", "uk", [])
+    assert llm.calls[1] == ("dva.", "uk", [])
     assert pools.asr.client.calls[1]["prompt"] is None
 
 
