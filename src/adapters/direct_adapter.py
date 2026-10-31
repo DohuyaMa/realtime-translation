@@ -5,7 +5,7 @@ from typing import Callable, Dict, List, Optional
 
 from loguru import logger
 
-from ..clients import LeaseKeeper, ServiceHealthMonitor
+from ..clients import ServiceHealthMonitor, WorkerSessions
 from ..controller.controller import Device
 from ..core.preflight.pipewire import PipeWirePreflight
 from ..core.runtime import EdgeSettings, get_runtime_config
@@ -74,8 +74,10 @@ class DirectAdapter:
             was_running = bool(self._monitor and self._monitor_running)
             if self._monitor is not None:
                 self._monitor.stop()
-            lease = ts.llm_target if isinstance(ts.llm_target, LeaseKeeper) else None
-            self._monitor = self._health_factory(ts.pools, ts.llm, lease)
+            sessions = ts.llm_target
+            if not isinstance(sessions, WorkerSessions):
+                sessions = None
+            self._monitor = self._health_factory(ts.pools, ts.llm, sessions)
             self._monitor_key = key
             self._monitor_running = False
             if was_running:

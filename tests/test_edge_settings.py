@@ -3,46 +3,58 @@ from src.core.runtime import resolve_edge_settings
 
 def test_auto_mode_derivation():
     assert resolve_edge_settings({}, {}).effective_mode() == "transcribe"
-    lease = {
-        "services": {"tts_urls": ["http://t"], "llm": {"django_urls": ["http://d"]}}
+    local = {"services": {"local": {"llm": "http://l", "tts": "http://t"}}}
+    assert resolve_edge_settings(local, {}).effective_mode() == "translate"
+    django = {"services": {"django_urls": ["http://d"], "django_token_file": "/t"}}
+    assert resolve_edge_settings(django, {}).effective_mode() == "translate"
+    only_llm = {"services": {"local": {"llm": "http://l"}}}
+    assert resolve_edge_settings(only_llm, {}).effective_mode() == "transcribe"
+
+
+def test_env_overrides_config_and_marks_managed():
+    cfg = {"services": {"local": {"asr": "http://cfg:9"}}}
+    env = {
+        "RT_EDGE_LOCAL_ASR_URL": "http://a:1/",
+        "RT_EDGE_DJANGO_URLS": "http://d1,http://d2/",
+        "RT_EDGE_ALLOWED_SERVICES": "llm:cyborg, tts:sktop",
+        "RT_EDGE_LOCAL_TOKEN_FILE": "/run/x",
     }
-    assert resolve_edge_settings(lease, {}).effective_mode() == "translate"
-    direct = {"services": {"tts_urls": ["http://t"], "llm": {"direct_url": "http://l"}}}
-    assert resolve_edge_settings(direct, {}).effective_mode() == "translate"
-    assert (
-        resolve_edge_settings(
-            {"services": {"llm": {"direct_url": "http://l"}}}, {}
-        ).effective_mode()
-        == "transcribe"
-    )
+    s = resolve_edge_settings(cfg, env)
+    assert s.local.asr == "http://a:1"
+    assert s.django_urls == ("http://d1", "http://d2")
+    assert s.allowed_services == ("llm:cyborg", "tts:sktop")
+    assert s.local_token_file == "/run/x"
+    assert {"local.asr", "django_urls", "allowed_services"} <= s.managed
 
 
-def test_env_lists_override_config():
-    cfg = {"services": {"asr_urls": ["http://cfg:9"]}}
-    s = resolve_edge_settings(cfg, {"RT_EDGE_ASR_URLS": "http://a:1,http://b:2/"})
-    assert s.asr_urls == ("http://a:1", "http://b:2")
-    assert "asr_urls" in s.managed
-
-
-def test_config_used_when_env_absent_and_defaults():
+def test_defaults():
     s = resolve_edge_settings({}, {})
-    assert s.asr_urls == ("http://127.0.0.1:8091",)
+    assert s.local.asr == "http://127.0.0.1:8091"
+    assert s.local.llm is None and s.local.tts is None
+    assert s.local_token_file == "/run/llama/local-token"
+    assert s.allowed_services is None
     assert s.validate() == []
-    s = resolve_edge_settings(
-        {"services": {"llm": {"direct_url": "http://l/", "model": "m"}}},
-        {"RT_EDGE_LLM_MODEL": "x"},
-    )
-    assert s.llm.direct_url == "http://l" and s.llm.model == "x"
 
 
-def test_lease_requires_django_token_file():
-    s = resolve_edge_settings({"services": {"llm": {"django_urls": ["http://d"]}}}, {})
-    assert s.validate()
-    s = resolve_edge_settings(
-        {"services": {"llm": {"django_urls": ["http://d"], "django_token_file": "/t"}}},
-        {},
-    )
-    assert s.validate() == []
+def test_django_requires_token_file_and_allowed_format():
+    s = resolve_edge_settings({"services": {"django_urls": ["http://d"]}}, {})
+    assert any("django_token_file" in e for e in s.validate())
+    s = resolve_edge_settings({"services": {"allowed_services": ["llm-cyborg"]}}, {})
+    assert any("allowed_services" in e for e in s.validate())
+
+
+def test_obsolete_keys_are_reported(caplog):
+    from loguru import logger
+
+    seen = []
+    sink = logger.add(lambda m: seen.append(str(m)), level="WARNING")
+    try:
+        resolve_edge_settings(
+            {"services": {"asr_urls": ["http://x"], "llm": {"django_urls": []}}}, {}
+        )
+    finally:
+        logger.remove(sink)
+    assert any("asr_urls" in m and "llm.django_urls" in m for m in seen)
 
 
 def test_transcribe_chunk_max_over_900s_invalid():
@@ -53,7 +65,5 @@ def test_transcribe_chunk_max_over_900s_invalid():
 
 
 def test_translate_mode_requires_llm_and_tts():
-    assert (
-        len(resolve_edge_settings({"services": {"mode": "translate"}}, {}).validate())
-        == 2
-    )
+    errors = resolve_edge_settings({"services": {"mode": "translate"}}, {}).validate()
+    assert len(errors) == 2

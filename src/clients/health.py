@@ -8,9 +8,9 @@ from typing import Any, Dict, List, Optional
 
 from loguru import logger
 
-from .lease import LeaseKeeper
 from .llm import LlmClient
 from .pool import SpeechPools
+from .session import WorkerSessions
 
 
 def _entry(service: str, url: Optional[str], **kw: Any) -> Dict[str, Any]:
@@ -50,12 +50,12 @@ class ServiceHealthMonitor:
         self,
         pools: SpeechPools,
         llm: Optional[LlmClient],
-        lease: Optional[LeaseKeeper],
+        sessions: Optional[WorkerSessions],
         interval_s: float = 5,
     ) -> None:
         self._pools = pools
         self._llm = llm
-        self._lease = lease
+        self._sessions = sessions
         self._interval = interval_s
         self._lock = threading.Lock()
         self._snapshot: Dict[str, List[Dict[str, Any]]] = {}
@@ -92,8 +92,8 @@ class ServiceHealthMonitor:
     def _llm_entry(
         self, status: Optional[dict], error: Optional[str] = None
     ) -> Dict[str, Any]:
-        lease = self._lease.snapshot() if self._lease is not None else None
-        url = lease["base_url"] if lease else None
+        session = self._sessions.snapshot() if self._sessions is not None else None
+        url = session["active"] if session else None
         if url is None and self._llm is not None:
             try:
                 url = self._llm.base_url
@@ -112,7 +112,7 @@ class ServiceHealthMonitor:
             )
         elif error:
             entry["error"] = error
-        entry["lease"] = lease
+        entry["session"] = session
         return entry
 
     def _probe_llm(self) -> List[Dict[str, Any]]:

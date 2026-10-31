@@ -6,11 +6,11 @@ import httpx
 import numpy as np
 import pytest
 
-from src.clients import ClientFactories, client_factories
+from src.clients import ClientFactories, Endpoint, client_factories
 from src.clients.asr import AsrClient
-from src.clients.base import ServiceClient, ServiceError
+from src.clients.base import Credential, ServiceClient, ServiceError
 from src.clients.tts import TtsClient, decode_wav
-from src.clients.llm import LlmClient, StaticTarget
+from src.clients.llm import LlmClient
 from src.core.runtime import EdgeSettings, LlmSettings
 
 
@@ -77,7 +77,7 @@ def test_llm_request_body():
     out = llm(handler).translate("привіт світе", "uk", [("a", "A"), ("b", "B")])
     assert out == "Hello"
     b = seen["body"]
-    assert seen["auth"] == "Bearer sha256:abc"
+    assert seen["auth"] == "Token sha256:abc"
     assert seen["url"] == "http://llm1/v1/chat/completions"
     assert "Ukrainian" in b["messages"][0]["content"]
     assert [m["role"] for m in b["messages"]] == [
@@ -181,23 +181,51 @@ def test_llm_english_passthrough_no_http():
         llm(handler).translate("x", "de")
 
 
-def test_llm_status_uses_bearer():
+def test_llm_status_uses_token_scheme():
     def handler(req):
         assert (
             req.url.path == "/status"
-            and req.headers["authorization"] == "Bearer sha256:abc"
+            and req.headers["authorization"] == "Token sha256:abc"
         )
         return httpx.Response(200, json={"model": {"loaded": True}})
 
     assert llm(handler).status() == {"model": {"loaded": True}}
 
 
-def test_static_target_reads_token_file(tmp_path):
-    f = tmp_path / "tok"
-    f.write_text("secret\n")
-    t = StaticTarget("http://l:1/", str(f))
-    assert t.current() == ("http://l:1", "secret")
-    t.invalidate("auth")
+def test_service_client_sends_token_and_rereads_local_file_once_on_401(tmp_path):
+    f = tmp_path / "local-token"
+    f.write_text("fresh\n")
+    seen = []
+    valid = {"t": "fresh"}
+
+    def handler(req):
+        seen.append(req.headers.get("authorization"))
+        good = req.headers.get("authorization") == f"Token {valid['t']}"
+        return httpx.Response(200 if good else 401, json={"ready": True})
+
+    cred = Credential("stale", str(f))
+    c = ServiceClient(
+        "http://s", credential=cred, transport=httpx.MockTransport(handler)
+    )
+    assert c._request("GET", "/x").status_code == 200
+    assert seen == ["Token stale", "Token fresh"] and cred.offline is True
+    valid["t"] = "newer"  # server rotated again
+    f.write_text("rotated-but-wrong\n")  # retry once, still 401 -> auth error
+    seen.clear()
+    with pytest.raises(ServiceError) as e:
+        c._request("GET", "/x")
+    assert e.value.kind == "auth" and len(seen) == 2
+    seen.clear()  # file unchanged now -> no retry at all
+    with pytest.raises(ServiceError):
+        c._request("GET", "/x")
+    assert len(seen) == 1
+    remote = ServiceClient(
+        "http://s", credential=Credential("t"), transport=httpx.MockTransport(handler)
+    )
+    seen.clear()
+    with pytest.raises(ServiceError):
+        remote._request("GET", "/x")
+    assert seen == ["Token t"]  # no fallback file: no retry
 
 
 def test_asr_client_sends_priority_and_chunk_seconds():
@@ -229,8 +257,10 @@ def test_asr_default_priority_realtime():
 def test_client_factories():
     f = client_factories(EdgeSettings())
     assert isinstance(f, ClientFactories)
-    assert f.asr("http://a:1/").base_url == "http://a:1"
-    assert f.tts("http://t:1").service == "tts"
+    ep = Endpoint("asr", "n", "http://a:1/", Credential("tok"))
+    c = f.asr(ep)
+    assert c.base_url == "http://a:1" and c.credential.value == "tok"
+    assert f.tts(Endpoint("tts", "n", "http://t:1", Credential())).service == "tts"
 
 
 def tts(handler):

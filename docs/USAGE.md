@@ -5,7 +5,7 @@
 ## 1. Огляд режимів і компонентів
 
 ```
-мікрофон -> edge (UI + VAD-сегментація) -> rt-asr -> [LLM через lease] -> rt-tts -> rt_virtual_output
+мікрофон -> edge (UI + VAD-сегментація) -> rt-asr -> [llama-воркер, app-сесія] -> rt-tts -> rt_virtual_output
 ```
 
 | Компонент | Де працює | Пакет / запуск | Порт |
@@ -13,15 +13,15 @@
 | edge (UI, сегментація, клієнти) | ПК користувача | `python -m src.main` | - |
 | `rt-asr` (faster-whisper) | будь-який хост | `.#rt-asr-cpu`, `.#rt-asr-gpu`, `python -m src.services.asr` | 8091 |
 | `rt-tts` (Kokoro ONNX) | будь-який хост | `.#rt-tts-cpu`, `.#rt-tts-gpu`, `python -m src.services.tts` | 8093 |
-| LLM (llama-воркер) | кластер, lease від Django | або локальний `llama-server` (dev) | 8080 (dev) |
+| LLM (llama-воркер) | локальний або вузол кластера (список від Django) | app-сесія напряму у воркера | 8080 |
 
 Режими edge (`services.mode`):
 
 - `transcribe` - лише довгі чанки (300-600 с) через `rt-asr`, текст без перекладу;
-- `translate` - короткі фрази: ASR -> LLM -> TTS; потребує LLM (`django_urls` або `direct_url`) і `tts_urls`;
-- `auto` (default) - `translate`, якщо є джерело LLM і `tts_urls`, інакше `transcribe`.
+- `translate` - короткі фрази: ASR -> LLM -> TTS; потребує джерела LLM і TTS (`local.llm`/`local.tts` або `django_urls`);
+- `auto` (default) - `translate`, якщо є джерела LLM і TTS, інакше `transcribe`.
 
-Сервіси доступні лише через HTTP (OpenAI-сумісний стиль): `POST /audio/transcriptions`, `POST /audio/speech`, `GET /audio/voices`, `GET /health`, `GET /status`, `GET|POST /config`. Опційний bearer-токен: `RT_API_TOKEN_FILE` (заголовок `Authorization: Bearer <token>`).
+Сервіси доступні лише через HTTP (OpenAI-сумісний стиль): `POST /audio/transcriptions`, `POST /audio/speech`, `GET /audio/voices`, `GET /health`, `GET /status`, `GET|POST /config`. Опційний токен: `RT_API_TOKEN_FILE` (заголовок `Authorization: Bearer <token>` або `Token <token>`; edge шле `Token`).
 
 Пакети flake: `rt-edge` (default package, `nix run .`), `rt-asr-{cpu,gpu}`, `rt-tts-{cpu,gpu}` (також ROCm-варіант ASR, якщо не `broken`), `nixosModules.rt-speech`, `nixosModules.virtual-sinks`, `overlays.default` (`pkgs.rtSpeech.{asr,tts}.<variant>`), `lib.rtSpeech`.
 
@@ -55,7 +55,7 @@ python -m src.main
 nix run nixpkgs#llama-cpp -- llama-server -m <model.gguf> --port 8080 --api-key-file <file>
 ```
 
-і в `config.yml`: `services.llm.direct_url: "http://127.0.0.1:8080"`, `services.llm.direct_token_file: <file>` (див. розділ 7).
+Edge говорить з воркером через app-сесію (розділ 7), тому голий `llama-server` без `/app-session` як LLM не підходить; для локального LLM потрібен llama-service воркер.
 
 ## 3. Моделі
 
@@ -162,17 +162,14 @@ curl -s -X POST http://127.0.0.1:8091/config -H "$H" \
 | Ключ `config.yml` | Env | Опис |
 |---|---|---|
 | `services.mode` | `RT_EDGE_MODE` | `auto` / `transcribe` / `translate` |
-| `services.asr_urls` | `RT_EDGE_ASR_URLS` | список rt-asr (через кому в env); вибір за найменшим `pending` |
-| `services.tts_urls` | `RT_EDGE_TTS_URLS` | список rt-tts |
-| `services.api_token_file` | `RT_EDGE_API_TOKEN_FILE` | bearer-токен для rt-* (файл) |
+| `services.django_urls` | `RT_EDGE_DJANGO_URLS` | Django для discovery (`GET /api/llm/app-services/`), свій хост першим |
+| `services.django_token_file` | `RT_EDGE_DJANGO_TOKEN_FILE` | DRF-токен користувача (файл) |
+| `services.allowed_services` | `RT_EDGE_ALLOWED_SERVICES` | дозволені сервіси `<kind>:<node>` (через кому в env); `null` - усі знайдені; вибір у UI |
+| `services.local.{llm,asr,tts}` | `RT_EDGE_LOCAL_{LLM,ASR,TTS}_URL` | сервіси цього хоста, завжди першими (default: asr `http://127.0.0.1:8091`, llm/tts `null`) |
+| `services.local_token_file` | `RT_EDGE_LOCAL_TOKEN_FILE` | токен локального воркера без Django, default `/run/llama/local-token` |
 | `services.source_language` | - | `auto`/`pl`/`uk`/`ru`/`en` |
 | `services.timeouts.{connect_s,asr_s,tts_s}` | - | 3 / 30 / 30 |
-| `services.llm.django_urls` | `RT_EDGE_DJANGO_URLS` | Django з lease API (primary) |
-| `services.llm.django_token_file` | `RT_EDGE_DJANGO_TOKEN_FILE` | DRF-токен користувача |
-| `services.llm.service` | `RT_EDGE_LLM_SERVICE` | бажаний воркер (`null` - Django обирає) |
-| `services.llm.lease_ttl_s` | - | 15..300, default 60 |
-| `services.llm.direct_url` | `RT_EDGE_LLM_DIRECT_URL` | OpenAI-сумісний сервер: dev-режим, якщо `django_urls` порожній; інакше - ціль режиму «без lease» |
-| `services.llm.direct_token_file` | `RT_EDGE_LLM_DIRECT_TOKEN_FILE` | токен `direct_url` (для llama-воркера - його `worker_token`) |
+| `services.llm.session_ttl_s` | - | ttl app-сесії, 6..300, default 30 (heartbeat кожні ttl/3) |
 | `services.llm.model` | `RT_EDGE_LLM_MODEL` | default `local` |
 | `services.llm.{max_tokens_cap,temperature,context_pairs,timeout_s}` | - | 512 / 0.1 / 3 / 15 |
 | `segmentation.translate.*` | - | `threshold, min_speech_ms, end_silence_ms, soft_max_ms, soft_silence_ms, hard_max_ms, lookback_ms, preroll_ms` |
@@ -180,34 +177,22 @@ curl -s -X POST http://127.0.0.1:8091/config -H "$H" \
 
 Сегментація: фраза закривається на паузі (`end_silence_ms`); якщо мовлення тягнеться довше `soft_max_ms`, ріжемо на найближчій паузі `soft_silence_ms`, лише в крайньому разі - на `hard_max_ms`. Це прибирає «слова пополам». Зміни `segmentation.*` і endpoints у UI (діалог налаштувань) застосовуються без рестарту застосунку.
 
-**Приклад для двох ПК.** ПК A (з GPU) - лише сервіси; ПК B - edge.
-
-ПК B, режим `translate`:
+**Приклад.** На кожному хості свої сервіси (`local.*`), решту кластера edge бере зі списку Django:
 
 ```yaml
 services:
   mode: translate
-  asr_urls: ["http://pc-a:8091"]
-  tts_urls: ["http://pc-a:8093"]
-  api_token_file: ~/.config/real-time-translator/rt-token
-  llm:
-    django_urls: ["https://django.example"]
-    django_token_file: ~/.config/real-time-translator/drf-token
+  django_urls: ["http://127.0.0.1:8000", "http://cyborg:8000"]
+  django_token_file: ~/.config/real-time-translator/drf-token
+  local: { llm: "http://127.0.0.1:8080", asr: "http://127.0.0.1:8091", tts: "http://127.0.0.1:8093" }
+  allowed_services: ["llm:cyborg", "asr:cyborg", "tts:cyborg"]
 ```
 
-ПК B, режим `transcribe` (лише ASR, без LLM/TTS):
-
-```yaml
-services:
-  mode: transcribe
-  asr_urls: ["http://pc-a:8091"]
-segmentation:
-  transcribe: { chunk_min_s: 300, chunk_max_s: 600 }
-```
+Режим `transcribe` лише з локальним ASR: `mode: transcribe` без `django_urls`.
 
 Для віддаленого доступу сервіси слухають не `127.0.0.1`: `RT_HOST=0.0.0.0` (+ firewall, + `RT_API_TOKEN_FILE`).
 
-HM-модуль edge: `homeManagerModules.rt-translator` (також `default`), опції з префіксом `rt-translator.*`: `endpoints.asr`, `endpoints.tts`, `llm.{djangoEndpoints,djangoTokenFile,service,directUrl,directTokenFile,model}`, `mode` (`null` = auto), `apiTokenFile`, `autostart`, `virtualSinks.enable`. Вони перетворюються на `RT_EDGE_*` env. Assertions: `mode = "translate"` потребує джерела LLM (`llm.djangoEndpoints` або `llm.directUrl`) і непорожнього `endpoints.tts`; `llm.djangoEndpoints` потребує `llm.djangoTokenFile`; токен-файли не можуть бути в `/nix/store`.
+HM-модуль edge: `homeManagerModules.rt-translator` (також `default`), опції `rt-translator.*`: `django.urls`, `django.tokenFile`, `local.{llm,asr,tts}` (default `http://127.0.0.1:{8080,8091,8093}`, `null` - сервісу на хості немає), `localTokenFile` (default `/run/llama/local-token`), `allowedServices` (`null` - усі; тоді вибір в UI), `llm.model`, `mode` (`null` = auto), `autostart`, `virtualSinks.enable`. Вони перетворюються на `RT_EDGE_*` env. Assertions: `mode = "translate"` потребує `local.llm` і `local.tts` або `django.urls`; `django.urls` потребує `django.tokenFile`; токен-файли не можуть бути в `/nix/store`.
 
 Звук: потрібні PipeWire null-sink-и `rt_virtual_input` і `rt_virtual_output` (створює `nix develop`, `nixosModules.virtual-sinks` або HM `virtualSinks.enable`).
 
@@ -258,54 +243,26 @@ HM-модуль edge: `homeManagerModules.rt-translator` (також `default`),
 
 **Реліз (git-only):** commit + push у цьому репозиторії -> `nix flake update realtime-translation` в інфрі -> deploy.
 
-## 7. LLM через lease
+## 7. Сервіси кластера: discovery, app-сесія, failover
 
-Primary-режим: edge отримує від Django ексклюзивний lease на llama-воркер на час сесії; воркер не бере WorkItem, доки lease живий.
+Дизайн (owner, 2026-10-31): застосунок сам підключається до воркерів і сервісів; поки триває app-сесія, воркер не бере задач із Django. Django, як і раніше, лише виставляє задачі, а для застосунку віддає список сервісів і токени. Django lease API більше не використовується.
 
-> Серверний lease API з'явиться в Django після виконання spec `2026-10-22-llm-worker-lease-design.md` у swarm-nix. До того працює лише dev-режим (нижче).
+**Discovery.** `GET <django>/api/llm/app-services/` з `Authorization: Token <DRF>` по `django_urls` по черзі; відповідь `{"instance", "generated_at", "services": [{"kind": llm|asr|tts, "node", "url", "token", "tier", "models", "healthy"}]}`. Кожен сервіс викликається з `Authorization: Token <його token>`. Остання відповідь кешується в `$XDG_CACHE_HOME/real-time-translator/app-services.json` (0600). Список оновлюється при старті застосунку і при зміні налаштувань.
 
-DRF-токен у файл:
+**Вибір і порядок.** Для кожного виду: спочатку локальний (`local.<kind>`), далі дозволені (`allowed_services`, вибір у діалозі налаштувань) у порядку Django. Береться перший здоровий; при помилці - наступний (WARNING `switched A -> B`), позначений недоступним вузол повертається через 30 с, а LLM на кожному heartbeat перевіряє `/health` пріоритетніших воркерів і повертається на локальний. UI показує, який вузол обслуговує кожен сервіс (`локальний`, `офлайн-токен`) і джерело списку (кеш / лише локальні).
 
-```bash
-curl -s -X POST https://django.example/api/api-token-auth/ \
-  -d 'username=<user>&password=<pass>' | python -c 'import sys,json;print(json.load(sys.stdin)["token"])' \
-  > ~/.config/real-time-translator/drf-token
-chmod 600 ~/.config/real-time-translator/drf-token
-```
+**App-сесія у воркера.** `POST /app-session` `{"client": "rt-edge", "ttl_s": 30}` -> 201 `{"session_id", "ttl_s"}`; heartbeat `POST /app-session/<id>/heartbeat` кожні ttl/3 (404 - нова сесія); `DELETE /app-session/<id>` на stop. Далі `POST /v1/chat/completions` на тому ж воркері.
 
-Конфіг: `services.llm.django_urls: ["https://django.example"]`, `django_token_file: <файл>`, `service: <ім'я воркера>` (необов'язково).
+**Без Django.** Використовується кеш. Для локального воркера, якщо кешований токен не підходить (воркер перезапустився), edge один раз перечитує `local_token_file` (`/run/llama/local-token`, користувач у групі `llama-clients`) і повторює запит; статус «офлайн-токен». Повторний 401 - явна помилка `auth`. Без кешу і без Django - лише локальні сервіси.
 
-Ручна перевірка lease:
+Ручна перевірка:
 
 ```bash
-D=https://django.example; AUTH="Authorization: Token $(cat ~/.config/real-time-translator/drf-token)"
-# кандидати
-curl -s -H "$AUTH" $D/api/llm/leases/candidates/
-# acquire: 201 LeaseOut (id, service, worker_token, ttl_s, heartbeat_interval_s, expires_at); 409 - воркер зайнятий; 503 - немає воркера
-curl -s -X POST -H "$AUTH" -H 'Content-Type: application/json' $D/api/llm/leases/ \
-  -d '{"client_name": "manual-check", "service": null, "ttl_s": 60}'
-# heartbeat (200; 410 - lease прострочено)
-curl -s -X POST -H "$AUTH" -H 'Content-Type: application/json' $D/api/llm/leases/<uuid>/heartbeat/ -d '{}'
-# release (204, ідемпотентно)
-curl -s -X DELETE -H "$AUTH" $D/api/llm/leases/<uuid>/
+D=http://127.0.0.1:8000; AUTH="Authorization: Token $(cat ~/.config/real-time-translator/drf-token)"
+curl -s -H "$AUTH" $D/api/llm/app-services/ | jq '.services[] | {kind, node, url, healthy}'
+W=http://127.0.0.1:8080; WA="Authorization: Token $(cat /run/llama/local-token)"
+curl -s -X POST -H "$WA" -H 'Content-Type: application/json' $W/app-session -d '{"client": "manual", "ttl_s": 30}'
 ```
-
-Поки lease живий, `next()` для воркера повертає `{"paused": true, "reason": "leased", "retry_after": 10}`.
-
-Що бачить UI: статус LLM (`lease` / `direct` / `none`), ім'я воркера та модель, помилки acquire (409 - зайнятий, 503 - немає воркера); edge сам робить heartbeat і release на `stop`.
-
-**Режим «без lease» (Django недоступні).** Переклад не зупиняється, якщо якийсь Django або інший хост вимкнений:
-
-- частина Django недоступна - lease береться на доступних, недоступні пропускаються (WARNING у лозі, `skipped` у статусі); коли Django знову відповідає, edge сам бере на ньому дзеркальний lease;
-- жоден Django не відповідає - edge переходить у режим **без lease**: WARNING `NO-LEASE mode` у лозі, у UI рядок LLM «без lease» (червоний) з джерелом. Ціль: воркер останнього lease цієї сесії (`last_lease:<воркер>`), інакше `direct_url` + `direct_token_file`. Без жодної цілі старт падає з явною помилкою;
-- heartbeat-потік кожні ~10 с пробує взяти lease; щойно вдалося - WARNING `leaving no-lease mode`, UI знову показує `lease`;
-- якщо Django відповів відмовою (409 - воркер зайнятий, 503 - немає воркера), режим «без lease» **не** вмикається: це відмова, а не збій.
-
-Рекомендовані локальні значення (llama-воркер на тому ж хості): `llm.direct_url = http://127.0.0.1:8080`, `llm.direct_token_file = /run/llama/local-token` (env `RT_EDGE_LLM_DIRECT_URL` / `RT_EDGE_LLM_DIRECT_TOKEN_FILE`); користувач edge має бути в групі `llama-clients`. Воркер перезаписує токен при кожному старті; на 401 edge один раз перечитує файл і повторює запит, повторний 401 - явна помилка `auth` у статусі.
-
-Без lease воркер не на паузі й паралельно бере WorkItem - переклад може бути повільнішим.
-
-**Dev-режим без Django:** `services.llm.django_urls: []`, `direct_url: "http://127.0.0.1:8080"`, `direct_token_file: <файл з --api-key-file>`; `llama-server` - див. розділ 2.
 
 ## 8. Перевірка
 
@@ -324,28 +281,28 @@ curl -s -F file=@/tmp/hello.wav http://127.0.0.1:8091/audio/transcriptions
 1. `nix develop`;
 2. `RT_ASR_BACKEND=faster-whisper python -m src.services.asr`;
 3. `python -m src.services.tts`;
-4. `llama-server` (dev) або lease;
+4. llama-воркер (локальний або в кластері через `django_urls`);
 5. `python -m src.main`.
 
 Чек-лист e2e:
 
-1. `/health` `rt-asr` і `rt-tts` ok, lease отримано (UI показує воркер);
+1. `/health` `rt-asr` і `rt-tts` ok, app-сесія відкрита (UI показує вузол воркера);
 2. фраза українською -> англійська озвучка в `rt_virtual_output`;
-3. поки триває сесія, воркер не бере WorkItem (`next()` -> `paused`/`leased`); після stop - бере;
+3. поки триває app-сесія, воркер не бере задач із Django; після stop - бере;
 4. 12-хвилинна транскрипція без втрат на `stop`;
 5. зміна `chunk_min_s` в UI без рестарту.
 
 Типові помилки:
 
-- `401` від rt-* - не збігається токен (`RT_API_TOKEN_FILE` / `api_token_file`);
+- `401` від rt-*/воркера - токен зі списку Django не збігається (оновіть список: перезапуск/налаштування) або застарів `local_token_file`;
 - `/status` `ready: false` - модель ще завантажується або відсутня (`rt-models list`, `RT_MODEL_DOWNLOAD`);
-- `409` на acquire - воркер уже в lease іншого клієнта; `503` - немає онлайн chat-воркера;
+- `no llm worker available` - жоден дозволений воркер не відкрив сесію (див. лог WARNING по вузлах);
 - `PipeWire preflight` - немає `rt_virtual_output`/`rt_virtual_input` (`nix develop` або virtual-sinks);
 - `422` на `/config` - BOOTSTRAP-поле або значення поза межами.
 
 ## 9. Що відкладено
 
 - WS-стрімінг ASR;
-- серверна частина lease (Django `WorkerLease`, API, `next()`; llama: `pause_reason`, без idle-unload під lease, автозавантаження в chat) - окремі сесії в swarm-nix;
+- серверна частина (Django `app-services`, воркер `/app-session` і пауза задач під сесією) - у swarm-nix;
 - Django/engine: воркери tier 2, озвучка з engine на ПК, пул TTS/ASR для engine;
 - harness і калібрування, ROCm spike, torch TTS.

@@ -1,4 +1,9 @@
-"""Edge runtime settings: remote services, LLM source and segmentation.
+"""Edge runtime settings: service discovery, local endpoints and segmentation.
+
+The app gets the list of available services (llm workers, rt-asr, rt-tts) and
+their tokens from Django (``django_urls``, own host first; DRF token in
+``django_token_file``), keeps only ``allowed_services`` and puts the local
+endpoints (``local.*``) first. Without Django it uses the cached list.
 
 Precedence: RT_EDGE_* environment > config.yml > defaults. Values that come
 from the environment are listed in `EdgeSettings.managed` (read-only in the UI).
@@ -13,6 +18,8 @@ from typing import Any, Literal, Mapping, Optional
 from src.segmentation import SegmenterConfig
 
 DEFAULT_ASR_URL = "http://127.0.0.1:8091"
+DEFAULT_LOCAL_TOKEN_FILE = "/run/llama/local-token"
+KINDS = ("llm", "asr", "tts")
 MODES = ("auto", "transcribe", "translate")
 SOURCE_LANGUAGES = ("auto", "pl", "uk", "ru", "en")
 
@@ -25,25 +32,22 @@ class Timeouts:
 
 
 @dataclass(frozen=True)
+class LocalUrls:
+    """Services on this host; always tried first."""
+
+    llm: Optional[str] = None
+    asr: Optional[str] = DEFAULT_ASR_URL
+    tts: Optional[str] = None
+
+
+@dataclass(frozen=True)
 class LlmSettings:
-    django_urls: tuple[str, ...] = ()
-    django_token_file: Optional[str] = None
-    service: Optional[str] = None
-    lease_ttl_s: int = 60
-    direct_url: Optional[str] = None
-    direct_token_file: Optional[str] = None
+    session_ttl_s: int = 30
     model: str = "local"
     max_tokens_cap: int = 512
     temperature: float = 0.1
     context_pairs: int = 3
     timeout_s: float = 15.0
-
-    def source(self) -> Literal["lease", "direct", "none"]:
-        if self.django_urls:
-            return "lease"
-        if self.direct_url:
-            return "direct"
-        return "none"
 
 
 @dataclass(frozen=True)
@@ -55,18 +59,25 @@ class SegmentationSettings:
 @dataclass(frozen=True)
 class EdgeSettings:
     mode: Literal["auto", "transcribe", "translate"] = "auto"
-    asr_urls: tuple[str, ...] = (DEFAULT_ASR_URL,)
-    tts_urls: tuple[str, ...] = ()
+    django_urls: tuple[str, ...] = ()
+    django_token_file: Optional[str] = None
+    local: LocalUrls = LocalUrls()
+    local_token_file: Optional[str] = DEFAULT_LOCAL_TOKEN_FILE
+    # "kind:node" entries of the discovered services the app may use; None = all
+    allowed_services: Optional[tuple[str, ...]] = None
     llm: LlmSettings = LlmSettings()
-    api_token_file: Optional[str] = None
     source_language: Literal["auto", "pl", "uk", "ru", "en"] = "auto"
     timeouts: Timeouts = Timeouts(connect_s=3.0, asr_s=30.0, tts_s=30.0)
     segmentation: SegmentationSettings = SegmentationSettings()
     managed: frozenset[str] = frozenset()
 
+    def has_source(self, kind: str) -> bool:
+        """A local endpoint or a Django that can list cluster ones."""
+        return bool(getattr(self.local, kind) or self.django_urls)
+
     def effective_mode(self) -> Literal["transcribe", "translate"]:
         if self.mode == "auto":
-            if self.llm.source() != "none" and self.tts_urls:
+            if self.has_source("llm") and self.has_source("tts"):
                 return "translate"
             return "transcribe"
         return self.mode
@@ -77,19 +88,22 @@ class EdgeSettings:
             errors.append(f"unknown mode {self.mode!r}")
         if self.source_language not in SOURCE_LANGUAGES:
             errors.append(f"unknown source_language {self.source_language!r}")
-        if not self.asr_urls:
-            errors.append("asr_urls must not be empty")
+        if not self.has_source("asr"):
+            errors.append("asr needs local.asr or django_urls")
         if self.mode == "translate":
-            if self.llm.source() == "none":
-                errors.append(
-                    "translate mode requires llm.django_urls or llm.direct_url"
-                )
-            if not self.tts_urls:
-                errors.append("translate mode requires tts_urls")
-        if self.llm.source() == "lease" and not self.llm.django_token_file:
-            errors.append("lease mode requires llm.django_token_file")
-        if not 15 <= self.llm.lease_ttl_s <= 300:
-            errors.append("llm.lease_ttl_s must be in 15..300")
+            for kind in ("llm", "tts"):
+                if not self.has_source(kind):
+                    errors.append(
+                        f"translate mode requires local.{kind} or django_urls"
+                    )
+        if self.django_urls and not self.django_token_file:
+            errors.append("django_urls requires django_token_file")
+        for item in self.allowed_services or ():
+            kind, _, node = item.partition(":")
+            if kind not in KINDS or not node:
+                errors.append(f"allowed_services: {item!r} is not <kind>:<node>")
+        if not 6 <= self.llm.session_ttl_s <= 300:
+            errors.append("llm.session_ttl_s must be in 6..300")
         for name in ("translate", "transcribe"):
             try:
                 getattr(self.segmentation, name).validate()
@@ -119,6 +133,11 @@ def _urls(value: Any) -> tuple[str, ...]:
     return tuple(u for u in (_url(i) for i in items) if u)
 
 
+def _items(value: Any) -> tuple[str, ...]:
+    items = value.split(",") if isinstance(value, str) else list(value)
+    return tuple(t for t in (_clean(i) for i in items) if t)
+
+
 def _seg_translate(cfg: Mapping) -> SegmenterConfig:
     names = {f.name for f in fields(SegmenterConfig)}
     return replace(
@@ -138,6 +157,18 @@ def _seg_transcribe(cfg: Mapping) -> SegmenterConfig:
     return replace(base, **extra)
 
 
+_OBSOLETE = ("asr_urls", "tts_urls", "api_token_file")
+_OBSOLETE_LLM = (
+    "urls",
+    "django_urls",
+    "django_token_file",
+    "service",
+    "lease_ttl_s",
+    "direct_url",
+    "direct_token_file",
+)
+
+
 def resolve_edge_settings(cfg: Mapping, environ: Mapping) -> EdgeSettings:
     cfg = cfg or {}
     svc = cfg.get("services") or {}
@@ -151,32 +182,19 @@ def resolve_edge_settings(cfg: Mapping, environ: Mapping) -> EdgeSettings:
             return environ[env_key]
         return value
 
+    obsolete = [k for k in _OBSOLETE if k in svc] + [
+        f"llm.{k}" for k in _OBSOLETE_LLM if k in llm_cfg
+    ]
+    if obsolete:
+        from loguru import logger
+
+        logger.warning(
+            "config: obsolete keys ignored (services discovered via Django now): {}",
+            ", ".join(obsolete),
+        )
     ld = LlmSettings()
     llm = LlmSettings(
-        django_urls=_urls(
-            pick("RT_EDGE_DJANGO_URLS", "llm.django_urls", llm_cfg.get("django_urls"))
-        ),
-        django_token_file=_clean(
-            pick(
-                "RT_EDGE_DJANGO_TOKEN_FILE",
-                "llm.django_token_file",
-                llm_cfg.get("django_token_file"),
-            )
-        ),
-        service=_clean(
-            pick("RT_EDGE_LLM_SERVICE", "llm.service", llm_cfg.get("service"))
-        ),
-        lease_ttl_s=int(llm_cfg.get("lease_ttl_s", ld.lease_ttl_s)),
-        direct_url=_url(
-            pick("RT_EDGE_LLM_DIRECT_URL", "llm.direct_url", llm_cfg.get("direct_url"))
-        ),
-        direct_token_file=_clean(
-            pick(
-                "RT_EDGE_LLM_DIRECT_TOKEN_FILE",
-                "llm.direct_token_file",
-                llm_cfg.get("direct_token_file"),
-            )
-        ),
+        session_ttl_s=int(llm_cfg.get("session_ttl_s", ld.session_ttl_s)),
         model=_clean(pick("RT_EDGE_LLM_MODEL", "llm.model", llm_cfg.get("model")))
         or ld.model,
         max_tokens_cap=int(llm_cfg.get("max_tokens_cap", ld.max_tokens_cap)),
@@ -184,19 +202,39 @@ def resolve_edge_settings(cfg: Mapping, environ: Mapping) -> EdgeSettings:
         context_pairs=int(llm_cfg.get("context_pairs", ld.context_pairs)),
         timeout_s=float(llm_cfg.get("timeout_s", ld.timeout_s)),
     )
-    asr_urls = _urls(pick("RT_EDGE_ASR_URLS", "asr_urls", svc.get("asr_urls"))) or (
-        DEFAULT_ASR_URL,
+    local_cfg = svc.get("local") or {}
+    ld_local = LocalUrls()
+
+    def local(kind: str) -> Optional[str]:
+        value = local_cfg.get(kind, getattr(ld_local, kind))
+        return _url(pick(f"RT_EDGE_LOCAL_{kind.upper()}_URL", f"local.{kind}", value))
+
+    allowed = pick(
+        "RT_EDGE_ALLOWED_SERVICES", "allowed_services", svc.get("allowed_services")
+    )
+    token_file = pick(
+        "RT_EDGE_LOCAL_TOKEN_FILE",
+        "local_token_file",
+        svc.get("local_token_file", DEFAULT_LOCAL_TOKEN_FILE),
     )
     tcfg = svc.get("timeouts") or {}
     td = Timeouts()
     return EdgeSettings(
         mode=_clean(pick("RT_EDGE_MODE", "mode", svc.get("mode"))) or "auto",
-        asr_urls=asr_urls,
-        tts_urls=_urls(pick("RT_EDGE_TTS_URLS", "tts_urls", svc.get("tts_urls"))),
-        llm=llm,
-        api_token_file=_clean(
-            pick("RT_EDGE_API_TOKEN_FILE", "api_token_file", svc.get("api_token_file"))
+        django_urls=_urls(
+            pick("RT_EDGE_DJANGO_URLS", "django_urls", svc.get("django_urls"))
         ),
+        django_token_file=_clean(
+            pick(
+                "RT_EDGE_DJANGO_TOKEN_FILE",
+                "django_token_file",
+                svc.get("django_token_file"),
+            )
+        ),
+        local=LocalUrls(llm=local("llm"), asr=local("asr"), tts=local("tts")),
+        local_token_file=_clean(token_file),
+        allowed_services=None if allowed is None else _items(allowed),
+        llm=llm,
         source_language=_clean(svc.get("source_language")) or "auto",
         timeouts=Timeouts(
             connect_s=float(tcfg.get("connect_s", td.connect_s)),

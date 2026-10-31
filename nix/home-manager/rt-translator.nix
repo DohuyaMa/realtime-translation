@@ -12,15 +12,16 @@ let
     {
       RT_EDGE_LLM_MODEL = cfg.llm.model;
     }
-    // lib.optionalAttrs (cfg.endpoints.asr != [ ]) { RT_EDGE_ASR_URLS = csv cfg.endpoints.asr; }
     // lib.optionalAttrs (cfg.mode != null) { RT_EDGE_MODE = cfg.mode; }
-    // lib.optionalAttrs (cfg.endpoints.tts != [ ]) { RT_EDGE_TTS_URLS = csv cfg.endpoints.tts; }
-    // lib.optionalAttrs (cfg.llm.djangoEndpoints != [ ]) { RT_EDGE_DJANGO_URLS = csv cfg.llm.djangoEndpoints; }
-    // lib.optionalAttrs (cfg.llm.djangoTokenFile != null) { RT_EDGE_DJANGO_TOKEN_FILE = cfg.llm.djangoTokenFile; }
-    // lib.optionalAttrs (cfg.llm.service != null) { RT_EDGE_LLM_SERVICE = cfg.llm.service; }
-    // lib.optionalAttrs (cfg.llm.directUrl != null) { RT_EDGE_LLM_DIRECT_URL = cfg.llm.directUrl; }
-    // lib.optionalAttrs (cfg.llm.directTokenFile != null) { RT_EDGE_LLM_DIRECT_TOKEN_FILE = cfg.llm.directTokenFile; }
-    // lib.optionalAttrs (cfg.apiTokenFile != null) { RT_EDGE_API_TOKEN_FILE = cfg.apiTokenFile; };
+    // lib.optionalAttrs (cfg.django.urls != [ ]) { RT_EDGE_DJANGO_URLS = csv cfg.django.urls; }
+    // lib.optionalAttrs (cfg.django.tokenFile != null) { RT_EDGE_DJANGO_TOKEN_FILE = cfg.django.tokenFile; }
+    // lib.optionalAttrs (cfg.local.llm != null) { RT_EDGE_LOCAL_LLM_URL = cfg.local.llm; }
+    // lib.optionalAttrs (cfg.local.asr != null) { RT_EDGE_LOCAL_ASR_URL = cfg.local.asr; }
+    // lib.optionalAttrs (cfg.local.tts != null) { RT_EDGE_LOCAL_TTS_URL = cfg.local.tts; }
+    // lib.optionalAttrs (cfg.localTokenFile != null) { RT_EDGE_LOCAL_TOKEN_FILE = cfg.localTokenFile; }
+    // lib.optionalAttrs (cfg.allowedServices != null) { RT_EDGE_ALLOWED_SERVICES = csv cfg.allowedServices; };
+
+  hasSource = kind: cfg.local.${kind} != null || cfg.django.urls != [ ];
 
   sinkModule = name: description: ''
     {
@@ -48,23 +49,32 @@ in
       default = null;
       description = "null = auto; transcribe = ASR only; translate = ASR -> LLM -> TTS.";
     };
-    endpoints = {
-      asr = mkOption { type = types.listOf types.str; default = [ "http://127.0.0.1:8091" ]; description = "rt-asr base URLs."; };
-      tts = mkOption { type = types.listOf types.str; default = [ ]; description = "rt-tts base URLs."; };
+    django = {
+      urls = mkOption {
+        type = types.listOf types.str;
+        default = [ ];
+        example = [ "http://127.0.0.1:8000" "http://cyborg:8000" ];
+        description = "Django instances for service discovery (GET /api/llm/app-services/), own host first.";
+      };
+      tokenFile = mkOption { type = types.nullOr types.str; default = null; description = "File with the user's DRF token for django.urls (outside the Nix store)."; };
     };
-    llm = {
-      djangoEndpoints = mkOption { type = types.listOf types.str; default = [ ]; description = "Django LLM-lease endpoints."; };
-      djangoTokenFile = mkOption { type = types.nullOr types.str; default = null; description = "Bearer token file for Django endpoints."; };
-      service = mkOption { type = types.nullOr types.str; default = null; description = "LLM service name to lease."; };
-      directUrl = mkOption { type = types.nullOr types.str; default = null; description = "Direct OpenAI-compatible LLM URL."; };
-      directTokenFile = mkOption { type = types.nullOr types.str; default = null; description = "Bearer token file for the direct LLM."; };
-      model = mkOption { type = types.str; default = "local"; description = "LLM model name."; };
+    local = {
+      llm = mkOption { type = types.nullOr types.str; default = "http://127.0.0.1:8080"; description = "Local llama worker (tried first; null = none on this host)."; };
+      asr = mkOption { type = types.nullOr types.str; default = "http://127.0.0.1:8091"; description = "Local rt-asr (tried first; null = none on this host)."; };
+      tts = mkOption { type = types.nullOr types.str; default = "http://127.0.0.1:8093"; description = "Local rt-tts (tried first; null = none on this host)."; };
     };
-    apiTokenFile = mkOption {
+    localTokenFile = mkOption {
       type = types.nullOr types.str;
-      default = null;
-      description = "File with the bearer token for the speech services (outside the Nix store).";
+      default = "/run/llama/local-token";
+      description = "Host-local worker token (rewritten on every worker start; user must be in group llama-clients). Used for the local worker when Django is unreachable.";
     };
+    allowedServices = mkOption {
+      type = types.nullOr (types.listOf types.str);
+      default = null;
+      example = [ "llm:cyborg" "asr:cyborg" "tts:sktop" ];
+      description = "Discovered services the app may use, as <kind>:<node>; null = all (changeable in the UI unless set here).";
+    };
+    llm.model = mkOption { type = types.str; default = "local"; description = "LLM model name."; };
     autostart = mkOption { type = types.bool; default = true; description = "Start translator-ui with the graphical session."; };
     virtualSinks.enable = mkOption { type = types.bool; default = true; description = "Create rt_virtual_input/rt_virtual_output PipeWire sinks."; };
   };
@@ -72,16 +82,15 @@ in
   config = lib.mkIf cfg.enable {
     assertions = [
       {
-        assertion = cfg.mode != "translate"
-          || ((cfg.llm.djangoEndpoints != [ ] || cfg.llm.directUrl != null) && cfg.endpoints.tts != [ ]);
-        message = ''rt-translator: mode = "translate" requires llm.djangoEndpoints or llm.directUrl, and endpoints.tts'';
+        assertion = cfg.mode != "translate" || (hasSource "llm" && hasSource "tts");
+        message = ''rt-translator: mode = "translate" requires local.llm and local.tts, or django.urls'';
       }
       {
-        assertion = cfg.llm.djangoEndpoints == [ ] || cfg.llm.djangoTokenFile != null;
-        message = "rt-translator: llm.djangoEndpoints requires llm.djangoTokenFile";
+        assertion = cfg.django.urls == [ ] || cfg.django.tokenFile != null;
+        message = "rt-translator: django.urls requires django.tokenFile";
       }
       {
-        assertion = !(lib.any inStore [ cfg.apiTokenFile cfg.llm.djangoTokenFile cfg.llm.directTokenFile ]);
+        assertion = !(lib.any inStore [ cfg.django.tokenFile cfg.localTokenFile ]);
         message = "rt-translator: token files must not point into the Nix store";
       }
     ];

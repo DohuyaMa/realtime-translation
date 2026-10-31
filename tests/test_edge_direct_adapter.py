@@ -4,13 +4,12 @@ import pytest
 
 from src.adapters import direct_adapter as da
 from src.adapters.direct_adapter import DirectAdapter
-from src.clients import LeaseKeeper
-from src.core.runtime import EdgeSettings, LlmSettings
+from src.clients import WorkerSessions
+from src.core.runtime import EdgeSettings, LocalUrls
 
 VALID = EdgeSettings(
     mode="translate",
-    tts_urls=("http://t",),
-    llm=LlmSettings(direct_url="http://m"),
+    local=LocalUrls(llm="http://m", tts="http://t"),
 )
 
 
@@ -37,7 +36,7 @@ class FakeTS:
     def start(self):
         self.started = self.is_running = self.start_ok
         if not self.start_ok:
-            self.last_error = "llm: lease denied"
+            self.last_error = "llm: no llm worker available"
         return self.start_ok
 
     def stop(self):
@@ -53,7 +52,7 @@ class FakeTS:
                 self.start()
 
     def get_stats(self):
-        return {"running": self.started, "lease": {"state": "held"}}
+        return {"running": self.started, "session": {"node": "w"}}
 
     def set_tts(self, voice, speed):
         self.tts = (voice, speed)
@@ -66,8 +65,8 @@ class FakeTS:
 
 
 class FakeMonitor:
-    def __init__(self, pools, llm, lease):
-        self.args = (pools, llm, lease)
+    def __init__(self, pools, llm, sessions):
+        self.args = (pools, llm, sessions)
         self.running = False
 
     def start(self):
@@ -117,7 +116,7 @@ def test_start_failure_surfaces_system_error():
     a = adapter(VALID)
     FakeTS.instances[-1].start_ok = False
     assert a.start_pipeline() is False
-    assert a.last_error == "llm: lease denied"
+    assert a.last_error == "llm: no llm worker available"
 
 
 def test_start_and_stop_pipeline():
@@ -172,9 +171,9 @@ def test_reconfigure_with_invalid_settings_keeps_old():
     assert "llm" in a.last_error
 
 
-def test_status_exposes_lease_and_levels():
+def test_status_exposes_session_and_levels():
     a = adapter(VALID)
-    assert a.get_status()["lease"] == {"state": "held"}
+    assert a.get_status()["session"] == {"node": "w"}
     assert a.get_audio_levels() == {"input": 0.25, "output": 0.0}
 
 
@@ -230,10 +229,10 @@ def test_monitor_stops_even_if_stop_raises():
     assert a._monitor.running is False
 
 
-def test_lease_keeper_target_passed_to_monitor():
+def test_worker_sessions_target_passed_to_monitor():
     a = adapter(VALID)
     ts = FakeTS.instances[-1]
-    ts.llm_target = object.__new__(LeaseKeeper)
+    ts.llm_target = object.__new__(WorkerSessions)
     a.refresh_services()
     assert a._monitor.args[2] is ts.llm_target
 
@@ -256,5 +255,5 @@ def test_reconfigure_failed_restart_reports_error():
     ts.rebuild = True
     ts.start_ok = False
     assert a.reconfigure_services(VALID) is False
-    assert a.last_error == "llm: lease denied"
+    assert a.last_error == "llm: no llm worker available"
     assert a._monitor.running is False

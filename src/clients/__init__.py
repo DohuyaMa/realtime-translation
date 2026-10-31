@@ -9,9 +9,10 @@ import httpx
 
 from ..core.runtime import EdgeSettings
 from .asr import AsrClient, AsrResult
-from .base import ServiceClient, ServiceError
-from .lease import DjangoLeaseApi, Lease, LeaseError, LeaseKeeper
-from .llm import LlmClient, LlmTarget, StaticTarget
+from .base import Credential, ServiceClient, ServiceError
+from .discovery import Directory, Endpoint, ServiceEntry, discover, endpoints
+from .llm import LlmClient, LlmTarget
+from .session import WorkerSessions
 from .health import ServiceHealthMonitor
 from .pool import EndpointPool, SpeechPools, build_pools
 from .tts import TtsClient
@@ -22,11 +23,13 @@ __all__ = [
     "TtsClient",
     "LlmClient",
     "LlmTarget",
-    "StaticTarget",
-    "DjangoLeaseApi",
-    "Lease",
-    "LeaseError",
-    "LeaseKeeper",
+    "WorkerSessions",
+    "Credential",
+    "Directory",
+    "Endpoint",
+    "ServiceEntry",
+    "discover",
+    "endpoints",
     "ServiceClient",
     "ServiceError",
     "ClientFactories",
@@ -40,20 +43,20 @@ __all__ = [
 
 @dataclass(frozen=True)
 class ClientFactories:
-    asr: Callable[[str], AsrClient]
-    tts: Callable[[str], TtsClient]
+    asr: Callable[[Endpoint], AsrClient]
+    tts: Callable[[Endpoint], TtsClient]
 
 
 def client_factories(
     settings: EdgeSettings, transport: Optional[httpx.BaseTransport] = None
 ) -> ClientFactories:
     t = settings.timeouts
-    common = dict(
-        token_file=settings.api_token_file,
-        connect_timeout_s=t.connect_s,
-        transport=transport,
-    )
+    common = dict(connect_timeout_s=t.connect_s, transport=transport)
     return ClientFactories(
-        asr=lambda url: AsrClient(url, timeout_s=t.asr_s, **common),
-        tts=lambda url: TtsClient(url, timeout_s=t.tts_s, **common),
+        asr=lambda e: AsrClient(
+            e.url, credential=e.credential, timeout_s=t.asr_s, **common
+        ),
+        tts=lambda e: TtsClient(
+            e.url, credential=e.credential, timeout_s=t.tts_s, **common
+        ),
     )

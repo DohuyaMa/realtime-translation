@@ -2,24 +2,24 @@
 # Precedence: RT_EDGE_* environment > this file > defaults.
 
 services:
-  mode: auto                    # auto | transcribe | translate (auto: translate iff LLM source and tts_urls set)
-  asr_urls: ["http://127.0.0.1:8091"]   # rt-asr endpoints (least-pending pick)
-  tts_urls: []                  # rt-tts endpoints (required for translate)
-  api_token_file: null          # bearer token file for rt-* (never the token itself)
+  mode: auto                    # auto | transcribe | translate (auto: translate iff llm and tts sources exist)
+  # Service discovery: Django lists the llm workers / rt-asr / rt-tts and their tokens
+  django_urls: []               # own host first, e.g. ["http://127.0.0.1:8000", "http://cyborg:8000"]
+  django_token_file: null       # user DRF token file (never the token itself)
+  allowed_services: null        # ["llm:cyborg", "tts:sktop", ...] (kind:node); null = all discovered
+  # Services on this host, always tried first (null = none)
+  local:
+    llm: null                   # e.g. "http://127.0.0.1:8080"
+    asr: "http://127.0.0.1:8091"
+    tts: null                   # e.g. "http://127.0.0.1:8093"
+  local_token_file: /run/llama/local-token   # local worker token when Django is unreachable
   source_language: auto         # auto | pl | uk | ru | en
   timeouts:
     connect_s: 3
     asr_s: 30
     tts_s: 30
   llm:
-    # Lease mode (primary): Django hands out an llama worker
-    django_urls: []
-    django_token_file: null     # user DRF token file
-    service: null               # preferred worker name; null = Django picks
-    lease_ttl_s: 60             # 15..300
-    # Dev mode (used when django_urls is empty): local llama-server / OpenAI-compatible
-    direct_url: null            # e.g. "http://127.0.0.1:8080"
-    direct_token_file: null
+    session_ttl_s: 30           # worker app-session ttl (heartbeat every ttl/3), 6..300
     model: local
     max_tokens_cap: 512
     temperature: 0.1

@@ -1,9 +1,9 @@
 """Edge coordinator: mic -> VadStream -> rt-asr -> LLM -> rt-tts -> playback.
 
 Capture and pause segmentation run locally; ASR/TTS go through endpoint pools
-and translation through an LLM target (Django lease or a static URL). In
-transcribe mode long chunks are sent to rt-asr with batch priority and no lease
-is taken.
+and translation through an app session on an llama worker (ordered worker
+list with failover, no Django). In transcribe mode long chunks are sent to
+rt-asr with batch priority and no worker session is opened.
 """
 
 from __future__ import annotations
@@ -19,13 +19,15 @@ from loguru import logger
 
 from .audio.vad_stream import VadStream, make_vad
 from .clients import (
-    LeaseKeeper,
     LlmClient,
     LlmTarget,
+    Directory,
     ServiceError,
     SpeechPools,
-    StaticTarget,
+    WorkerSessions,
     build_pools,
+    discover,
+    endpoints,
 )
 from .core.runtime import EdgeSettings, LlmSettings
 from .segmentation import Segment, SegmenterConfig
@@ -44,13 +46,13 @@ _LLM_LIVE_FIELDS = ("model", "max_tokens_cap", "temperature", "context_pairs")
 _STOP = object()
 
 
-def default_llm_target(llm: LlmSettings) -> Optional[LlmTarget]:
-    source = llm.source()
-    if source == "lease":
-        return LeaseKeeper(llm, None)
-    if source == "direct":
-        return StaticTarget(llm.direct_url or "", llm.direct_token_file)
-    return None
+def default_llm_target(
+    settings: EdgeSettings, directory: Directory
+) -> Optional[LlmTarget]:
+    workers = endpoints("llm", settings, directory)
+    if not workers:
+        return None
+    return WorkerSessions(workers, settings.llm.session_ttl_s)
 
 
 def _default_vad_stream(cfg: SegmenterConfig) -> VadStream:
@@ -104,9 +106,10 @@ class TranslationSystem:
         self,
         settings: EdgeSettings,
         *,
-        pools_factory: Callable[[EdgeSettings], SpeechPools] = build_pools,
+        directory_factory: Callable[[EdgeSettings], Directory] = discover,
+        pools_factory: Callable[[EdgeSettings, Directory], SpeechPools] = build_pools,
         llm_target_factory: Callable[
-            [LlmSettings], Optional[LlmTarget]
+            [EdgeSettings, Directory], Optional[LlmTarget]
         ] = default_llm_target,
         vad_stream_factory: Callable[
             [SegmenterConfig], VadStream
@@ -116,6 +119,7 @@ class TranslationSystem:
         playback_sink: Optional[Callable[[np.ndarray, int], None]] = None,
     ) -> None:
         self.settings = settings
+        self._directory_factory = directory_factory
         self._pools_factory = pools_factory
         self._llm_target_factory = llm_target_factory
         self._vad_stream_factory = vad_stream_factory
@@ -136,7 +140,7 @@ class TranslationSystem:
         self._vad: Optional[VadStream] = None
         self._mode = settings.effective_mode()
         self._chunk_queue = self._new_chunk_queue()
-        self._lease_held = False
+        self._session_held = False
         self._stream: Any = None
         self._playback_queue: queue.Queue = queue.Queue(maxsize=PLAYBACK_QUEUE_MAX)
         self._audio_q: queue.Queue = queue.Queue()
@@ -159,8 +163,9 @@ class TranslationSystem:
     # -- wiring -------------------------------------------------------------
 
     def _build_backends(self) -> None:
-        self._pools = self._pools_factory(self.settings)
-        self._llm_target = self._llm_target_factory(self.settings.llm)
+        self._directory = self._directory_factory(self.settings)
+        self._pools = self._pools_factory(self.settings, self._directory)
+        self._llm_target = self._llm_target_factory(self.settings, self._directory)
         self._llm = (
             self._llm_factory(self._llm_target, self.settings.llm)
             if self._llm_target is not None
@@ -242,7 +247,7 @@ class TranslationSystem:
             if self._pools.tts is None:
                 self._fail("tts", "not configured")
                 return False
-            if isinstance(self._llm_target, LeaseKeeper):
+            if isinstance(self._llm_target, WorkerSessions):
                 try:
                     self._llm_target.start()
                 except ServiceError as e:
@@ -252,8 +257,10 @@ class TranslationSystem:
                         detail = detail[len(prefix) :]
                     self._fail("llm", detail)
                     return False
-                self._lease_held = True
-                self._emit({"status": "llm_lease", "lease": self._lease_snapshot()})
+                self._session_held = True
+                self._emit(
+                    {"status": "llm_session", "session": self._session_snapshot()}
+                )
 
         self._vad = self._vad_stream_factory(self._segmenter_config(self.settings))
         self._chunk_queue = self._new_chunk_queue()
@@ -267,7 +274,7 @@ class TranslationSystem:
         except Exception as e:
             logger.exception("cannot open microphone: {}", e)
             self._stream = None
-            self._release_lease()
+            self._close_session()
             self._fail("capture", str(e))
             return False
         self.is_running = True
@@ -308,22 +315,22 @@ class TranslationSystem:
             if t:
                 t.join(timeout=5.0)
         self._threads = {}
-        # 4. release the lease
-        self._release_lease()
+        # 4. close the worker session
+        self._close_session()
         logger.info(
             "translation system stopped: {} segments, {} errors",
             self._segments_processed,
             self._pipeline_errors,
         )
 
-    def _release_lease(self) -> None:
-        if not self._lease_held:
+    def _close_session(self) -> None:
+        if not self._session_held:
             return
-        self._lease_held = False
+        self._session_held = False
         try:
             self._llm_target.stop()
         except Exception as e:
-            logger.warning("lease release failed: {}", e)
+            logger.warning("closing the worker session failed: {}", e)
 
     def cleanup(self) -> None:
         self.stop()
@@ -376,7 +383,14 @@ class TranslationSystem:
     def _needs_restart(old: EdgeSettings, new: EdgeSettings) -> bool:
         if old.effective_mode() != new.effective_mode():
             return True
-        for name in ("asr_urls", "tts_urls", "api_token_file", "timeouts"):
+        for name in (
+            "django_urls",
+            "django_token_file",
+            "local",
+            "local_token_file",
+            "allowed_services",
+            "timeouts",
+        ):
             if getattr(old, name) != getattr(new, name):
                 return True
         o, n = old.llm, new.llm
@@ -577,7 +591,7 @@ class TranslationSystem:
 
     # -- stats --------------------------------------------------------------
 
-    def _lease_snapshot(self) -> Optional[dict]:
+    def _session_snapshot(self) -> Optional[dict]:
         snapshot = getattr(self._llm_target, "snapshot", None)
         return snapshot() if callable(snapshot) else None
 
@@ -598,11 +612,12 @@ class TranslationSystem:
                 if self._llm_requests
                 else 0.0
             ),
-            "pinned": {
-                "asr": self._pools.asr.pinned_url,
-                "tts": tts.pinned_url if tts is not None else None,
+            "discovery": self._directory.source,
+            "active": {
+                "asr": self._pools.asr.active(),
+                "tts": tts.active() if tts is not None else None,
             },
-            "lease": self._lease_snapshot(),
+            "session": self._session_snapshot(),
         }
         with self._lock:
             stats["pending_recognized"] = self._pending_recognized

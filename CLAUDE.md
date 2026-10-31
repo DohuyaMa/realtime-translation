@@ -21,9 +21,9 @@ User documentation (Ukrainian): `docs/USAGE.md`. Specs: `docs/superpowers/specs/
 
 ## Architecture
 
-Real-time speech translation: **edge** (PC of the user) talks over HTTP to **rt-asr** and **rt-tts** services and to an LLM worker obtained via a **lease** from Django (or a local OpenAI-compatible `llama-server` in dev mode).
+Real-time speech translation: **edge** (PC of the user) talks over HTTP to **rt-asr** and **rt-tts** services and to llama **workers** through an app session; Django only lists the available services and their tokens (discovery, cached on disk). Local services first, cluster nodes as failover.
 
-Modes (`services.mode`): `transcribe` (long chunks, ASR only), `translate` (phrases: ASR -> LLM -> TTS), `auto` (translate iff an LLM source and `tts_urls` are set).
+Modes (`services.mode`): `transcribe` (long chunks, ASR only), `translate` (phrases: ASR -> LLM -> TTS), `auto` (translate iff LLM and TTS sources exist: `local.*` or `django_urls`).
 
 ### Source layout (`src/`)
 
@@ -33,12 +33,12 @@ Modes (`services.mode`): `transcribe` (long chunks, ASR only), `translate` (phra
 | `src/services/common/` | Shared service runtime: settings (`ENV_KEYS`, `TUNABLE_FIELDS`, `RELOAD_FIELDS`), `/config` (`runtime_config.py`), `/health`, `/status`, auth, model registry/store, `rt-models` CLI |
 | `src/services/asr/`, `src/services/tts/` | `rt-asr` (faster-whisper, `POST /audio/transcriptions`) and `rt-tts` (Kokoro ONNX, `POST /audio/speech`, `GET /audio/voices`) FastAPI services |
 | `src/segmentation/` | VAD segmenter (`SegmenterConfig.translate()` / `.transcribe()`): pause-based phrase/chunk boundaries |
-| `src/clients/` | HTTP clients: `asr`, `tts`, `llm`, endpoint `pool` (least-pending), `lease` (Django worker lease: acquire/heartbeat/release), `health` |
+| `src/clients/` | HTTP clients: `asr`, `tts`, `llm`, `discovery` (Django service list + cache), endpoint `pool` (priority order, failover), `session` (worker app session, failover/return-to-local), `health` |
 | `src/translation_system.py`, `src/adapters/`, `src/controller/` | Edge pipeline, adapter and controller on top of clients |
 | `src/core/runtime.py` | `EdgeSettings`: `RT_EDGE_*` env > `config.yml` > defaults |
 | `src/core/config.py` | `ConfigManager`: `~/.config/real-time-translator/config.yml` (keys: `config/default.yml`) |
 | `src/core/preflight/pipewire.py`, `src/audio/` | PipeWire virtual sink check and routing (`pactl`) |
-| `src/ui/` | PySide6 widgets and Qt controller (endpoints, LLM lease, segmentation settings) |
+| `src/ui/` | PySide6 widgets and Qt controller (discovery/local endpoints, allowed services, segmentation settings) |
 
 ### Ports
 
@@ -48,7 +48,7 @@ Modes (`services.mode`): `transcribe` (long chunks, ASR only), `translate` (phra
 
 - `nix/packages/` - `rtSpeech.{asr,tts}.<variant>` bundles (variants cpu/gpu, ROCm for ASR), exposed as `packages.rt-{asr,tts}-{cpu,gpu}` and `overlays.default`;
 - `rt-edge` package (default, `nix run .`) - the edge UI;
-- `nix/home-manager/rt-translator.nix` - `homeManagerModules.rt-translator` (`rt-translator.*` options: endpoints, llm, mode, apiTokenFile, autostart, virtualSinks -> `RT_EDGE_*` env);
+- `nix/home-manager/rt-translator.nix` - `homeManagerModules.rt-translator` (`rt-translator.*` options: django.{urls,tokenFile}, local.{llm,asr,tts}, localTokenFile, allowedServices, llm.model, mode, autostart, virtualSinks -> `RT_EDGE_*` env);
 - `nix/nixos/rt-speech.nix` - `services.rtSpeech.{asr,tts}` NixOS module; `nix/nixos/virtual-sinks.nix` - PipeWire null sinks `rt_virtual_input` / `rt_virtual_output`;
 - `nix/lib/` - `lib.rtSpeech` (env rendering, health-check command); `nix/checks/` - flake checks; `nix/devshell.nix` - devShell.
 

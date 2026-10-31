@@ -3,7 +3,7 @@
 import os
 from typing import Any, Dict, Optional
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QLabel,
@@ -12,6 +12,8 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     QFormLayout,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QPlainTextEdit,
     QPushButton,
     QSpinBox,
@@ -41,48 +43,68 @@ def _combo(values, current) -> QComboBox:
     return box
 
 
-class EndpointsTab(QWidget):
-    """ASR/TTS URLs, LLM source, tokens, mode and source language."""
+def _cached_services() -> list:
+    """Services of the last discovery (cache), for the allow-list."""
+    from ...clients.discovery import default_cache_path, parse
+    import json
 
-    def __init__(self, settings: EdgeSettings, parent=None):
+    try:
+        return parse(json.loads(default_cache_path().read_text()))[1]
+    except (OSError, ValueError):
+        return []
+
+
+class EndpointsTab(QWidget):
+    """Django discovery, local endpoints, allowed services, mode, language."""
+
+    def __init__(self, settings: EdgeSettings, parent=None, services=None):
         super().__init__(parent)
         form = QFormLayout(self)
-        llm = settings.llm
-        self.asr_urls = QPlainTextEdit("\n".join(settings.asr_urls))
-        self.tts_urls = QPlainTextEdit("\n".join(settings.tts_urls))
-        self.django_urls = QPlainTextEdit("\n".join(llm.django_urls))
-        self.django_token_file = QLineEdit(llm.django_token_file or "")
-        self.llm_service = QLineEdit(llm.service or "")
-        self.llm_service.setPlaceholderText("порожньо = авто")
-        self.direct_url = QLineEdit(llm.direct_url or "")
-        self.direct_token_file = QLineEdit(llm.direct_token_file or "")
-        self.model = QLineEdit(llm.model)
-        self.api_token_file = QLineEdit(settings.api_token_file or "")
+        self.django_urls = QPlainTextEdit("\n".join(settings.django_urls))
+        self.django_urls.setFixedHeight(64)
+        self.django_token_file = QLineEdit(settings.django_token_file or "")
+        self.local_token_file = QLineEdit(settings.local_token_file or "")
+        self.local = {
+            kind: QLineEdit(getattr(settings.local, kind) or "")
+            for kind in ("llm", "asr", "tts")
+        }
+        self.model = QLineEdit(settings.llm.model)
         self.mode = _combo(MODES, settings.mode)
         self.source_language = _combo(SOURCE_LANGUAGES, settings.source_language)
-        for widget in (self.asr_urls, self.tts_urls, self.django_urls):
-            widget.setFixedHeight(64)
-        form.addRow("ASR URL (по одному в рядку):", self.asr_urls)
-        form.addRow("TTS URL (по одному в рядку):", self.tts_urls)
-        form.addRow("LLM django_urls (по одному в рядку):", self.django_urls)
-        form.addRow("LLM django_token_file:", self.django_token_file)
-        form.addRow("LLM воркер (service):", self.llm_service)
-        form.addRow("LLM direct_url:", self.direct_url)
-        form.addRow("LLM direct_token_file:", self.direct_token_file)
+        self.allow_all = QCheckBox("усі знайдені сервіси")
+        self.allow_all.setChecked(settings.allowed_services is None)
+        self.allowed = QListWidget()
+        self.allowed.setFixedHeight(110)
+        chosen = set(settings.allowed_services or ())
+        keys = [e.key for e in (_cached_services() if services is None else services)]
+        for key in dict.fromkeys(list(keys) + sorted(chosen)):
+            item = QListWidgetItem(key)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            on = settings.allowed_services is None or key in chosen
+            item.setCheckState(Qt.CheckState.Checked if on else Qt.CheckState.Unchecked)
+            self.allowed.addItem(item)
+        self.allowed.setEnabled(not self.allow_all.isChecked())
+        self.allow_all.toggled.connect(lambda on: self.allowed.setEnabled(not on))
+        form.addRow("Django URL (свій хост першим):", self.django_urls)
+        form.addRow("DRF token file:", self.django_token_file)
+        form.addRow("Локальний LLM-воркер:", self.local["llm"])
+        form.addRow("Локальний rt-asr:", self.local["asr"])
+        form.addRow("Локальний rt-tts:", self.local["tts"])
+        form.addRow("Локальний токен воркера:", self.local_token_file)
+        form.addRow("Дозволені сервіси:", self.allow_all)
+        form.addRow("", self.allowed)
         form.addRow("LLM model:", self.model)
-        form.addRow("rt api_token_file:", self.api_token_file)
         form.addRow("Режим:", self.mode)
         form.addRow("Мова:", self.source_language)
         self._managed = {
-            "asr_urls": self.asr_urls,
-            "tts_urls": self.tts_urls,
-            "llm.django_urls": self.django_urls,
-            "llm.django_token_file": self.django_token_file,
-            "llm.service": self.llm_service,
-            "llm.direct_url": self.direct_url,
-            "llm.direct_token_file": self.direct_token_file,
+            "django_urls": self.django_urls,
+            "django_token_file": self.django_token_file,
+            "local_token_file": self.local_token_file,
+            "local.llm": self.local["llm"],
+            "local.asr": self.local["asr"],
+            "local.tts": self.local["tts"],
+            "allowed_services": self.allowed,
             "llm.model": self.model,
-            "api_token_file": self.api_token_file,
             "mode": self.mode,
         }
         for name in settings.managed:
@@ -90,18 +112,26 @@ class EndpointsTab(QWidget):
             if widget is not None:
                 widget.setEnabled(False)
                 widget.setToolTip("Задано через RT_EDGE_* (лише читання)")
+        if "allowed_services" in settings.managed:
+            self.allow_all.setEnabled(False)
+
+    def allowed_values(self):
+        if self.allow_all.isChecked():
+            return None
+        return [
+            self.allowed.item(i).text()
+            for i in range(self.allowed.count())
+            if self.allowed.item(i).checkState() == Qt.CheckState.Checked
+        ]
 
     def values(self) -> Dict[str, Any]:
         return {
-            "services.asr_urls": _lines(self.asr_urls),
-            "services.tts_urls": _lines(self.tts_urls),
-            "services.llm.django_urls": _lines(self.django_urls),
-            "services.llm.django_token_file": self.django_token_file.text().strip(),
-            "services.llm.service": self.llm_service.text().strip(),
-            "services.llm.direct_url": self.direct_url.text().strip(),
-            "services.llm.direct_token_file": self.direct_token_file.text().strip(),
+            "services.django_urls": _lines(self.django_urls),
+            "services.django_token_file": self.django_token_file.text().strip(),
+            "services.local_token_file": self.local_token_file.text().strip(),
+            **{f"services.local.{k}": w.text().strip() for k, w in self.local.items()},
+            "services.allowed_services": self.allowed_values(),
             "services.llm.model": self.model.text().strip(),
-            "services.api_token_file": self.api_token_file.text().strip(),
             "services.mode": self.mode.currentText(),
             "services.source_language": self.source_language.currentText(),
         }

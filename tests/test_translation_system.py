@@ -1,13 +1,25 @@
-"""TranslationSystem on endpoint pools, lease-based LLM and pause segmentation."""
+"""TranslationSystem on endpoint pools, worker-session LLM and pause segmentation."""
 
 import threading
 import time
 
 import numpy as np
 
-from src.clients import LeaseKeeper, ServiceError, StaticTarget
+from src.clients import (
+    Credential,
+    Directory,
+    Endpoint,
+    ServiceEntry,
+    ServiceError,
+    WorkerSessions,
+)
 from src.clients.asr import AsrResult
-from src.core.runtime import EdgeSettings, LlmSettings, SegmentationSettings
+from src.core.runtime import (
+    EdgeSettings,
+    LlmSettings,
+    LocalUrls,
+    SegmentationSettings,
+)
 from src.segmentation import Segment, SegmenterConfig
 from src.translation_system import TranslationSystem, default_llm_target
 
@@ -44,7 +56,10 @@ class FakeTts:
 class FakePool:
     def __init__(self, client, url="http://x"):
         self.client = client
-        self.pinned_url = url
+        self.url = url
+
+    def active(self):
+        return {"url": self.url}
 
     def call(self, fn):
         return fn(self.client)
@@ -82,7 +97,18 @@ class FakeLlm:
         pass
 
 
-class FakeKeeper(LeaseKeeper):
+class StaticTarget:
+    def __init__(self, url):
+        self.url = url
+
+    def current(self):
+        return self.url, ""
+
+    def invalidate(self, kind):
+        pass
+
+
+class FakeKeeper(WorkerSessions):
     def __init__(self, error=None):  # no super(): no network, no threads
         self.error = error
         self.events = []
@@ -96,7 +122,7 @@ class FakeKeeper(LeaseKeeper):
         self.events.append("stop")
 
     def snapshot(self):
-        return {"service": "llm-a", "base_url": "http://gpu"}
+        return {"node": "gpu", "active": "http://gpu"}
 
     def current(self):
         return "http://gpu", "tok"
@@ -166,8 +192,9 @@ class Sink:
 
 
 def translate_settings(**kw):
-    llm = kw.pop("llm", LlmSettings(direct_url="http://llm", context_pairs=3))
-    return EdgeSettings(mode="translate", tts_urls=("http://tts",), llm=llm, **kw)
+    llm = kw.pop("llm", LlmSettings(context_pairs=3))
+    local = LocalUrls(llm="http://llm", tts="http://tts")
+    return EdgeSettings(mode="translate", local=local, llm=llm, **kw)
 
 
 def make(settings, asr_results=(), target=None, llm=None, tts=True):
@@ -187,8 +214,9 @@ def make(settings, asr_results=(), target=None, llm=None, tts=True):
 
     ts = TranslationSystem(
         settings,
-        pools_factory=lambda s: pools,
-        llm_target_factory=lambda s: target or StaticTarget("http://llm", None),
+        directory_factory=lambda s: Directory(),
+        pools_factory=lambda s, d: pools,
+        llm_target_factory=lambda s, d: target or StaticTarget("http://llm"),
         vad_stream_factory=vad_factory,
         llm_factory=lambda t, s: llm,
         capture_factory=capture,
@@ -236,26 +264,28 @@ def test_translate_flow_calls_asr_llm_tts_and_playback():
     } in events
     stats = ts.get_stats()
     assert stats["llm_requests"] == 1 and stats["llm_errors"] == 0
-    assert stats["pinned"] == {"asr": "http://asr", "tts": "http://tts"}
+    assert stats["active"] == {
+        "asr": {"url": "http://asr"},
+        "tts": {"url": "http://tts"},
+    }
+    assert stats["discovery"] == "none"
 
 
-def test_translate_start_acquires_lease_and_stop_releases():
+def test_translate_start_opens_session_and_stop_closes():
     keeper = FakeKeeper()
     ts, _, _, _, capture, _, events = make(translate_settings(), target=keeper)
     capture.log = keeper.events
     assert ts.start() is True
-    assert keeper.events == ["start", "capture"]  # lease before the mic opens
-    assert {
-        "status": "llm_lease",
-        "lease": {"service": "llm-a", "base_url": "http://gpu"},
-    } in events
-    assert ts.get_stats()["lease"] == {"service": "llm-a", "base_url": "http://gpu"}
+    assert keeper.events == ["start", "capture"]  # session before the mic opens
+    snap = {"node": "gpu", "active": "http://gpu"}
+    assert {"status": "llm_session", "session": snap} in events
+    assert ts.get_stats()["session"] == snap
     ts.stop()
     assert keeper.events == ["start", "capture", "stop"]
 
 
-def test_translate_start_fails_cleanly_without_lease():
-    keeper = FakeKeeper(ServiceError("llm", "unreachable", "no lease available"))
+def test_translate_start_fails_cleanly_without_worker():
+    keeper = FakeKeeper(ServiceError("llm", "unreachable", "no llm worker available"))
     ts, _, _, _, capture, _, _ = make(translate_settings(), target=keeper)
     assert ts.start() is False
     assert ts.last_error.startswith("llm:")
@@ -278,11 +308,9 @@ def test_llm_context_carries_previous_pairs():
     assert llm.calls[1] == ("два", "uk", [("один", "EN(один)")])
 
 
-def test_transcribe_mode_uses_batch_priority_scaled_timeout_and_no_lease():
+def test_transcribe_mode_uses_batch_priority_scaled_timeout_and_no_session():
     keeper = FakeKeeper()
-    settings = EdgeSettings(
-        mode="transcribe", llm=LlmSettings(django_urls=("http://d",))
-    )
+    settings = EdgeSettings(mode="transcribe", local=LocalUrls(llm="http://l"))
     ts, pools, llm, vads, capture, sink, events = make(
         settings, [AsrResult("довгий текст", "uk")], target=keeper
     )
@@ -353,7 +381,7 @@ def test_apply_settings_reconfigures_segmenter_live():
         new_cfg = SegmenterConfig(end_silence_ms=500)
         new = EdgeSettings(
             mode=settings.mode,
-            tts_urls=settings.tts_urls,
+            local=settings.local,
             llm=settings.llm,
             source_language="pl",
             segmentation=SegmentationSettings(translate=new_cfg),
@@ -374,8 +402,7 @@ def test_apply_settings_restarts_when_urls_change():
         ts.apply_settings(
             EdgeSettings(
                 mode="translate",
-                asr_urls=("http://other",),
-                tts_urls=settings.tts_urls,
+                local=LocalUrls(asr="http://other", llm="http://llm", tts="http://tts"),
                 llm=settings.llm,
             )
         )
@@ -395,14 +422,17 @@ def test_enqueue_playback_plays_external_audio():
     assert sink.played == [(100, 22050)]
 
 
-def test_default_llm_target_by_source():
-    assert default_llm_target(LlmSettings()) is None
-    assert isinstance(
-        default_llm_target(LlmSettings(direct_url="http://llm")), StaticTarget
+def test_default_llm_target_from_local_and_discovery():
+    assert default_llm_target(EdgeSettings(), Directory()) is None
+    d = Directory(
+        [ServiceEntry("llm", "remote-node", "http://remote:8080", "t")], "cache"
     )
-    assert isinstance(
-        default_llm_target(LlmSettings(django_urls=("http://d",))), LeaseKeeper
-    )
+    target = default_llm_target(EdgeSettings(), d)
+    assert isinstance(target, WorkerSessions)
+    assert target.urls == ["http://remote:8080"]
+    local = EdgeSettings(local=LocalUrls(llm="http://127.0.0.1:8080"))
+    assert default_llm_target(local, d).urls[0] == "http://127.0.0.1:8080"
+    assert Endpoint and Credential  # re-exported
 
 
 def test_translate_queue_drops_oldest_segments():
@@ -413,7 +443,7 @@ def test_translate_queue_drops_oldest_segments():
     assert len(ts._chunk_queue.queue[0].audio) == 3 * 16000
 
 
-def test_capture_failure_aborts_start_and_releases_lease():
+def test_capture_failure_aborts_start_and_closes_session():
     keeper = FakeKeeper()
     ts, _, _, _, capture, _, events = make(translate_settings(), target=keeper)
     capture.error = OSError("no mic")

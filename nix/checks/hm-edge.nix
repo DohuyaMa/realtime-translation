@@ -34,16 +34,16 @@ let
       enable = true;
       package = fakeEdge;
       mode = "translate";
-      endpoints = { asr = [ "http://gpu:8091" "http://gpu2:8091" ]; tts = [ "http://gpu:8093" ]; };
-      llm = { djangoEndpoints = [ "http://dj:8000" ]; djangoTokenFile = "/run/user/1000/dj-token"; service = "llm-a"; };
-      apiTokenFile = "/run/user/1000/rt-token";
+      django = { urls = [ "http://127.0.0.1:8000" "http://dj:8000" ]; tokenFile = "/run/user/1000/dj-token"; };
+      local.tts = null;
+      allowedServices = [ "llm:cyborg" "tts:cyborg" ];
     };
   };
   transcribe = hm { rt-translator = { enable = true; package = fakeEdge; autostart = false; virtualSinks.enable = false; }; };
-  missingLlm = stub { rt-translator = { enable = true; package = fakeEdge; mode = "translate"; endpoints.tts = [ "http://gpu:8093" ]; }; };
-  missingTts = stub { rt-translator = { enable = true; package = fakeEdge; mode = "translate"; llm.directUrl = "http://llm:1"; }; };
-  noDjangoToken = stub { rt-translator = { enable = true; package = fakeEdge; llm.djangoEndpoints = [ "http://dj:8000" ]; }; };
-  storeToken = stub { rt-translator = { enable = true; package = fakeEdge; apiTokenFile = "${fakeEdge}/secret"; }; };
+  missingLlm = stub { rt-translator = { enable = true; package = fakeEdge; mode = "translate"; local.llm = null; }; };
+  missingTts = stub { rt-translator = { enable = true; package = fakeEdge; mode = "translate"; local.tts = null; }; };
+  noDjangoToken = stub { rt-translator = { enable = true; package = fakeEdge; django.urls = [ "http://dj:8000" ]; }; };
+  storeToken = stub { rt-translator = { enable = true; package = fakeEdge; django = { urls = [ "http://dj:8000" ]; tokenFile = "${fakeEdge}/secret"; }; }; };
   # Names the assertion that must fire: true only if some failing assertion's message contains `sub`.
   failsWith = sub: cfg:
     lib.any (a: !a.assertion && lib.hasInfix sub a.message) cfg.config.assertions;
@@ -56,14 +56,14 @@ let
     testTranslateEnv = {
       expr = edgeEnv translate;
       expected = [
-        "RT_EDGE_API_TOKEN_FILE=/run/user/1000/rt-token"
-        "RT_EDGE_ASR_URLS=http://gpu:8091,http://gpu2:8091"
+        "RT_EDGE_ALLOWED_SERVICES=llm:cyborg,tts:cyborg"
         "RT_EDGE_DJANGO_TOKEN_FILE=/run/user/1000/dj-token"
-        "RT_EDGE_DJANGO_URLS=http://dj:8000"
+        "RT_EDGE_DJANGO_URLS=http://127.0.0.1:8000,http://dj:8000"
         "RT_EDGE_LLM_MODEL=local"
-        "RT_EDGE_LLM_SERVICE=llm-a"
+        "RT_EDGE_LOCAL_ASR_URL=http://127.0.0.1:8091"
+        "RT_EDGE_LOCAL_LLM_URL=http://127.0.0.1:8080"
+        "RT_EDGE_LOCAL_TOKEN_FILE=/run/llama/local-token"
         "RT_EDGE_MODE=translate"
-        "RT_EDGE_TTS_URLS=http://gpu:8093"
       ];
     };
     testSessionVariables = { expr = translate.config.home.sessionVariables.RT_EDGE_MODE; expected = "translate"; };
@@ -76,12 +76,22 @@ let
         install = transcribe.config.systemd.user.services.rt-app.Install;
         sinks = transcribe.config.xdg.configFile ? "pipewire/pipewire.conf.d/30-rt-virtual-sinks.conf";
       };
-      expected = { env = [ "RT_EDGE_ASR_URLS=http://127.0.0.1:8091" "RT_EDGE_LLM_MODEL=local" ]; install = { }; sinks = false; };
+      expected = {
+        env = [
+          "RT_EDGE_LLM_MODEL=local"
+          "RT_EDGE_LOCAL_ASR_URL=http://127.0.0.1:8091"
+          "RT_EDGE_LOCAL_LLM_URL=http://127.0.0.1:8080"
+          "RT_EDGE_LOCAL_TOKEN_FILE=/run/llama/local-token"
+          "RT_EDGE_LOCAL_TTS_URL=http://127.0.0.1:8093"
+        ];
+        install = { };
+        sinks = false;
+      };
     };
     testPositiveConfigsClean = { expr = noFailures translate && noFailures transcribe; expected = true; };
-    testTranslateNeedsLlm = { expr = failsWith "llm.djangoEndpoints or llm.directUrl" missingLlm; expected = true; };
+    testTranslateNeedsLlm = { expr = failsWith "requires local.llm and local.tts" missingLlm; expected = true; };
     testTranslateNeedsTts = { expr = failsWith "mode = \"translate\" requires" missingTts; expected = true; };
-    testDjangoNeedsToken = { expr = failsWith "requires llm.djangoTokenFile" noDjangoToken; expected = true; };
+    testDjangoNeedsToken = { expr = failsWith "requires django.tokenFile" noDjangoToken; expected = true; };
     testTokenNotInStore = { expr = failsWith "must not point into the Nix store" storeToken; expected = true; };
   };
 in

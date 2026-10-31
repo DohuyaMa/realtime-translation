@@ -1,4 +1,10 @@
-from src.clients import EndpointPool, ServiceHealthMonitor, SpeechPools
+from src.clients import (
+    Credential,
+    Endpoint,
+    EndpointPool,
+    ServiceHealthMonitor,
+    SpeechPools,
+)
 
 
 class FakeClient:
@@ -17,43 +23,43 @@ class FakeLlm:
         return self._status
 
 
-class FakeLease:
+class FakeSessions:
     def snapshot(self):
-        return {"base_url": "http://w", "service": "s", "model": "m", "error": None}
+        return {"active": "http://w", "node": "cyborg", "session_id": "s1"}
 
 
 def pools(statuses):
-    asr = EndpointPool("asr", list(statuses), lambda u: FakeClient(statuses[u]))
+    eps = [Endpoint("asr", u, u, Credential()) for u in statuses]
+    asr = EndpointPool("asr", eps, lambda e: FakeClient(statuses[e.url]))
     return SpeechPools(asr=asr, tts=None)
 
 
-def test_monitor_llm_entry_from_lease_and_worker_status():
+def test_monitor_llm_entry_from_session_and_worker_status():
     llm = FakeLlm({"model": {"loaded": True, "path": "/m/q.gguf"}})
-    m = ServiceHealthMonitor(pools({"a": None}), llm, FakeLease())
+    m = ServiceHealthMonitor(pools({"a": None}), llm, FakeSessions())
     e = m.poll_once()["llm"][0]
     assert e["url"] == "http://w"
     assert e["ready"] is True
     assert e["model"] == "q.gguf"
-    assert e["pending"] is None
-    assert e["lease"]["service"] == "s"
+    assert e["session"]["node"] == "cyborg"
 
 
-def test_monitor_updates_pool():
+def test_monitor_updates_pool_health_and_skips_unhealthy_first():
     st = {
-        "a": {"ready": True, "pending": 4, "model": {"id": "x"}, "device": "cuda"},
+        "a": {"ready": False, "pending": 0, "model": {"id": "x"}, "device": "cuda"},
         "b": {"ready": True, "pending": 1, "model": {"id": "x"}, "device": "cpu"},
     }
     p = pools(st)
     m = ServiceHealthMonitor(p, None, None)
     snap = m.poll_once()
-    assert snap["asr"][0] == {
+    assert snap["asr"][1] == {
         "service": "asr",
-        "url": "a",
+        "url": "b",
         "connected": True,
         "ready": True,
-        "pending": 4,
+        "pending": 1,
         "model": "x",
-        "device": "cuda",
+        "device": "cpu",
         "error": None,
     }
     assert p.asr.pick() == "b"

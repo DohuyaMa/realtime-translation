@@ -36,6 +36,46 @@ def read_token(token_file: Optional[str]) -> Optional[str]:
     return token or None
 
 
+class Credential:
+    """Token of one service endpoint (sent as ``Authorization: Token <t>``).
+
+    ``value`` comes from service discovery (Django / its cache). For the local
+    worker ``fallback_file`` is the host-local token file: a 401 re-reads it
+    once (the token rotates on every worker restart) and the endpoint is then
+    marked ``offline`` (token not from Django). The caller retries once; a
+    second 401 is an explicit auth error.
+    """
+
+    def __init__(self, value: str = "", fallback_file: Optional[str] = None) -> None:
+        self.value = value
+        self.fallback_file = fallback_file
+        self.offline = False
+        if not value and fallback_file:
+            self.value = read_token(fallback_file) or ""
+            self.offline = bool(self.value)
+
+    def header(self) -> dict:
+        return {"Authorization": f"Token {self.value}"} if self.value else {}
+
+    def reload(self) -> bool:
+        """After a 401: True if a different token is now available."""
+        if not self.fallback_file:
+            return False
+        fresh = read_token(self.fallback_file) or ""
+        if not fresh or fresh == self.value:
+            logger.warning(
+                "HTTP 401 and local token file {} has nothing new", self.fallback_file
+            )
+            return False
+        logger.warning(
+            "HTTP 401: using the local token file {} (offline token)",
+            self.fallback_file,
+        )
+        self.value = fresh
+        self.offline = True
+        return True
+
+
 def raise_for_response(service: str, resp: httpx.Response) -> None:
     if resp.status_code in (401, 403):
         raise ServiceError(
@@ -67,19 +107,15 @@ class ServiceClient:
         self,
         base_url: str,
         *,
-        token_file: Optional[str] = None,
+        credential: Optional[Credential] = None,
         timeout_s: float = 30.0,
         connect_timeout_s: float = 3.0,
         transport: Optional[httpx.BaseTransport] = None,
     ):
         self.base_url = base_url.rstrip("/")
-        headers = {}
-        token = read_token(token_file)
-        if token:
-            headers["Authorization"] = f"Bearer {token}"
+        self.credential = credential or Credential()
         self._client = httpx.Client(
             base_url=self.base_url + "/",
-            headers=headers,
             timeout=httpx.Timeout(timeout_s, connect=connect_timeout_s),
             transport=transport,
         )
@@ -96,14 +132,23 @@ class ServiceClient:
             kwargs["timeout"] = httpx.Timeout(
                 timeout_s, connect=self._client.timeout.connect
             )
+        resp = self._send(method, path, **kwargs)
+        if resp.status_code == 401 and self.credential.reload():
+            resp = self._send(method, path, **kwargs)  # one retry, no loop
+        raise_for_response(self.service, resp)
+        return resp
+
+    def _send(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
+        headers = dict(kwargs.pop("headers", None) or {})
+        headers.update(self.credential.header())
         try:
-            resp = self._client.request(method, path.lstrip("/"), **kwargs)
+            return self._client.request(
+                method, path.lstrip("/"), headers=headers, **kwargs
+            )
         except httpx.TimeoutException as e:
             raise ServiceError(self.service, "timeout", str(e)) from e
         except httpx.TransportError as e:
             raise ServiceError(self.service, "unreachable", str(e)) from e
-        raise_for_response(self.service, resp)
-        return resp
 
     def _json(self, resp: httpx.Response) -> dict:
         return json_body(self.service, resp)

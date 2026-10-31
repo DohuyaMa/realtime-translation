@@ -1,4 +1,4 @@
-"""Status panel for the remote services: ASR, LLM (lease) and TTS."""
+"""Status panel for the remote services: ASR, LLM worker and TTS (serving node)."""
 
 from typing import Dict, List, Optional
 
@@ -28,24 +28,34 @@ def _aggregate(entries: List[Dict]) -> str:
     return f"{ready}/{len(entries)} готові"
 
 
-def format_llm_detail(entry: Optional[Dict], lease: Optional[Dict], source: str):
-    """Text for the LLM row: worker, model, expires_at and source."""
+def format_node(active: Optional[Dict]) -> str:
+    """'вузол: <node> (<url>)' plus local/offline markers."""
+    if not active:
+        return ""
+    url = active.get("url") or active.get("active")
+    text = f"вузол: {active.get('node') or '?'} ({url})"
+    if active.get("local"):
+        text += ", локальний"
+    if active.get("offline"):
+        text += ", офлайн-токен"
+    return text
+
+
+def format_llm_detail(entry: Optional[Dict], session: Optional[Dict]) -> str:
+    """Text for the LLM row: serving worker, session, model, down workers."""
     entry = entry or {}
-    lease = lease or entry.get("lease") or {}
-    if lease.get("mode") == "no_lease":
-        source = f"без lease ({lease.get('no_lease_source')})"
-    parts = [f"джерело: {source}"]
-    if lease.get("service"):
-        parts.append(f"воркер: {lease['service']}")
-    model = lease.get("model") or entry.get("model")
-    if model:
-        parts.append(f"модель: {model}")
-    if lease.get("expires_at"):
-        parts.append(f"lease до: {lease['expires_at']}")
-    if lease.get("skipped"):
-        parts.append(f"недоступні Django: {', '.join(lease['skipped'])}")
-    if lease.get("error"):
-        parts.append(f"помилка: {lease['error']}")
+    session = session or entry.get("session") or {}
+    parts = []
+    if session.get("active"):
+        parts.append(format_node(session))
+    if session.get("session_id"):
+        parts.append(f"сесія: {session['session_id']}")
+    if entry.get("model"):
+        parts.append(f"модель: {entry['model']}")
+    if session.get("down"):
+        parts.append(f"недоступні: {', '.join(session['down'])}")
+    if session.get("error"):
+        parts.append(f"помилка: {session['error']}")
     return ", ".join(parts)
 
 
@@ -60,7 +70,6 @@ class ServiceStatusPanel(QGroupBox):
         self._dots: Dict[str, QLabel] = {}
         self._texts: Dict[str, QLabel] = {}
         self._details: Dict[str, QLabel] = {}
-        self.llm_source: Optional[str] = None  # lease | direct | none
         self._build()
 
     def _build(self):
@@ -102,22 +111,22 @@ class ServiceStatusPanel(QGroupBox):
     def update_status(self, status: Dict):
         """Apply a status dict (get_status() plus optional ``health``)."""
         health = status.get("health") or {}
-        pinned = status.get("pinned") or {}
+        active = status.get("active") or {}
+        source = status.get("discovery")
+        suffix = ""
+        if source == "cache":
+            suffix = "; список сервісів: кеш (Django недоступний)"
+        elif source == "none":
+            suffix = "; список сервісів: лише локальні"
         for key in ("asr", "tts"):
             entries = health.get(key) or []
             ok = any(e.get("ready") for e in entries)
-            detail = f"закріплено: {pinned.get(key)}" if pinned.get(key) else ""
-            self._set(key, ok, _aggregate(entries), detail)
+            self._set(
+                key, ok, _aggregate(entries), format_node(active.get(key)) + suffix
+            )
         llm = (health.get("llm") or [None])[0]
-        lease = status.get("lease")
-        source = self.llm_source or (
-            "lease" if (lease or (llm or {}).get("lease")) else "direct"
-        )
-        detail = format_llm_detail(llm, lease, source)
-        if (lease or {}).get("mode") == "no_lease":  # explicit, never green
-            self._set("llm", False, "без lease", detail)
-            return
-        ok = bool(llm and llm.get("ready"))
-        has_lease = bool(lease and lease.get("service"))
-        text = "готовий" if ok else ("lease" if has_lease else "Offline")
-        self._set("llm", ok or has_lease, text, detail)
+        session = status.get("session")
+        has_session = bool(session and session.get("active"))
+        ok = bool(llm and llm.get("ready")) or has_session
+        text = "сесія" if has_session else ("готовий" if ok else "Offline")
+        self._set("llm", ok, text, format_llm_detail(llm, session))

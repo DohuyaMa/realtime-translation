@@ -61,7 +61,6 @@ class MainWindow(QMainWindow):
         self.service_status_panel.endpoints_requested.connect(
             self.settings_button.open_settings
         )
-        self._sync_llm_source()
         self.ui_controller.start_event_polling(interval=0.5)
         
     def init_ui(self):
@@ -408,14 +407,6 @@ class MainWindow(QMainWindow):
             self.status_manager.log_error(str(err))
         self._last_shown_error = err
     
-    def _sync_llm_source(self):
-        try:
-            from .settings_dialog import current_settings
-
-            self.service_status_panel.llm_source = current_settings().llm.source()
-        except Exception as e:
-            logger.error(f"Cannot resolve LLM source: {e}")
-
     def on_refresh_requested(self):
         """Force a health poll of the remote services (off the GUI thread)."""
         if not self.ui_controller:
@@ -429,7 +420,6 @@ class MainWindow(QMainWindow):
         """Apply EdgeSettings saved from the endpoints dialog (async)."""
         if not self.ui_controller or not isinstance(settings, EdgeSettings):
             return
-        self.service_status_panel.llm_source = settings.llm.source()
 
         def done(ok):
             if ok is True:

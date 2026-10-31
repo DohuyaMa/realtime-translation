@@ -74,3 +74,12 @@ def test_ws_token():
     headers = {"Authorization": "Bearer s3cret"}
     with client.websocket_connect("/v1/ws", headers=headers) as ws:
         assert ws.receive_json() == {"ok": True}
+
+
+def test_header_accepts_bearer_and_token_schemes():
+    from src.services.common.auth import header_matches
+
+    assert header_matches("Bearer s3cret", "s3cret")
+    assert header_matches("Token s3cret", "s3cret")
+    assert not header_matches("Basic s3cret", "s3cret")
+    assert not header_matches("Token wrong", "s3cret")

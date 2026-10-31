@@ -6,7 +6,7 @@ from typing import Optional, Protocol, Sequence
 import httpx
 
 from ..core.runtime import LlmSettings
-from .base import ServiceError, json_body, raise_for_response, read_token
+from .base import ServiceError, json_body, raise_for_response
 
 LANGUAGE_NAMES = {"pl": "Polish", "uk": "Ukrainian", "ru": "Russian"}
 SYSTEM_PROMPT = (
@@ -21,20 +21,6 @@ class LlmTarget(Protocol):
     def current(self) -> tuple[str, str]: ...
 
     def invalidate(self, kind: str) -> None: ...
-
-
-class StaticTarget:
-    """Dev mode: fixed URL and bearer read from a token file."""
-
-    def __init__(self, url: str, token_file: Optional[str]) -> None:
-        self._url = url.rstrip("/")
-        self._token_file = token_file
-
-    def current(self) -> tuple[str, str]:
-        return self._url, read_token(self._token_file) or ""
-
-    def invalidate(self, kind: str) -> None:
-        return None
 
 
 class LlmClient:
@@ -60,7 +46,7 @@ class LlmClient:
 
     def _send(self, method: str, path: str, **kwargs) -> httpx.Response:
         base, token = self._target.current()
-        headers = {"Authorization": f"Bearer {token}"} if token else {}
+        headers = {"Authorization": f"Token {token}"} if token else {}
         try:
             resp = self._http.request(
                 method, base.rstrip("/") + path, headers=headers, **kwargs
@@ -123,5 +109,5 @@ class LlmClient:
         return result
 
     def status(self) -> dict:
-        # Health probe: single attempt, never invalidates the lease target.
+        # Health probe: single attempt, never invalidates the session target.
         return json_body(self.service, self._send("GET", "/status"))

@@ -6,6 +6,7 @@ import pytest  # noqa: E402
 
 pytest.importorskip("PySide6")
 
+from PySide6.QtCore import Qt  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from src.core.runtime import EdgeSettings, resolve_edge_settings  # noqa: E402
@@ -29,49 +30,58 @@ def test_services_labels():
     }
 
 
-def test_status_panel_shows_lease(app):
+def test_status_panel_shows_serving_nodes(app):
     panel = ServiceStatusPanel()
-    panel.llm_source = "lease"
     panel.update_status(
         {
-            "pinned": {"asr": "http://a:1", "tts": None},
-            "lease": {
-                "service": "w1",
-                "model": "m",
-                "expires_at": "2026-01-01T00:00:00",
+            "discovery": "cache",
+            "active": {
+                "asr": {"url": "http://127.0.0.1:8091", "node": "sktop", "local": True},
+                "tts": None,
+            },
+            "session": {
+                "active": "http://cyborg:8080",
+                "node": "cyborg",
+                "session_id": "s1",
+                "local": False,
+                "down": ["http://127.0.0.1:8080"],
             },
             "health": {
                 "asr": [{"ready": True}],
                 "tts": [],
-                "llm": [{"ready": True, "lease": None}],
+                "llm": [{"ready": True, "model": "m"}],
             },
         }
     )
     detail = panel._details["llm"].text()
-    assert "w1" in detail and "2026-01-01" in detail and "lease" in detail
+    assert "cyborg" in detail and "s1" in detail and "127.0.0.1:8080" in detail
+    assert panel._texts["llm"].text() == "сесія"
     assert panel._texts["asr"].text() == "1/1 готові"
-    assert "http://a:1" in panel._details["asr"].text()
+    asr = panel._details["asr"].text()
+    assert "sktop" in asr and "локальний" in asr and "кеш" in asr
 
 
 def test_endpoints_dialog_values_and_segmentation(app):
-    s = resolve_edge_settings(
-        {"services": {"asr_urls": ["http://x:1"], "tts_urls": ["http://t:2"]}}, {}
-    )
+    s = resolve_edge_settings({"services": {"local": {"tts": "http://t:2"}}}, {})
     dlg = EndpointsDialog(s)
-    dlg.endpoints_tab.asr_urls.setPlainText("http://a:1\nhttp://b:2")
+    dlg.endpoints_tab.django_urls.setPlainText("http://a:1\nhttp://b:2")
+    dlg.endpoints_tab.local["asr"].setText("http://x:1")
     dlg.segmentation_tab.chunk_min_s.setValue(120)
     dlg.segmentation_tab.end_silence_ms.setValue(400)
     v = dlg.values()
-    assert v["services.asr_urls"] == ["http://a:1", "http://b:2"]
+    assert v["services.django_urls"] == ["http://a:1", "http://b:2"]
+    assert v["services.local.asr"] == "http://x:1"
+    assert v["services.local.tts"] == "http://t:2"
+    assert v["services.allowed_services"] is None
     assert v["segmentation.transcribe.chunk_min_s"] == 120
     assert v["segmentation.translate.end_silence_ms"] == 400
     assert v["services.mode"] == "auto"
 
 
 def test_managed_fields_disabled(app):
-    s = resolve_edge_settings({}, {"RT_EDGE_ASR_URLS": "http://e:1"})
+    s = resolve_edge_settings({}, {"RT_EDGE_LOCAL_ASR_URL": "http://e:1"})
     dlg = EndpointsDialog(s)
-    assert not dlg.endpoints_tab.asr_urls.isEnabled()
+    assert not dlg.endpoints_tab.local["asr"].isEnabled()
     assert isinstance(s, EdgeSettings)
 
 
@@ -83,6 +93,7 @@ def cfg(tmp_path, monkeypatch):
     for k in list(os.environ):
         if k.startswith("RT_EDGE_"):
             monkeypatch.delenv(k)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
     mgr = cfgmod.ConfigManager(str(tmp_path))
     monkeypatch.setattr(cfgmod, "_config_manager", mgr)
     runtime.reset_runtime_config()
@@ -102,12 +113,12 @@ def test_accept_persists_and_emits(app, cfg):
     dlg = EndpointsDialog(current_settings())
     got = []
     dlg.settings_changed.connect(got.append)
-    dlg.endpoints_tab.asr_urls.setPlainText("http://a:1")
+    dlg.endpoints_tab.local["asr"].setText("http://a:1")
     dlg.segmentation_tab.end_silence_off.setChecked(True)
     dlg.accept()
-    assert got and got[0].asr_urls == ("http://a:1",)
+    assert got and got[0].local.asr == "http://a:1"
     assert got[0].segmentation.translate.end_silence_ms is None
-    assert _saved(cfg)["services"]["asr_urls"] == ["http://a:1"]
+    assert _saved(cfg)["services"]["local"]["asr"] == "http://a:1"
 
 
 def test_invalid_keeps_dialog_open_and_unsaved(app, cfg):
@@ -124,12 +135,12 @@ def test_invalid_keeps_dialog_open_and_unsaved(app, cfg):
 def test_managed_not_saved(app, cfg, monkeypatch):
     from src.ui.widgets.settings_dialog import current_settings
 
-    monkeypatch.setenv("RT_EDGE_ASR_URLS", "http://env:1")
+    monkeypatch.setenv("RT_EDGE_LOCAL_ASR_URL", "http://env:1")
     dlg = EndpointsDialog(current_settings())
     dlg.endpoints_tab.model.setText("m2")
     dlg.accept()
     saved = _saved(cfg)["services"]
-    assert "asr_urls" not in saved
+    assert "asr" not in (saved.get("local") or {})
     assert saved["llm"]["model"] == "m2"
 
 
@@ -211,21 +222,39 @@ def test_overlapping_exclusive_tasks_dropped(app, cfg):
     assert win._run_async(lambda: None, lambda r: None) is False
 
 
-def test_status_panel_shows_no_lease_mode_explicitly(app):
+def test_status_panel_marks_offline_local_worker(app):
     panel = ServiceStatusPanel()
-    panel.llm_source = "lease"
     panel.update_status(
         {
-            "lease": {
-                "mode": "no_lease",
-                "no_lease_source": "direct_url",
-                "base_url": "http://127.0.0.1:8080",
-                "skipped": ["http://a", "http://b"],
+            "discovery": "none",
+            "session": {
+                "active": "http://127.0.0.1:8080",
+                "node": "sktop",
+                "local": True,
+                "offline": True,
             },
-            "health": {"llm": [{"ready": True}]},
+            "health": {},
         }
     )
-    assert panel._texts["llm"].text() == "без lease"
-    assert "red" in panel._dots["llm"].styleSheet()
-    detail = panel._details["llm"].text()
-    assert "без lease (direct_url)" in detail and "http://a" in detail
+    assert "офлайн-токен" in panel._details["llm"].text()
+
+
+def test_allowed_services_selection(app):
+    from src.clients import ServiceEntry
+
+    s = resolve_edge_settings({"services": {"allowed_services": ["llm:cyborg"]}}, {})
+    from src.ui.widgets.settings_dialog import EndpointsTab
+
+    tab = EndpointsTab(
+        s,
+        services=[
+            ServiceEntry("llm", "cyborg", "http://c:8080", "t"),
+            ServiceEntry("tts", "cyborg", "http://c:8093", "t"),
+        ],
+    )
+    assert not tab.allow_all.isChecked()
+    assert tab.allowed_values() == ["llm:cyborg"]
+    tab.allowed.item(1).setCheckState(Qt.CheckState.Checked)
+    assert tab.allowed_values() == ["llm:cyborg", "tts:cyborg"]
+    tab.allow_all.setChecked(True)
+    assert tab.values()["services.allowed_services"] is None

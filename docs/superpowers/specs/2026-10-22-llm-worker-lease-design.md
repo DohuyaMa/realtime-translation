@@ -1,6 +1,8 @@
 # Lease LLM-воркера для realtime-перекладу (зміни в Django та llama-service)
 
 Дата: 2026-10-22
+
+> **ЗАМІНЕНО (owner, 2026-10-31).** Lease через Django скасовано: застосунок сам підключається до воркерів (app-сесія `POST /app-session`, heartbeat, `DELETE`), поки сесія жива, воркер не бере задач із Django; Django лише віддає застосунку список сервісів і токени (`GET /api/llm/app-services/`). Чинний опис: `docs/USAGE.md` §7, код `src/clients/{discovery,session,pool}.py`. Нижче - історичний документ.
 Статус: затверджено як напрямок (рішення користувача 2026-10-22). Spec **виконується в репо `swarm-nix`** (`django_api` + `system-conf/common/modules/llm`) окремими сесіями. Цей репо (real-time-translator) реалізує лише клієнтську частину (edge `LeaseKeeper`, spec `2026-10-22-realtime-mvp-design.md` §6.2).
 
 Позначення шляхів:

@@ -30,7 +30,8 @@ def header_matches(header: Optional[str], token: str) -> bool:
     if not header:
         return False
     scheme, _, value = header.partition(" ")
-    return scheme.lower() == "bearer" and hmac.compare_digest(
+    # "Bearer" (curl/docs) and "Token" (edge, same token as the llm workers)
+    return scheme.lower() in ("bearer", "token") and hmac.compare_digest(
         value.strip().encode(), token.encode()
     )
 
