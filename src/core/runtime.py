@@ -23,11 +23,14 @@ from .prompt import (
     DEFAULT_CHECK_USER_TEMPLATE,
     DEFAULT_PREVIOUS_WORDS,
     DEFAULT_SYSTEM_PROMPT,
+    DEFAULT_TERMS,
     DEFAULT_USER_TEMPLATE,
     DEFAULT_WORDS_PER_REQUEST,
     asr_prompt_errors,
     check_template_errors,
     is_legacy,
+    parse_terms,
+    system_prompt_errors,
     template_errors,
 )
 
@@ -84,6 +87,8 @@ class LlmSettings:
     # words of recognized text per LLM call; longer text is split (sentence
     # ends preferred) and every chunk goes through user_template
     words_per_request: int = DEFAULT_WORDS_PER_REQUEST
+    # «Словник термінів»: {{terms}} of both system prompts; () = none
+    terms: tuple[str, ...] = DEFAULT_TERMS
 
 
 @dataclass(frozen=True)
@@ -192,9 +197,7 @@ class EdgeSettings:
                 errors.append(f"use.{kind}: {kind}:{node} is not an allowed service")
         if not 6 <= self.llm.session_ttl_s <= 300:
             errors.append("llm.session_ttl_s must be in 6..300")
-        errors += template_errors(
-            "llm.system_prompt", self.llm.system_prompt, require_text=False
-        )
+        errors += system_prompt_errors("llm.system_prompt", self.llm.system_prompt)
         errors += template_errors(
             "llm.user_template", self.llm.user_template, require_text=True
         )
@@ -355,6 +358,10 @@ def resolve_edge_settings(cfg: Mapping, environ: Mapping) -> EdgeSettings:
         check_system_prompt=template("check_system_prompt", ld.check_system_prompt),
         check_user_template=template("check_user_template", ld.check_user_template),
         words_per_request=int(llm_cfg.get("words_per_request", ld.words_per_request)),
+        # null/absent = the default glossary; "" / [] = none
+        terms=(
+            ld.terms if llm_cfg.get("terms") is None else parse_terms(llm_cfg["terms"])
+        ),
     )
     asr_cfg = svc.get("asr") or {}
     tts_cfg = svc.get("tts") or {}

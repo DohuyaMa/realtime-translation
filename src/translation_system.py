@@ -12,15 +12,27 @@ playback starts with the first synthesized sentence.
 Only complete sentences go to the LLM (live test 2026-10-31): the ASR stage
 holds a recognized tail that does not end a sentence (``split_complete``) and
 prepends it to the next recognized segment. The hold is bounded - it is sent
-alone once no speech follows within ``end_silence_ms`` and never spans more
-than ``hard_max_ms`` of speech - and every hold/merge/flush is logged and
-counted (``asr_merged``, ``asr_held_flushed``).
+alone once no speech follows within ``end_silence_ms``, when the next segment
+is dropped (no words, prompt echo, gate, ASR error), after at most
+``end_silence_ms + soft_max_ms`` even while speech goes on, and never spans
+more than ``hard_max_ms`` of speech - and every hold/merge/flush is logged
+and counted (``asr_merged``, ``asr_held_flushed``).
+
+Whisper echo: on noise whisper may return the previous words it was prompted
+with ({{previous_text}}, live test §12 #20). Such a text is dropped before
+the gate and the LLM - logged, counted (``asr_echo``), emitted - with or
+without Vosk. The check lives here, not in rt-asr: rt-asr gets one opaque
+rendered prompt (template + previous words) and cannot tell which
+part was previous speech, while the edge knows exactly which words it sent
+and owns the drop bookkeeping (counters, held-tail release).
 
 Vosk cross-check (TASK-SYS-12): the ASR stage sends the same segment audio
 to whisper and to rt-vosk in parallel. The segment-level gate
 (``core.crosscheck.gate_reason``) drops a segment before the LLM only when
 whisper clearly hallucinated it - Vosk heard no real word, or not one
 whisper word agrees with Vosk (``vosk_gate_dropped`` / ``_disagree``);
+whisper words the Vosk model cannot write (Latin terms for a uk model) do
+not count, a segment of only such words passes (``vosk_gate_foreign_terms``);
 otherwise the LLM gets whisper as the primary text and Vosk as a hint
 (check prompts, ``Aligned`` keeps them in step through the hold/merge).
 Vosk never deletes words from a passed segment. rt-vosk switched off
@@ -67,13 +79,15 @@ from .clients.discovery import choices
 from .clients.vosk import VoskResult
 from .core.crosscheck import (
     GATE_DISAGREE,
+    GATE_DROPS,
+    GATE_FOREIGN_TERMS,
     Aligned,
     agreement,
     gate_reason,
     mean_conf,
 )
 from .core.output_guard import reject_reason
-from .core.prompt import render_asr_prompt
+from .core.prompt import is_prompt_echo, render_asr_prompt_counted
 from .core.runtime import KINDS, OFF, EdgeSettings, LlmSettings
 from .core.session_record import SessionRecorder
 from .segmentation import Segment, SegmenterConfig, split_complete
@@ -110,6 +124,7 @@ _LLM_LIVE_FIELDS = (
     "check_system_prompt",
     "check_user_template",
     "words_per_request",
+    "terms",
 )
 
 _STOP = object()
@@ -128,6 +143,8 @@ class _Phrase:
     check: Optional[Aligned] = None
     # mean Vosk word confidence of the phrase's words (log/record only)
     vosk_conf: Optional[float] = None
+    # gate_reason of a passed phrase ("agree+foreign_terms" when merged)
+    gate: Optional[str] = None
     asr_ms: Optional[float] = None
     llm_first_ms: Optional[float] = None
     llm_ms: Optional[float] = None
@@ -359,12 +376,14 @@ class TranslationSystem:
         self._asr_no_words = 0
         self._asr_merged = 0
         self._asr_held_flushed = 0
+        self._asr_echo = 0
         # Vosk cross-check (TASK-SYS-12)
         self._vosk_exec = ThreadPoolExecutor(2, thread_name_prefix="rt-vosk")
         self._vosk_state: Dict[str, Any] = {"mode": "off", "error": None}
         self._vosk_checked = 0
         self._vosk_gate_dropped = 0
         self._vosk_gate_disagree = 0  # of those: whisper and Vosk disagree
+        self._vosk_gate_foreign_terms = 0  # passed: only foreign-script words
         self._vosk_whisper_only = 0
         self._vosk_after_whisper = 0
         # whisper's last detected language: Vosk's language in auto mode
@@ -951,11 +970,17 @@ class TranslationSystem:
         lang = self.settings.source_language
         return None if lang == "auto" else lang
 
-    def _asr_prompt(self) -> Optional[str]:
+    def _asr_prompt(self) -> tuple[Optional[str], List[str]]:
+        """(whisper prompt, the previous words substituted into it)."""
         asr = self.settings.asr
-        return render_asr_prompt(
-            asr.prompt, list(self._recognized), asr.previous_words, self._language()
+        recognized = list(self._recognized)
+        prompt, used = render_asr_prompt_counted(
+            asr.prompt,
+            recognized,
+            asr.previous_words,
+            self._language(),
         )
+        return prompt, recognized[len(recognized) - used :]
 
     def _transcribe_segment(self, segment: Segment) -> None:
         audio = segment.audio
@@ -965,7 +990,7 @@ class TranslationSystem:
                 lambda c: c.transcribe(
                     audio,
                     language=self._language(),
-                    prompt=self._asr_prompt(),
+                    prompt=self._asr_prompt()[0],
                     priority="batch",
                     timeout_s=timeout_s,
                 )
@@ -996,7 +1021,7 @@ class TranslationSystem:
         """ASR stage (translate mode): whisper and Vosk in parallel, the
         gate, then the text (with its Vosk check) on to the LLM stage."""
         lang = self._language()
-        prompt = self._asr_prompt()
+        prompt, previous = self._asr_prompt()
         audio = phrase.segment.audio
         t0 = self._clock()
         # auto source language: Vosk runs in parallel in the language whisper
@@ -1015,29 +1040,37 @@ class TranslationSystem:
             )
         except ServiceError as e:
             self._service_error(e)
+            if future is not None:
+                future.cancel()
+            self._release_held("ASR error")
             return
         text = (result.text or "").strip()
-        if not self._has_words(text):
+        has_words = self._has_words(text)
+        if not has_words or self._is_echo(phrase, text, previous):
             phrase.asr_ms = _ms(self._clock() - t0)
             if future is not None:
                 future.cancel()
-            self._record_segment(
-                phrase, lang or result.language, text, None, "no_words"
-            )
+            why = "asr_echo" if has_words else "no_words"
+            self._record_segment(phrase, lang or result.language, text, None, why)
+            self._release_held(why)
             return
         src = lang or result.language
         if src:
             self._last_language = src
         vosk = self._vosk_result(future, audio, vosk_lang, src) if src else None
         phrase.asr_ms = _ms(self._clock() - t0)
-        reason = None if vosk is None else gate_reason(text, vosk.text)
+        reason = None if vosk is None else gate_reason(text, vosk.text, src)
         self._record_segment(phrase, src, text, vosk, reason)
         if vosk is not None:
             phrase.vosk_conf = mean_conf(vosk.words)
-        if reason is not None:
+        if reason in GATE_DROPS:
             assert vosk is not None
             self._gate_drop(phrase, text, vosk.text, reason)
+            self._release_held(f"gate {reason}")
             return
+        if reason == GATE_FOREIGN_TERMS:
+            self._vosk_gate_foreign_terms += 1
+        phrase.gate = reason
         self._recognized.extend(text.split())
         with self._lock:
             self._pending_recognized.append(
@@ -1062,6 +1095,21 @@ class TranslationSystem:
         elif self.settings.use.vosk != OFF:
             self._vosk_whisper_only += 1
         self._route_text(phrase, segment)
+
+    def _is_echo(self, phrase: _Phrase, text: str, previous: List[str]) -> bool:
+        """Whisper returned the previous words it was prompted with (§12
+        #20): dropped - counted, logged, emitted."""
+        if not is_prompt_echo(text, previous):
+            return False
+        self._asr_echo += 1
+        logger.info(
+            "phrase #{}: asr_echo -> dropped | whisper {!r} repeats the prompt's"
+            " previous words",
+            phrase.seq,
+            text,
+        )
+        self._emit({"status": "asr_echo", "original_text": text})
+        return True
 
     # -- Vosk cross-check (ASR stage) ----------------------------------------
 
@@ -1137,7 +1185,7 @@ class TranslationSystem:
             text,
             check,
             _fmt(phrase.vosk_conf),
-            _fmt(agreement(text, check)),
+            _fmt(agreement(text, check, phrase.src or self._last_language)),
         )
         self._emit(
             {
@@ -1188,7 +1236,9 @@ class TranslationSystem:
                     ]
                 ),
                 "vosk_conf": None if vosk is None else mean_conf(vosk.words),
-                "agreement": None if vosk is None else agreement(text, vosk.text),
+                "agreement": (
+                    None if vosk is None else agreement(text, vosk.text, language)
+                ),
                 "gate": "no_vosk" if vosk is None and gate is None else gate,
             },
         )
@@ -1201,13 +1251,14 @@ class TranslationSystem:
         mode = "whisper-only" if phrase.check is None else "two-text"
         hint = None if phrase.check is None else phrase.check.check_text
         logger.info(
-            "phrase #{}: gate pass | whisper {!r} | vosk {!r} (conf {}, agree {})"
-            " | llm {} | {} {!r}",
+            "phrase #{}: gate pass ({}) | whisper {!r} | vosk {!r} (conf {},"
+            " agree {}) | llm {} | {} {!r}",
             phrase.seq,
+            phrase.gate or "no_vosk",
             phrase.text,
             hint,
             _fmt(phrase.vosk_conf),
-            _fmt(None if hint is None else agreement(phrase.text, hint)),
+            _fmt(None if hint is None else agreement(phrase.text, hint, phrase.src)),
             mode,
             f"rejected ({rejected}):" if rejected else "->",
             translation,
@@ -1218,6 +1269,7 @@ class TranslationSystem:
                 phrase.seq,
                 {
                     "mode": mode,
+                    "gate": phrase.gate,
                     "text": phrase.text,
                     "hint": hint,
                     "translation": translation,
@@ -1249,6 +1301,15 @@ class TranslationSystem:
         end_silence = self.settings.segmentation.translate.end_silence_ms
         return (end_silence or 0) / 1000.0
 
+    def _hold_cap_s(self) -> float:
+        """Longest wait for a continuation even while speech goes on: the
+        pause that ends a phrase plus the length after which the segmenter
+        cuts at the first short pause - a continuation spoken right after
+        the held text is recognized by then (§12: a tail waited 20 s while
+        dropped segments kept the VAD "in speech")."""
+        cfg = self.settings.segmentation.translate
+        return ((cfg.end_silence_ms or 0) + cfg.soft_max_ms) / 1000.0
+
     def _route_text(self, phrase: _Phrase, segment: Segment) -> None:
         """Complete sentences go on to the LLM, an incomplete tail is held
         and prepended to the next recognized segment."""
@@ -1271,6 +1332,8 @@ class TranslationSystem:
                     ]
                     phrase.vosk_conf = sum(confs) / len(confs) if confs else None
                 start_s = self._held_start_s
+                if held.gate and held.gate != phrase.gate:
+                    phrase.gate = "+".join(g for g in (held.gate, phrase.gate) if g)
                 merged = True
                 self._asr_merged += 1
                 logger.info(
@@ -1279,8 +1342,7 @@ class TranslationSystem:
                     held.seq,
                     phrase.text,
                 )
-        cut = segment.reason in ("soft", "hard")
-        ready, rest = split_complete(phrase.text, cut)
+        ready, rest = split_complete(phrase.text)
         # one segment's tail is always held; a tail that already was held
         # and still has no sentence end after ``hard_max_ms`` is sent
         max_s = self.settings.segmentation.translate.hard_max_ms / 1000.0
@@ -1305,6 +1367,7 @@ class TranslationSystem:
                 src=phrase.src,
                 check=tail,
                 vosk_conf=phrase.vosk_conf,
+                gate=phrase.gate,
             )
             self._held.asr_ms = phrase.asr_ms
             self._held_since = time.monotonic()
@@ -1325,11 +1388,22 @@ class TranslationSystem:
     def _release_held_if_due(self) -> None:
         if self._held is None:
             return
-        if time.monotonic() - self._held_since < self._hold_wait_s():
+        waited = time.monotonic() - self._held_since
+        if waited < self._hold_wait_s():
+            return
+        if waited >= self._hold_cap_s():
+            self._flush_held(f"waited {waited:.1f} s >= {self._hold_cap_s():.1f} s")
             return
         if self._speech_in_progress():  # the continuation is being spoken
             return
         self._flush_held("no continuation")
+
+    def _release_held(self, why: str) -> None:
+        """The segment after a held tail was dropped: its speech is not a
+        continuation, so the tail goes on now (§12: dropped #19/#20 kept a
+        tail waiting)."""
+        if self._held is not None:
+            self._flush_held(f"next segment dropped: {why}")
 
     def _flush_held(self, why: str) -> None:
         """Send the held incomplete text alone - visibly."""
@@ -1398,9 +1472,7 @@ class TranslationSystem:
         pool = self._pools.tts
         assert pool is not None  # checked by the caller
         try:
-            pool.call(
-                lambda c: c.synthesize(TTS_WARMUP_TEXT, tts.voice, tts.speed)
-            )
+            pool.call(lambda c: c.synthesize(TTS_WARMUP_TEXT, tts.voice, tts.speed))
             info["url"] = (pool.active() or {}).get("url")
         except Exception as e:  # reported below
             info["error"] = f"{type(e).__name__}: {e}"
@@ -1562,6 +1634,7 @@ class TranslationSystem:
             "vosk_checked": self._vosk_checked,
             "vosk_gate_dropped": self._vosk_gate_dropped,
             "vosk_gate_disagree": self._vosk_gate_disagree,
+            "vosk_gate_foreign_terms": self._vosk_gate_foreign_terms,
             "vosk_whisper_only": self._vosk_whisper_only,
             "vosk_after_whisper": self._vosk_after_whisper,
             "session": self._session_snapshot(),
@@ -1577,6 +1650,7 @@ class TranslationSystem:
             "asr_no_words": self._asr_no_words,
             "asr_merged": self._asr_merged,
             "asr_held_flushed": self._asr_held_flushed,
+            "asr_echo": self._asr_echo,
             "playback_short": self._playback_short,
             "llm_warmup": dict(self._llm_warmup) if self._llm_warmup else None,
             "tts_warmup": dict(self._tts_warmup) if self._tts_warmup else None,

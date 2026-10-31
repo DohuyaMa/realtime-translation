@@ -37,12 +37,15 @@ from ...core.prompt import (
     DEFAULT_CHECK_SYSTEM_PROMPT,
     DEFAULT_CHECK_USER_TEMPLATE,
     DEFAULT_SYSTEM_PROMPT,
+    DEFAULT_TERMS,
     DEFAULT_USER_TEMPLATE,
     asr_prompt_errors,
     build_messages,
     check_template_errors,
     render_asr_prompt_counted,
+    parse_terms,
     split_words,
+    system_prompt_errors,
     template_errors,
 )
 from ...clients.model_status import ModelStatus, parse_status
@@ -80,7 +83,9 @@ PROMPT_VARIABLES_HELP = (
     "  {{vosk_text}} - текст Vosk того ж аудіо (лише зі звіркою; обов'язкова"
     " в її шаблоні)\n"
     "  {{source_lang}} - мова мовлення (Polish, Ukrainian, ...)\n"
-    "  {{target_lang}} - мова перекладу (English)"
+    "  {{target_lang}} - мова перекладу (English)\n"
+    "  {{terms}} - речення зі «Словника термінів» (лише в system prompt;"
+    " порожній словник - нічого)"
 )
 
 
@@ -853,7 +858,18 @@ class LlmTab(QWidget):
         self.check_system_prompt.setFixedHeight(110)
         self.check_user_template = QPlainTextEdit(llm.check_user_template)
         self.check_user_template.setFixedHeight(60)
-        reset = QPushButton("Типові prompt і шаблон")
+        # «Словник термінів» (services.llm.terms) -> {{terms}}
+        self.terms = QPlainTextEdit(", ".join(llm.terms))
+        self.terms.setFixedHeight(60)
+        self.terms.setPlaceholderText(
+            "Терміни через кому або з нового рядка (CRM, SaaS, Playwright)."
+            " Порожньо = без словника"
+        )
+        self.terms.setToolTip(
+            "Підставляється в system prompt замість {{terms}}: LLM перекладає"
+            " розчуті неправильно терміни як правильні англійські"
+        )
+        reset = QPushButton("Типові prompt, шаблон і словник")
         reset.clicked.connect(self.reset_prompts)
         self.temperature = QDoubleSpinBox()
         self.temperature.setRange(0.0, 2.0)
@@ -913,6 +929,7 @@ class LlmTab(QWidget):
         form.addRow(self.active_prompts)
         form.addRow(plain)
         form.addRow(check)
+        form.addRow("Словник термінів:", self.terms)
         form.addRow("Слів у {{text}} (максимум):", self.words_per_request)
         pause_row = QHBoxLayout()
         pause_row.addWidget(self.end_silence_ms)
@@ -928,6 +945,7 @@ class LlmTab(QWidget):
             self.user_template,
             self.check_system_prompt,
             self.check_user_template,
+            self.terms,
         ):
             w.textChanged.connect(self.update_preview)
         self.words_per_request.valueChanged.connect(self.update_preview)
@@ -987,7 +1005,7 @@ class LlmTab(QWidget):
         check_system = self.check_system_prompt.toPlainText().strip()
         check_template = self.check_user_template.toPlainText().strip()
         errors = (
-            template_errors("System prompt", system, False)
+            system_prompt_errors("System prompt", system)
             + template_errors("Шаблон", template, True)
             + check_template_errors("System prompt звірки", check_system, False)
             + check_template_errors("Шаблон звірки", check_template, True)
@@ -996,6 +1014,8 @@ class LlmTab(QWidget):
             self.preview.setPlainText("\n".join(errors))
             return
         chunks = split_words(PREVIEW_SAMPLE, self.words_per_request.value())
+        terms = parse_terms(self.terms.toPlainText())
+        head = build_messages(system, template, "", "pl", terms=terms)[0]["content"]
         pause = (
             "без паузи (лише soft/hard max)"
             if self.end_silence_off.isChecked()
@@ -1004,7 +1024,7 @@ class LlmTab(QWidget):
         lines = [
             f"[фраза йде в переклад: до {self.words_per_request.value()} слів"
             f" у {{{{text}}}} на запит, або {pause}; неповний запит не чекає]",
-            f"[system] {build_messages(system, template, '', 'pl')[0]['content']}",
+            f"[system] {head}",
         ]
         for n, chunk in enumerate(chunks, 1):
             user = build_messages(system, template, chunk, "pl")[-1]["content"]
@@ -1018,6 +1038,7 @@ class LlmTab(QWidget):
             PREVIEW_SAMPLE,
             "pl",
             check=PREVIEW_CHECK,
+            terms=terms,
         )
         lines.append(f"[звірка Vosk, system] {check[0]['content']}")
         lines.append(f"[звірка Vosk, запит] {check[-1]['content']}")
@@ -1028,6 +1049,7 @@ class LlmTab(QWidget):
         self.user_template.setPlainText(DEFAULT_USER_TEMPLATE)
         self.check_system_prompt.setPlainText(DEFAULT_CHECK_SYSTEM_PROMPT)
         self.check_user_template.setPlainText(DEFAULT_CHECK_USER_TEMPLATE)
+        self.terms.setPlainText(", ".join(DEFAULT_TERMS))
 
     def values(self) -> Dict[str, Any]:
         return {
@@ -1045,6 +1067,7 @@ class LlmTab(QWidget):
             "services.llm.max_tokens_cap": self.max_tokens_cap.value(),
             "services.llm.context_pairs": self.context_pairs.value(),
             "services.llm.words_per_request": self.words_per_request.value(),
+            "services.llm.terms": list(parse_terms(self.terms.toPlainText())),
             "segmentation.translate.end_silence_ms": (
                 None
                 if self.end_silence_off.isChecked()

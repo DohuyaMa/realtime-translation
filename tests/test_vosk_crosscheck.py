@@ -16,8 +16,11 @@ from src.clients.discovery import endpoints
 from src.clients.llm import LlmClient
 from src.clients.vosk import VoskClient, VoskResult, VoskWord
 from src.core.crosscheck import (
+    GATE_AGREE,
     GATE_DISAGREE,
+    GATE_FOREIGN_TERMS,
     GATE_NO_WORD,
+    GATE_SHORT_WORDS,
     Aligned,
     agreement,
     gate_reason,
@@ -522,23 +525,23 @@ HALLUCINATIONS = [
 
 @pytest.mark.parametrize("whisper,vosk", OWNER_LINES)
 def test_gate_keeps_real_speech_with_garbled_vosk(whisper, vosk):
-    assert gate_reason(whisper, vosk) is None
-    assert agreement(whisper, vosk) > 0
+    assert gate_reason(whisper, vosk, "uk") == GATE_AGREE
+    assert agreement(whisper, vosk, "uk") > 0
 
 
 @pytest.mark.parametrize("whisper,vosk", HALLUCINATIONS)
 def test_gate_drops_whisper_phrase_vosk_disagrees_with(whisper, vosk):
-    assert gate_reason(whisper, vosk) == GATE_DISAGREE
-    assert agreement(whisper, vosk) == 0.0
+    assert gate_reason(whisper, vosk, "uk") == GATE_DISAGREE
+    assert agreement(whisper, vosk, "uk") == 0.0
 
 
 def test_gate_silence_and_short_words():
-    assert gate_reason("Дякую за перегляд!", "е") == GATE_NO_WORD
+    assert gate_reason("Дякую за перегляд!", "е", "uk") == GATE_NO_WORD
     # whisper without a word of >= 3 letters: no evidence, kept
-    assert agreement("Ну, ок.", "та") is None
-    assert gate_reason("Ну, ок.", "та") is None
+    assert agreement("Ну, ок.", "та", "uk") is None
+    assert gate_reason("Ну, ок.", "та", "uk") == GATE_SHORT_WORDS
     # split Vosk words still agree («інформа ції»)
-    assert agreement("Інформації.", "інформа ції") == 1.0
+    assert agreement("Інформації.", "інформа ції", "uk") == 1.0
 
 
 def test_mean_conf():
@@ -630,7 +633,7 @@ def test_session_recording_writes_wav_and_jsonl(tmp_path):
         json.loads(x) for x in (session / "phrases.jsonl").read_text().splitlines()
     ]
     segs = [x for x in lines if x["type"] == "segment"]
-    assert [x["gate"] for x in segs] == [GATE_DISAGREE, None]
+    assert [x["gate"] for x in segs] == [GATE_DISAGREE, GATE_AGREE]
     assert segs[1]["vosk"] == "добрий день" and segs[1]["vosk_conf"] == 1.0
     assert segs[1]["vosk_words"][0]["word"] == "добрий"
     (tr,) = [x for x in lines if x["type"] == "translation"]
@@ -707,3 +710,72 @@ def test_gate_and_record_events_are_described():
         {"status": "session_record", "path": None, "error": "PermissionError: x"}
     )
     assert level == "ERROR"
+
+
+# -- live test §12: Latin terms against a uk Vosk model (rt-app log 21:15:07)
+
+S19 = (
+    "CPress, Stack, TypeScript, React, SGS, NodeJS, Python, PostgreSQL, Redis,"
+    " Docker..."
+)
+V19 = "єс поступ із доки"
+
+
+def test_latin_terms_do_not_count_against_a_cyrillic_vosk_model():
+    # was: agree 0.00 -> gate disagree -> dropped
+    assert agreement(S19, V19, "uk") is None
+    assert gate_reason(S19, V19, "uk") == GATE_FOREIGN_TERMS
+    # a Latin-script model hears Latin words: they count there
+    assert gate_reason(S19, "dzień dobry wszystkim", "pl") == GATE_DISAGREE
+    # ... and a pl model cannot write Cyrillic
+    assert gate_reason("Привіт, я Ярослав.", "dzień dobry", "pl") == (
+        GATE_FOREIGN_TERMS
+    )
+    # unknown language: no script rule
+    assert gate_reason(S19, V19, None) == GATE_DISAGREE
+    # mixed line (21:14:24): only the Cyrillic words are compared
+    assert (
+        gate_reason(
+            "Привіт, я Ярослав, FullStack Ingenier.", "привід так інженер", "uk"
+        )
+        == GATE_AGREE
+    )
+    # a Cyrillic hallucination is still dropped next to Latin words
+    assert gate_reason("Дякую за перегляд! Docker", "що можна зробити", "uk") == (
+        GATE_DISAGREE
+    )
+
+
+def test_terms_segment_passes_merges_and_echo_releases_it():
+    """§12 #18-#20: #18 held (ellipsis), #19 (stack list) passed as
+    foreign_terms and merged, #20 (whisper echo of #16, Vosk empty) dropped
+    as asr_echo - which sends the held text at once."""
+    s16 = "Платформу Гараш між бар'єрами, агенція та..."
+    s18 = "сайти і веб-додатки для бізнесу, плюс авто-тестер, плейврайд..."
+    asr = SlowAsr([AsrResult(s16 + " Ок.", "uk"), AsrResult(s18, "uk")], 0)
+    asr.results += [AsrResult(S19, "uk"), AsrResult(s16, "uk")]
+    vosk = FakeVosk(
+        [
+            VoskResult("формула з бар'єрами агенція ок", "uk", words("формула з")),
+            VoskResult("сайти для бізнесу", "uk", words("сайти для бізнесу")),
+            VoskResult(V19, "uk", words(V19)),
+            VoskResult("", "uk"),
+        ]
+    )
+    ts, vads, capture, llm, events = system(asr, vosk)
+    assert ts.start()
+    try:
+        vads[-1].speaking = True
+        for s in (seg(0, 3), seg(3, 6), seg(6, 9), seg(9, 12)):
+            vads[-1].pending.append(s)
+            capture.push()
+            time.sleep(0.02)
+        assert wait_for(lambda: len(llm.calls) == 2, timeout=2)
+        stats = ts.get_stats()
+    finally:
+        ts.stop()
+    assert llm.calls == [f"{s16} Ок.", f"{s18} {S19}"]
+    assert llm.checks[1] == f"сайти для бізнесу {V19}"
+    assert stats["vosk_gate_foreign_terms"] == 1
+    assert stats["vosk_gate_dropped"] == 0 and stats["asr_echo"] == 1
+    assert any(e.get("status") == "asr_echo" for e in events)

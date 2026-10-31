@@ -130,8 +130,10 @@ PIPELINE_COUNTERS = {
     "playback_short": "відтворень, коротших за аудіо",
     "asr_merged": "незавершених фраз склеєно з наступними",
     "asr_held_flushed": "незавершених фраз надіслано окремо",
+    "asr_echo": "відкинуто повторів попереднього тексту (ехо prompt whisper)",
     "vosk_gate_dropped": "відкинуто як галюцинацію whisper (звірка Vosk)",
     "vosk_gate_disagree": "з них: whisper не збігся з Vosk",
+    "vosk_gate_foreign_terms": "пропущено звіркою: лише іноземні терміни",
     "vosk_whisper_only": "без звірки Vosk (недоступний)",
 }
 

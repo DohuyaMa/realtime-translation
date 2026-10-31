@@ -346,6 +346,13 @@ def test_asr_output_without_words_never_reaches_llm(text):
         ts.stop()
 
 
+OTHER_SOURCE = (
+    "Відкрийте файл PDF і натисніть примітки. Виберіть стиль і колір ручки"
+    " або маркера. Напишіть примітку або поставте підпис і натисніть"
+    " зберегти, щоб завершити роботу з документом сьогодні."
+)
+
+
 def test_long_translation_plays_every_sentence_even_when_next_phrase_comes():
     # live test 2026-10-31 §1: a 3-sentence reply was shown whole but heard
     # only up to "Okay, you impressed us, but"; the edge must hand every
@@ -366,7 +373,9 @@ def test_long_translation_plays_every_sentence_even_when_next_phrase_comes():
         " знайшлася. На самому слові медіа модель відповідала правильно."
         " Збійде її розпізнавати, коли повертає текст без жодної літери."
     )
-    asr = SlowAsr([AsrResult(source, "uk"), AsrResult(source, "uk")], 0.0)
+    # the second phrase differs: a verbatim repeat of the prompt's
+    # previous words is dropped as a whisper echo (live test §12 #20)
+    asr = SlowAsr([AsrResult(source, "uk"), AsrResult(OTHER_SOURCE, "uk")], 0.0)
     llm = SlowLlm(0.0, sentences=reply)
     tts = SlowTts(0.0)
     ts, vads, capture = system(asr, llm, tts, sink)

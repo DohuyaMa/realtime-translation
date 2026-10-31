@@ -40,6 +40,11 @@ def describe_pipeline_event(event: Dict) -> Optional[Tuple[str, str]]:
             f"Vosk не чув слів ({event.get('check_text') or 'тиша'!r}) -"
             f" не перекладено: «{event.get('original_text') or ''}»"
         )
+    if status == "asr_echo":
+        return "INFO", (
+            "Whisper повторив попередній текст (ехо prompt) - не перекладено:"
+            f" «{event.get('original_text') or ''}»"
+        )
     if status == "session_record":
         if event.get("error"):
             return "ERROR", f"Запис сесії не працює: {event['error']}"

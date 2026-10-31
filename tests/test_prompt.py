@@ -5,6 +5,7 @@ from src.core.prompt import (
     build_messages,
     is_legacy,
     split_words,
+    system_prompt_errors,
     template_errors,
 )
 from src.core.runtime import LlmSettings, EdgeSettings, resolve_edge_settings
@@ -18,7 +19,9 @@ def test_template_validation():
     (err,) = template_errors("t", "{{text}} {{lang}}", True)
     assert "unknown placeholder(s) lang" in err
     assert any("old placeholder" in e for e in template_errors("t", "{text}", True))
-    assert template_errors("s", DEFAULT_SYSTEM_PROMPT, False) == []
+    assert system_prompt_errors("s", DEFAULT_SYSTEM_PROMPT) == []
+    # {{terms}} is for system prompts only
+    assert template_errors("s", "{{text}} {{terms}}", True)
     assert is_legacy("x {lang}") and not is_legacy("x {{source_lang}}")
 
 
@@ -151,11 +154,64 @@ def test_asr_settings_resolve_and_validate():
 
 def test_default_system_prompt_forbids_untranslated_words():
     # live test 2026-10-31 §2-§4: "Chikaie DOKI", "Promd", ("Niшки")
-    from src.core.prompt import DEFAULT_SYSTEM_PROMPT, render
+    from src.core.prompt import DEFAULT_SYSTEM_PROMPT, build_messages
 
-    text = render(
-        DEFAULT_SYSTEM_PROMPT, {"source_lang": "Ukrainian", "target_lang": "English"}
-    )
+    text = build_messages(DEFAULT_SYSTEM_PROMPT, "{{text}}", "x", "uk")[0]["content"]
     assert "Never keep or transliterate a source word" in text
     assert "no Ukrainian words or letters" in text
     assert "{{" not in text
+
+
+# -- whisper echo (live test §12 #20) and the LLM glossary {{terms}} ---------
+
+
+def test_prompt_echo():
+    from src.core.prompt import is_prompt_echo
+
+    previous = (
+        "Кіберспортивний додаток для прогнозів на матчі Трімове ТВА. Платформу"
+        " Гараш між бар'єрами, агенція та... сайти і веб-додатки для бізнесу"
+    ).split()
+    assert is_prompt_echo("Платформу Гараш між бар'єрами, агенція та...", previous)
+    # one word misheard is still an echo
+    assert is_prompt_echo("Платформа Гараш між бар'єрами, агенція та.", previous)
+    assert not is_prompt_echo("Так, дякую.", "Так, дякую.".split())  # too short
+    # new speech sharing a few scattered words is not an echo
+    assert not is_prompt_echo("Що я шукаю? Сайти для бізнесу і команди.", previous)
+    assert not is_prompt_echo("Платформу Гараш між бар'єрами", [])
+
+
+def test_terms_render_only_when_present():
+    from src.core.prompt import DEFAULT_CHECK_SYSTEM_PROMPT, parse_terms
+
+    assert parse_terms("CRM, SaaS\nPlaywright,, crm , CS2") == (
+        "CRM",
+        "SaaS",
+        "Playwright",
+        "CS2",
+    )
+    for prompt in (DEFAULT_SYSTEM_PROMPT, DEFAULT_CHECK_SYSTEM_PROMPT):
+        with_terms = build_messages(prompt, "{{text}}", "x", "uk", terms=("CRM",))
+        assert with_terms[0]["content"].endswith(
+            "Known terms (always written in English): CRM."
+        )
+        assert "about IT" in with_terms[0]["content"]
+        bare = build_messages(prompt, "{{text}}", "x", "uk")[0]["content"]
+        assert "{{" not in bare and "Known terms" not in bare
+        assert bare.endswith("English term.")
+    mid = build_messages("A {{terms}} B\n{{terms}}\nC", "{{text}}", "x", "uk")
+    assert mid[0]["content"] == "A B\n\nC"
+
+
+def test_terms_config_and_validation():
+    from src.core.prompt import DEFAULT_TERMS
+
+    def terms(cfg):
+        return resolve_edge_settings({"services": {"llm": cfg}}, {}).llm.terms
+
+    assert terms({}) == DEFAULT_TERMS and "Playwright" in DEFAULT_TERMS
+    assert terms({"terms": ""}) == ()
+    assert terms({"terms": ["CRM", "SaaS"]}) == ("CRM", "SaaS")
+    assert terms({"terms": "CRM, медіабаєри"}) == ("CRM", "медіабаєри")
+    s = EdgeSettings(llm=LlmSettings(user_template="{{text}} {{terms}}"))
+    assert any("terms" in e for e in s.validate())

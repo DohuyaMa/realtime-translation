@@ -149,7 +149,13 @@ class LlmClient:
                 part, rest = rest.cut(len(chunk.split()))
                 chunk_check = part.check_text
             messages = build_messages(
-                system, template, chunk, source_lang, ctx, check=chunk_check
+                system,
+                template,
+                chunk,
+                source_lang,
+                ctx,
+                check=chunk_check,
+                terms=s.terms,
             )
             parts = []
             for sentence in self._complete_stream(messages, chunk):

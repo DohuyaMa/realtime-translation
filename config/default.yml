@@ -59,6 +59,10 @@ services:
     # whole; Vosk = HINT, fixes misheard words: "TEXT: {{text}}\nHINT: {{vosk_text}}").
     check_system_prompt: ""
     check_user_template: ""
+    # «Словник термінів»: {{terms}} of both system prompts ("Known terms (always
+    # written in English): ..."). null = built-in IT list; "" = none; list or
+    # "a, b" / one per line
+    terms: null
 
 segmentation:
   translate:                    # SegmenterConfig fields (phrase-sized segments)

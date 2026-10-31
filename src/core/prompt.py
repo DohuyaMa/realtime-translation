@@ -2,19 +2,117 @@
 
 Placeholders use double braces: ``{{text}}`` (required in the phrase
 template: where the words of one request go), ``{{source_lang}}``,
-``{{target_lang}}``. The single-brace ``{lang}`` / ``{text}`` syntax of
-older configs is not supported: such a value is reported and the default
-template is used instead.
+``{{target_lang}}``; system prompts also take ``{{terms}}`` (the user's
+glossary as one sentence, or nothing when the glossary is empty). The
+single-brace ``{lang}`` / ``{text}`` syntax of older configs is not
+supported: such a value is reported and the default template is used
+instead.
 """
 
 from __future__ import annotations
 
 import re
-from typing import Mapping
+from difflib import SequenceMatcher
+from typing import Mapping, Sequence
+
+from .crosscheck import words as letter_words
 
 PLACEHOLDERS = ("text", "source_lang", "target_lang")
 # two-text (Vosk cross-check) templates also get the Vosk transcript
 CHECK_PLACEHOLDERS = PLACEHOLDERS + ("vosk_text",)
+# system prompts only: the glossary sentence (empty glossary -> "")
+TERMS = "terms"
+TERMS_SENTENCE = "Known terms (always written in English): {}."
+# Both default system prompts: the owner speaks about IT; whisper writes IT
+# terms in Cyrillic or mishears them (live test 2026-10-31 §12).
+IT_DOMAIN = (
+    " The speech is about IT and software development. IT terms often arrive"
+    " as Cyrillic transliterations or misrecognitions of English terms (e.g."
+    " «церен» = CRM, «плейврайд» = Playwright, «SAS» = SaaS, «медиабарієри» ="
+    " media buyers, «деплой» = deploy): translate each one as the correct"
+    " English term."
+)
+
+# «Словник термінів» (services.llm.terms): given to the LLM as {{terms}}
+# (whisper's prompt stays as it was - owner 2026-10-31). Common IT terms:
+# the owner's speech is about IT (live test §12).
+DEFAULT_TERMS = (
+    "API",
+    "backend",
+    "frontend",
+    "full-stack",
+    "DevOps",
+    "CI/CD",
+    "Git",
+    "GitHub",
+    "pull request",
+    "merge",
+    "deploy",
+    "release",
+    "production",
+    "staging",
+    "Docker",
+    "Kubernetes",
+    "cloud",
+    "AWS",
+    "Linux",
+    "NixOS",
+    "database",
+    "PostgreSQL",
+    "Redis",
+    "SQL",
+    "Python",
+    "TypeScript",
+    "JavaScript",
+    "React",
+    "Next.js",
+    "Node.js",
+    "Django",
+    "REST",
+    "JSON",
+    "LLM",
+    "AI",
+    "ML",
+    "SaaS",
+    "CRM",
+    "MVP",
+    "UI",
+    "UX",
+    "QA",
+    "Playwright",
+    "Cypress",
+    "Jira",
+    "Scrum",
+    "sprint",
+    "тікет",
+    "баг",
+    "фіча",
+    "реліз",
+    "деплой",
+    "бекенд",
+    "фронтенд",
+    "стек",
+    "фреймворк",
+)
+
+
+def parse_terms(value) -> tuple[str, ...]:
+    """Glossary from config/UI: a list, or text with terms separated by
+    commas or new lines; blanks and repeats dropped (first spelling kept)."""
+    items = re.split(r"[,\n]", value) if isinstance(value, str) else list(value)
+    seen: dict[str, str] = {}
+    for item in items:
+        term = " ".join(str(item).split())
+        if term and term.lower() not in seen:
+            seen[term.lower()] = term
+    return tuple(seen.values())
+
+
+def terms_sentence(terms: Sequence[str]) -> str:
+    """{{terms}}: one sentence naming the glossary, "" when it is empty."""
+    return TERMS_SENTENCE.format(", ".join(terms)) if terms else ""
+
+
 TARGET_LANG = "English"
 LANGUAGE_NAMES = {"pl": "Polish", "uk": "Ukrainian", "ru": "Russian", "en": "English"}
 
@@ -30,7 +128,7 @@ DEFAULT_SYSTEM_PROMPT = (
     "context. Never keep or transliterate a source word you cannot "
     "translate: restore the intended word from context or leave it out. "
     "Never add content that is not in the message. Write only "
-    "{{target_lang}} - no {{source_lang}} words or letters."
+    "{{target_lang}} - no {{source_lang}} words or letters." + IT_DOMAIN + " {{terms}}"
 )
 DEFAULT_USER_TEMPLATE = "{{text}}"
 
@@ -53,6 +151,8 @@ DEFAULT_CHECK_SYSTEM_PROMPT = (
     " translate HINT words that have no counterpart in TEXT. Never"
     " transliterate. Short fragments are translated as-is. Output only the"
     " {{target_lang}} translation - no comments, no {{source_lang}} words."
+    + IT_DOMAIN
+    + " {{terms}}"
 )
 DEFAULT_CHECK_USER_TEMPLATE = "TEXT: {{text}}\nHINT: {{vosk_text}}"
 DEFAULT_WORDS_PER_REQUEST = 40
@@ -95,20 +195,39 @@ def template_errors(
     return errors
 
 
+def system_prompt_errors(name: str, template: str) -> list[str]:
+    """Plain system prompt: the phrase placeholders plus {{terms}}."""
+    return template_errors(name, template, False, PLACEHOLDERS + (TERMS,))
+
+
 def check_template_errors(name: str, template: str, user: bool) -> list[str]:
     """Two-text (Vosk cross-check) template: may use {{vosk_text}}; the user
-    template must carry both transcripts."""
+    template must carry both transcripts; the system prompt may use
+    {{terms}}."""
     return template_errors(
         name,
         template,
         require_text=user,
-        allowed=CHECK_PLACEHOLDERS,
+        allowed=CHECK_PLACEHOLDERS + (() if user else (TERMS,)),
         required=("vosk_text",) if user else (),
     )
 
 
 def render(template: str, values: Mapping[str, str]) -> str:
     return _PLACEHOLDER.sub(lambda m: values.get(m.group(1), m.group(0)), template)
+
+
+def render_system(
+    template: str, values: Mapping[str, str], terms: Sequence[str]
+) -> str:
+    """System prompt: {{terms}} = ``terms_sentence``; an empty glossary
+    leaves no blank behind (``... letters. {{terms}}`` -> ``... letters.``)."""
+    sentence = terms_sentence(terms)
+    out = render(template, {**values, TERMS: sentence})
+    if not sentence:
+        out = re.sub(r"[ \t]*\{\{\s*terms\s*\}\}[ \t]*", " ", template)
+        out = re.sub(r" +(?=\n|$)", "", render(out, {**values, TERMS: ""}))
+    return out.strip()
 
 
 def split_words(text: str, limit: int) -> list[str]:
@@ -138,12 +257,14 @@ def build_messages(
     source_lang: str,
     context: tuple[tuple, ...] = (),
     check: str | None = None,
+    terms: Sequence[str] = (),
 ) -> list[dict]:
     """Chat messages for one request (``chunk`` = up to words_per_request).
 
     ``check``: the Vosk transcript of the chunk ({{vosk_text}}, two-text
     mode). Context items are ``(source, translation)`` or, in two-text mode,
-    ``(source, translation, check)``."""
+    ``(source, translation, check)``. ``terms``: the glossary ({{terms}} of
+    the system prompt)."""
 
     def values(text: str, vosk_text: str = "") -> dict:
         return {
@@ -153,7 +274,8 @@ def build_messages(
             "target_lang": TARGET_LANG,
         }
 
-    messages = [{"role": "system", "content": render(system_prompt, values(""))}]
+    system = render_system(system_prompt, values(""), terms)
+    messages = [{"role": "system", "content": system}]
     for item in context:
         src, tr = item[0], item[1]
         chk = item[2] if len(item) > 2 else ""
@@ -222,3 +344,27 @@ def render_asr_prompt_counted(
         if len(text) <= max_chars or not words:
             return text or None, len(words)
         words.pop(0)
+
+
+# -- Whisper echo of its own prompt -------------------------------------------
+
+# On noise/silence whisper may "recognize" its prompt: §12 #20 repeated #16
+# word for word from {{previous_text}}. An echo is a whisper text of at least
+# ECHO_MIN_WORDS words of which >= ECHO_MIN_SHARE appear, in order, in the
+# previous words sent with the request, with one run of >= ECHO_MIN_WORDS
+# consecutive words (scattered common words are not an echo).
+ECHO_MIN_WORDS = 3
+ECHO_MIN_SHARE = 0.8
+
+
+def is_prompt_echo(text: str, previous_words: Sequence[str]) -> bool:
+    """``text`` (whisper) repeats the previous words it was prompted with."""
+    ww = letter_words(text)
+    if len(ww) < ECHO_MIN_WORDS:
+        return False
+    pw = letter_words(" ".join(previous_words))
+    blocks = SequenceMatcher(None, ww, pw, autojunk=False).get_matching_blocks()
+    longest = max((b.size for b in blocks), default=0)
+    return longest >= ECHO_MIN_WORDS and sum(
+        b.size for b in blocks
+    ) >= ECHO_MIN_SHARE * len(ww)

@@ -12,9 +12,11 @@ Rules:
 * A word ends a sentence when, without closing quotes/brackets, it ends with
   ``.``, ``!`` or ``?`` - but not with an ellipsis (``..`` / ``…``): an
   ellipsis is speech trailing off, not an end.
-* ``cut=True`` (the segment was cut without a sentence-ending pause): the
-  last sentence is held too, even with a full stop - Whisper punctuates the
-  end of every segment it gets.
+* A full stop at the end of a segment cut without a pause (``soft`` /
+  ``hard``) is trusted like any other: holding it cost +9 s per cut (§11)
+  and in the live logs (§11/§12) whisper's period at a cut was a real
+  sentence end in 10 of 11 cuts; the one wrong period («натисніть. |
+  Зберегти.») came out the same with the hold («press. Save.»).
 """
 
 from __future__ import annotations
@@ -29,12 +31,10 @@ def ends_sentence(word: str) -> bool:
     return w[-1] in ".!?"
 
 
-def split_complete(text: str, cut: bool = False) -> tuple[str, str]:
+def split_complete(text: str) -> tuple[str, str]:
     """``(complete sentences, incomplete tail)`` of ``text``; either may be
     empty. The two parts joined by a space give the normalized text back."""
     words = text.split()
     ends = [i + 1 for i, w in enumerate(words) if ends_sentence(w)]
     complete = ends[-1] if ends else 0
-    if cut and complete == len(words):
-        complete = ends[-2] if len(ends) > 1 else 0
     return " ".join(words[:complete]), " ".join(words[complete:])

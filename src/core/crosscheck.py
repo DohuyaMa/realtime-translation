@@ -10,7 +10,12 @@ model is sparse and garbled). Two pieces of logic live here, both pure:
   (silence/noise), or not one whisper word of >= 3 letters agrees
   (fuzzy) with a Vosk word. Any agreement keeps the WHOLE whisper text:
   Vosk is sparse and garbled (live test 2026-10-31 §10), so it may veto a
-  phrase but never delete words from it.
+  phrase but never delete words from it. Whisper words written in another
+  script than the Vosk model's language (Latin «TypeScript, Docker» for a
+  uk model, Cyrillic for a pl model) are not evidence either way: the
+  model cannot spell them, so they never count against agreement (§12 #19
+  was dropped as ``disagree``); a segment of only such words passes
+  (``foreign_terms``).
 - ``Aligned``: both transcripts placed on the stream timeline, so the
   incomplete-sentence hold (``split_complete`` on whisper's punctuation) can
   cut the Vosk text at the same moment: Vosk words carry their own times,
@@ -20,6 +25,7 @@ model is sparse and garbled). Two pieces of logic live here, both pure:
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from typing import Optional, Sequence
@@ -33,9 +39,20 @@ AGREE_MIN_LETTERS = 3
 # Vosk nano/small on espeak audio) from hallucinations (0.0) in the
 # 2026-10-31 test (context/live-test-2026-10-31.md §10)
 AGREE_WORD_SIMILARITY = 0.67
-# gate_reason values
+# gate_reason values: the segment is dropped ...
 GATE_NO_WORD = "no_word"
 GATE_DISAGREE = "disagree"
+GATE_DROPS = (GATE_NO_WORD, GATE_DISAGREE)
+# ... or passes: some whisper word agrees with Vosk / every long whisper
+# word is in a script the Vosk model cannot write / no whisper word of
+# AGREE_MIN_LETTERS letters (no evidence, kept)
+GATE_AGREE = "agree"
+GATE_FOREIGN_TERMS = "foreign_terms"
+GATE_SHORT_WORDS = "short_words"
+
+# alphabet of a Vosk model per language; a language missing here has no
+# script rule (every whisper word counts)
+LANGUAGE_SCRIPTS = {"uk": "CYRILLIC", "ru": "CYRILLIC", "pl": "LATIN", "en": "LATIN"}
 
 _WORD = re.compile(r"[^\W\d_]+(?:['’ʼ][^\W\d_]+)*")
 
@@ -53,11 +70,32 @@ def words(text: str) -> list[str]:
     return [w.replace("’", "'").replace("ʼ", "'") for w in _WORD.findall(text.lower())]
 
 
-def agreement(whisper: str, vosk: str) -> Optional[float]:
-    """Letter-weighted share of whisper words (>= AGREE_MIN_LETTERS) that
-    fuzzily match a Vosk word or two adjacent Vosk words joined (Vosk splits
-    words: «інформа ції»). None = whisper has no such word (no evidence)."""
-    ww = [w for w in words(whisper) if len(w) >= AGREE_MIN_LETTERS]
+def script(word: str) -> Optional[str]:
+    """Unicode script of a word's letters (CYRILLIC, LATIN, ...); None when
+    it mixes scripts."""
+    found = {unicodedata.name(ch, "?").split(" ")[0] for ch in word if ch.isalpha()}
+    return found.pop() if len(found) == 1 else None
+
+
+def long_words(whisper: str) -> list[str]:
+    return [w for w in words(whisper) if len(w) >= AGREE_MIN_LETTERS]
+
+
+def countable_words(whisper: str, language: Optional[str]) -> list[str]:
+    """Long whisper words the Vosk model of ``language`` could have heard:
+    words in another script than the model's are left out."""
+    model = LANGUAGE_SCRIPTS.get(language or "")
+    return [
+        w for w in long_words(whisper) if model is None or script(w) in (None, model)
+    ]
+
+
+def agreement(whisper: str, vosk: str, language: Optional[str]) -> Optional[float]:
+    """Letter-weighted share of countable whisper words (>= AGREE_MIN_LETTERS,
+    in the Vosk model's script) that fuzzily match a Vosk word or two
+    adjacent Vosk words joined (Vosk splits words: «інформа ції»). None =
+    whisper has no such word (no evidence)."""
+    ww = countable_words(whisper, language)
     if not ww:
         return None
     vv = words(vosk)
@@ -78,17 +116,21 @@ def mean_conf(vosk_words: Sequence) -> Optional[float]:
     return sum(confs) / len(confs) if confs else None
 
 
-def gate_reason(whisper: str, vosk: str) -> Optional[str]:
-    """Why the segment is dropped before the LLM, or None (translated whole).
+def gate_reason(whisper: str, vosk: str, language: Optional[str]) -> str:
+    """The gate decision for one segment; dropped iff in GATE_DROPS.
 
     Only clear hallucination is dropped: no real Vosk word (GATE_NO_WORD) or
-    zero agreement (GATE_DISAGREE). A whisper text without long words
-    (agreement None) is kept when Vosk heard a word."""
+    zero agreement (GATE_DISAGREE). Passed: GATE_AGREE, GATE_FOREIGN_TERMS
+    (only words the ``language`` Vosk model cannot write), GATE_SHORT_WORDS
+    (no long whisper word; kept when Vosk heard a word)."""
     if not has_real_word(vosk):
         return GATE_NO_WORD
-    if agreement(whisper, vosk) == 0.0:
+    share = agreement(whisper, vosk, language)
+    if share == 0.0:
         return GATE_DISAGREE
-    return None
+    if share is not None:
+        return GATE_AGREE
+    return GATE_FOREIGN_TERMS if long_words(whisper) else GATE_SHORT_WORDS
 
 
 def whisper_word_times(
