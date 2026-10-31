@@ -69,9 +69,10 @@ class FakePool:
 
 
 class FakePools:
-    def __init__(self, asr, tts=None):
+    def __init__(self, asr, tts=None, vosk=None):
         self.asr = FakePool(asr, "http://asr")
         self.tts = FakePool(tts, "http://tts") if tts is not None else None
+        self.vosk = FakePool(vosk, "http://vosk") if vosk is not None else None
 
     def by_name(self):
         return {"asr": self.asr, "tts": self.tts}
@@ -85,7 +86,7 @@ class FakeLlm:
         self.errors = list(errors)
         self.calls = []
 
-    def translate(self, text, source_lang, context=()):
+    def translate(self, text, source_lang, context=(), check=None):
         self.calls.append((text, source_lang, list(context)))
         if self.errors:
             err = self.errors.pop(0)
@@ -93,7 +94,7 @@ class FakeLlm:
                 raise err
         return f"EN({text})"
 
-    def translate_stream(self, text, source_lang, context=()):
+    def translate_stream(self, text, source_lang, context=(), check=None):
         yield self.translate(text, source_lang, context)
 
     base_url = "http://llm"
@@ -284,10 +285,11 @@ def test_translate_flow_calls_asr_llm_tts_and_playback():
     assert stats["llm_requests"] == 1 and stats["llm_errors"] == 0
     assert stats["active"] == {
         "asr": {"url": "http://asr"},
+        "vosk": None,
         "tts": {"url": "http://tts"},
     }
     assert stats["discovery"] == "none"
-    assert stats["use"] == {"llm": None, "asr": None, "tts": None}
+    assert stats["use"] == {"llm": None, "asr": None, "tts": None, "vosk": None}
     assert {c["url"] for c in stats["choices"]["tts"]} == {"http://tts"}
 
 

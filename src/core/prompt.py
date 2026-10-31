@@ -13,6 +13,8 @@ import re
 from typing import Mapping
 
 PLACEHOLDERS = ("text", "source_lang", "target_lang")
+# two-text (Vosk cross-check) templates also get the Vosk transcript
+CHECK_PLACEHOLDERS = PLACEHOLDERS + ("text_check",)
 TARGET_LANG = "English"
 LANGUAGE_NAMES = {"pl": "Polish", "uk": "Ukrainian", "ru": "Russian", "en": "English"}
 
@@ -31,6 +33,25 @@ DEFAULT_SYSTEM_PROMPT = (
     "{{target_lang}} - no {{source_lang}} words or letters."
 )
 DEFAULT_USER_TEMPLATE = "{{text}}"
+
+# TASK-SYS-12: two-text mode - the same audio recognized by whisper ({{text}},
+# FLUENT) and Vosk ({{text_check}}, EXACT). Prompt "B3" won the simulated
+# test on the real LLM (swarm-nix system-conf/context/tasks.md, TASK-SYS-12
+# "Результат перевірки (2026-10-31)"): compact, Vosk first, neutral labels.
+# Silence is dropped by code before the LLM (gate), never by the model.
+DEFAULT_CHECK_SYSTEM_PROMPT = (
+    "You are a live {{source_lang}}-to-{{target_lang}} interpreter. The user"
+    " message has two transcripts of the same audio. EXACT: never invents"
+    " words but misspells them, no punctuation; empty = silence. FLUENT:"
+    " correct spelling, but may hallucinate a phrase that was never spoken"
+    ' (e.g. "Дякую за перегляд!", "Субтитри зроблені спільнотою Amara.org").'
+    " Words count as spoken only if EXACT contains them (maybe misspelled);"
+    " use FLUENT only to fix their spelling and punctuation. If EXACT is empty"
+    " or has no real word, output nothing. Translate only the spoken words"
+    " into natural {{target_lang}}; short fragments are translated as-is."
+    " Output only the translation - no comments, no {{source_lang}} words."
+)
+DEFAULT_CHECK_USER_TEMPLATE = "EXACT: {{text_check}}\nFLUENT: {{text}}"
 DEFAULT_WORDS_PER_REQUEST = 40
 
 _PLACEHOLDER = re.compile(r"\{\{\s*([A-Za-z_]+)\s*\}\}")
@@ -48,6 +69,7 @@ def template_errors(
     template: str,
     require_text: bool,
     allowed: tuple[str, ...] = PLACEHOLDERS,
+    required: tuple[str, ...] = (),
 ) -> list[str]:
     errors = []
     if is_legacy(template):
@@ -64,7 +86,22 @@ def template_errors(
         )
     if require_text and "text" not in names:
         errors.append(f"{name} must contain {{{{text}}}} (where the words go)")
+    for extra in required:
+        if extra not in names:
+            errors.append(f"{name} must contain {{{{{extra}}}}}")
     return errors
+
+
+def check_template_errors(name: str, template: str, user: bool) -> list[str]:
+    """Two-text (Vosk cross-check) template: may use {{text_check}}; the user
+    template must carry both transcripts."""
+    return template_errors(
+        name,
+        template,
+        require_text=user,
+        allowed=CHECK_PLACEHOLDERS,
+        required=("text_check",) if user else (),
+    )
 
 
 def render(template: str, values: Mapping[str, str]) -> str:
@@ -96,22 +133,34 @@ def build_messages(
     user_template: str,
     chunk: str,
     source_lang: str,
-    context: tuple[tuple[str, str], ...] = (),
+    context: tuple[tuple, ...] = (),
+    check: str | None = None,
 ) -> list[dict]:
-    """Chat messages for one request (``chunk`` = up to words_per_request)."""
+    """Chat messages for one request (``chunk`` = up to words_per_request).
 
-    def values(text: str) -> dict:
+    ``check``: the Vosk transcript of the chunk ({{text_check}}, two-text
+    mode). Context items are ``(source, translation)`` or, in two-text mode,
+    ``(source, translation, check)``."""
+
+    def values(text: str, text_check: str = "") -> dict:
         return {
             "text": text,
+            "text_check": text_check,
             "source_lang": LANGUAGE_NAMES.get(source_lang, source_lang),
             "target_lang": TARGET_LANG,
         }
 
     messages = [{"role": "system", "content": render(system_prompt, values(""))}]
-    for src, tr in context:
-        messages.append({"role": "user", "content": render(user_template, values(src))})
+    for item in context:
+        src, tr = item[0], item[1]
+        chk = item[2] if len(item) > 2 else ""
+        messages.append(
+            {"role": "user", "content": render(user_template, values(src, chk))}
+        )
         messages.append({"role": "assistant", "content": tr})
-    messages.append({"role": "user", "content": render(user_template, values(chunk))})
+    messages.append(
+        {"role": "user", "content": render(user_template, values(chunk, check or ""))}
+    )
     return messages
 
 

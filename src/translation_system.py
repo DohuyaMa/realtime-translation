@@ -16,6 +16,14 @@ alone once no speech follows within ``end_silence_ms`` and never spans more
 than ``hard_max_ms`` of speech - and every hold/merge/flush is logged and
 counted (``asr_merged``, ``asr_held_flushed``).
 
+Vosk cross-check (TASK-SYS-12): the ASR stage sends the same segment audio
+to whisper and to rt-vosk in parallel. Vosk heard no real word -> the
+segment is dropped before the LLM (gate, ``vosk_gate_dropped``); otherwise
+the LLM gets both texts (check prompts, ``Aligned`` keeps them in step
+through the hold/merge). rt-vosk switched off (``services.use.vosk = off``)
+or unavailable -> whisper-only with the plain prompts; the mode and its
+reason are in ``get_stats()["vosk"]`` and every change is logged/emitted.
+
 Capture and pause segmentation run locally; ASR/TTS go through endpoint pools
 and translation through an app session on an llama worker (ordered worker
 list with failover, no Django). In transcribe mode long chunks are sent to
@@ -26,6 +34,7 @@ from __future__ import annotations
 
 import queue
 import subprocess
+from concurrent.futures import Future, ThreadPoolExecutor
 import threading
 import time
 from collections import deque
@@ -49,9 +58,11 @@ from .clients import (
     endpoints,
 )
 from .clients.discovery import choices
+from .clients.vosk import VoskResult
+from .core.crosscheck import Aligned, has_real_word
 from .core.output_guard import reject_reason
 from .core.prompt import render_asr_prompt
-from .core.runtime import KINDS, EdgeSettings, LlmSettings
+from .core.runtime import KINDS, OFF, EdgeSettings, LlmSettings
 from .segmentation import Segment, SegmenterConfig, split_complete
 
 CAPTURE_RATE = 48000
@@ -81,6 +92,8 @@ _LLM_LIVE_FIELDS = (
     "context_pairs",
     "system_prompt",
     "user_template",
+    "check_system_prompt",
+    "check_user_template",
     "words_per_request",
 )
 
@@ -96,6 +109,8 @@ class _Phrase:
     segment: Optional[Segment] = None
     text: str = ""
     src: Optional[str] = None
+    # Vosk transcript aligned with ``text``; None = whisper-only phrase
+    check: Optional[Aligned] = None
     asr_ms: Optional[float] = None
     llm_first_ms: Optional[float] = None
     llm_ms: Optional[float] = None
@@ -319,6 +334,15 @@ class TranslationSystem:
         self._asr_no_words = 0
         self._asr_merged = 0
         self._asr_held_flushed = 0
+        # Vosk cross-check (TASK-SYS-12)
+        self._vosk_exec = ThreadPoolExecutor(2, thread_name_prefix="rt-vosk")
+        self._vosk_state: Dict[str, Any] = {"mode": "off", "error": None}
+        self._vosk_checked = 0
+        self._vosk_gate_dropped = 0
+        self._vosk_whisper_only = 0
+        self._vosk_after_whisper = 0
+        # whisper's last detected language: Vosk's language in auto mode
+        self._last_language: Optional[str] = None
         # incomplete recognized text waiting for the next segment (ASR stage)
         self._held: Optional[_Phrase] = None
         self._held_since = 0.0  # time.monotonic() when it was held
@@ -351,6 +375,7 @@ class TranslationSystem:
         if self._background:
             self._directory.start_periodic()
         self._pools = self._pools_factory(self.settings, self._directory)
+        self._vosk_state = self._initial_vosk_state()
         self._llm_target = self._llm_target_factory(self.settings, self._directory)
         if isinstance(self._llm_target, WorkerSessions):
             self._llm_target.on_switch = self._warm_up_async
@@ -359,6 +384,16 @@ class TranslationSystem:
             if self._llm_target is not None
             else None
         )
+
+    def _initial_vosk_state(self) -> Dict[str, Any]:
+        if self.settings.use.vosk == OFF:
+            return {"mode": "off", "error": "вимкнено в налаштуваннях"}
+        if self._pools.vosk is None:
+            return {
+                "mode": "unavailable",
+                "error": "rt-vosk не знайдено (немає локального і дозволених вузлів)",
+            }
+        return {"mode": "on", "error": None}
 
     def _close_backends(self) -> None:
         self._directory.stop_periodic()
@@ -485,6 +520,15 @@ class TranslationSystem:
         self._recognized.clear()
         self._translation_context.clear()
         self._held = None
+        self._last_language = None
+        if self._mode == "translate":
+            v = self._vosk_state
+            log = logger.info if v["mode"] == "on" else logger.warning
+            log(
+                "vosk cross-check: {}{}",
+                v["mode"],
+                f" ({v['error']}) - whisper-only translation" if v["error"] else "",
+            )
         try:  # open the mic synchronously so a failure aborts the start
             self._stream = self._capture_factory(self._on_block)
             self._stream.start()
@@ -557,6 +601,7 @@ class TranslationSystem:
     def cleanup(self) -> None:
         self.stop()
         self._close_backends()
+        self._vosk_exec.shutdown(wait=False)
 
     # -- kill switch (standby) ---------------------------------------------
 
@@ -577,12 +622,16 @@ class TranslationSystem:
         self._directory.start_periodic()
 
     def local_model_clients(self) -> Dict[str, Any]:
-        """Clients of THIS host's rt-asr / rt-tts, whichever instance is
-        picked for the pipeline; cluster nodes are never included (they
-        serve others). The caller closes them."""
+        """Clients of THIS host's rt-asr / rt-vosk / rt-tts, whichever
+        instance is picked for the pipeline; cluster nodes are never
+        included (they serve others). rt-vosk switched off in the settings
+        is left alone. The caller closes them."""
         f = client_factories(self.settings)
         out: Dict[str, Any] = {}
-        for kind, make in (("asr", f.asr), ("tts", f.tts)):
+        kinds = [("asr", f.asr), ("vosk", f.vosk), ("tts", f.tts)]
+        if self.settings.use.vosk == OFF:
+            kinds = [k for k in kinds if k[0] != "vosk"]
+        for kind, make in kinds:
             local = [
                 e for e in choices(kind, self.settings, self._directory) if e.local
             ]
@@ -905,14 +954,21 @@ class TranslationSystem:
         return False
 
     def _recognize(self, phrase: _Phrase) -> None:
-        """ASR stage (translate mode): hand the text to the LLM stage."""
+        """ASR stage (translate mode): whisper and Vosk in parallel, the
+        gate, then the text (with its Vosk check) on to the LLM stage."""
         lang = self._language()
         prompt = self._asr_prompt()
+        audio = phrase.segment.audio
         t0 = self._clock()
+        # auto source language: Vosk runs in parallel in the language whisper
+        # detected last; the first phrase / a language change waits for
+        # whisper (see _vosk_result)
+        vosk_lang = lang or self._last_language
+        future = self._vosk_submit(audio, vosk_lang) if vosk_lang else None
         try:
             result = self._pools.asr.call(
                 lambda c: c.transcribe(
-                    phrase.segment.audio,
+                    audio,
                     language=lang,
                     prompt=prompt,
                     priority="realtime",
@@ -921,20 +977,121 @@ class TranslationSystem:
         except ServiceError as e:
             self._service_error(e)
             return
-        phrase.asr_ms = _ms(self._clock() - t0)
         text = (result.text or "").strip()
         if not self._has_words(text):
+            phrase.asr_ms = _ms(self._clock() - t0)
+            return
+        src = lang or result.language
+        if src:
+            self._last_language = src
+        vosk = self._vosk_result(future, audio, vosk_lang, src) if src else None
+        phrase.asr_ms = _ms(self._clock() - t0)
+        if vosk is not None and not has_real_word(vosk.text):
+            self._gate_drop(phrase.seq, text, vosk.text, "segment")
             return
         self._recognized.extend(text.split())
         with self._lock:
             self._pending_recognized.append(text)
-        phrase.src = lang or result.language
+        phrase.src = src
         if not phrase.src:
             logger.warning("source language unknown - skipping translation")
             return
         segment, phrase.segment = phrase.segment, None  # audio no longer needed
         phrase.text = text
+        if vosk is not None:
+            self._vosk_checked += 1
+            phrase.check = Aligned.build(
+                text,
+                result.segments,
+                vosk.words,
+                vosk.text,
+                len(segment.audio) / ASR_RATE,
+                segment.start_s,
+            )
+        elif self.settings.use.vosk != OFF:
+            self._vosk_whisper_only += 1
         self._route_text(phrase, segment)
+
+    # -- Vosk cross-check (ASR stage) ----------------------------------------
+
+    def _call_vosk(self, audio: np.ndarray, language: str) -> VoskResult:
+        return self._pools.vosk.call(lambda c: c.transcribe(audio, language=language))
+
+    def _vosk_submit(self, audio: np.ndarray, language: str) -> Optional[Future]:
+        if self._pools.vosk is None:
+            return None
+        return self._vosk_exec.submit(self._call_vosk, audio, language)
+
+    def _vosk_result(
+        self,
+        future: Optional[Future],
+        audio: np.ndarray,
+        used: Optional[str],
+        src: str,
+    ) -> Optional[VoskResult]:
+        """Vosk's transcript in whisper's language ``src``, or None (whisper
+        only: switched off, or unavailable - the state says why)."""
+        if self._pools.vosk is None:
+            return None
+        try:
+            if future is not None and used == src:
+                result = future.result()
+            else:
+                if future is not None:
+                    future.cancel()  # wrong language; a running call is ignored
+                self._vosk_after_whisper += 1
+                logger.info(
+                    "vosk: called after whisper in {} ({})",
+                    src,
+                    "language changed" if used else "no language known yet",
+                )
+                result = self._call_vosk(audio, src)
+        except ServiceError as e:
+            self._set_vosk_state("unavailable", f"{e.service}: {e.kind}: {e}")
+            return None
+        self._set_vosk_state("on", None)
+        return result
+
+    def _set_vosk_state(self, mode: str, error: Optional[str]) -> None:
+        old = self._vosk_state
+        self._vosk_state = {"mode": mode, "error": error}
+        if old["mode"] == mode:
+            if error:
+                logger.info("vosk still unavailable ({}): whisper-only phrase", error)
+            return
+        if mode == "on":
+            logger.info("vosk cross-check back on")
+        else:
+            logger.warning(
+                "vosk cross-check {} ({}): whisper-only translation", mode, error
+            )
+        self._emit({"status": "vosk_state", "vosk": dict(self._vosk_state)})
+
+    def _gate_drop(self, seq: int, text: str, check: str, what: str) -> None:
+        """Vosk heard no real word: whisper's text is not translated."""
+        self._vosk_gate_dropped += 1
+        logger.info(
+            "phrase #{}: {} dropped - Vosk heard no word ({!r}), whisper: {!r}",
+            seq,
+            what,
+            check,
+            text,
+        )
+        self._emit(
+            {
+                "status": "vosk_gate",
+                "original_text": text,
+                "check_text": check,
+            }
+        )
+
+    def _to_llm(self, phrase: _Phrase) -> None:
+        """Hand a phrase to the LLM stage; a piece whose Vosk span has no
+        real word (whisper's text past the spoken words) is dropped."""
+        if phrase.check is not None and not has_real_word(phrase.check.check_text):
+            self._gate_drop(phrase.seq, phrase.text, phrase.check.check_text, "piece")
+            return
+        self._put(self._llm_q, phrase, "llm")
 
     # -- incomplete sentences (ASR stage) -----------------------------------
 
@@ -952,8 +1109,13 @@ class TranslationSystem:
             if held.src != phrase.src:
                 self._held = held
                 self._flush_held("language changed")
+            elif (held.check is None) != (phrase.check is None):
+                self._held = held
+                self._flush_held("vosk cross-check mode changed")
             else:
                 phrase.text = f"{held.text} {phrase.text}"
+                if held.check is not None and phrase.check is not None:
+                    phrase.check = held.check + phrase.check
                 start_s = self._held_start_s
                 merged = True
                 self._asr_merged += 1
@@ -978,8 +1140,13 @@ class TranslationSystem:
                 rest,
             )
             ready, rest = phrase.text, ""
+        head = tail = None
+        if phrase.check is not None:
+            head, tail = phrase.check.cut(len(ready.split()))
         if rest:
-            self._held = _Phrase(phrase.seq, phrase.t_end, text=rest, src=phrase.src)
+            self._held = _Phrase(
+                phrase.seq, phrase.t_end, text=rest, src=phrase.src, check=tail
+            )
             self._held.asr_ms = phrase.asr_ms
             self._held_since = time.monotonic()
             self._held_start_s = start_s if not ready else segment.start_s
@@ -989,8 +1156,8 @@ class TranslationSystem:
                 rest,
             )
         if ready:
-            phrase.text = ready
-            self._put(self._llm_q, phrase, "llm")
+            phrase.text, phrase.check = ready, head
+            self._to_llm(phrase)
 
     def _speech_in_progress(self) -> bool:
         with self._vad_lock:
@@ -1017,7 +1184,7 @@ class TranslationSystem:
             why,
             held.text,
         )
-        self._put(self._llm_q, held, "llm")
+        self._to_llm(held)
 
     # -- LLM warm-up ---------------------------------------------------------
 
@@ -1077,7 +1244,10 @@ class TranslationSystem:
         buffer_all = len(phrase.text.split()) <= SHORT_SOURCE_WORDS
         reason: Optional[str] = None
         stream = self._llm.translate_stream(
-            phrase.text, phrase.src, context=list(self._translation_context)
+            phrase.text,
+            phrase.src,
+            context=list(self._translation_context),
+            check=phrase.check,
         )
         try:
             for sentence in stream:
@@ -1115,7 +1285,12 @@ class TranslationSystem:
             self._queue_sentence(item)
         phrase.llm_ms = _ms(self._clock() - t0)
         translation = " ".join(sentences)
-        self._translation_context.append((phrase.text, translation))
+        if phrase.check is None:
+            self._translation_context.append((phrase.text, translation))
+        else:
+            self._translation_context.append(
+                (phrase.text, translation, phrase.check.check_text)
+            )
         with self._lock:
             self._pending_translated.append(translation)
         self._emit(
@@ -1172,6 +1347,7 @@ class TranslationSystem:
 
     def get_stats(self) -> Dict:
         tts = self._pools.tts
+        vosk = self._pools.vosk
         stats: Dict[str, Any] = {
             "running": self.is_running,
             "mode": self._mode,
@@ -1191,8 +1367,15 @@ class TranslationSystem:
             "discovery": self._directory.source,
             "active": {
                 "asr": self._pools.asr.active(),
+                "vosk": vosk.active() if vosk is not None else None,
                 "tts": tts.active() if tts is not None else None,
             },
+            # TASK-SYS-12: on | off (settings) | unavailable (+ why)
+            "vosk": dict(self._vosk_state),
+            "vosk_checked": self._vosk_checked,
+            "vosk_gate_dropped": self._vosk_gate_dropped,
+            "vosk_whisper_only": self._vosk_whisper_only,
+            "vosk_after_whisper": self._vosk_after_whisper,
             "session": self._session_snapshot(),
             "timing": dict(self._timing),
             "queues": {

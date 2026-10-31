@@ -6,6 +6,7 @@ from typing import Iterable, Iterator, Optional, Protocol, Sequence
 
 import httpx
 
+from ..core.crosscheck import Aligned
 from ..core.prompt import build_messages, split_words
 from ..core.runtime import LlmSettings
 from .base import ServiceError, json_body, raise_for_response
@@ -102,18 +103,32 @@ class LlmClient:
         self._send("POST", "/v1/chat/completions", json=body, timeout=timeout)
 
     def translate(
-        self, text: str, source_lang: str, context: Sequence[tuple[str, str]] = ()
+        self,
+        text: str,
+        source_lang: str,
+        context: Sequence[tuple] = (),
+        check: Optional[Aligned] = None,
     ) -> str:
         """Whole translation (joined stream)."""
-        return " ".join(self.translate_stream(text, source_lang, context))
+        return " ".join(self.translate_stream(text, source_lang, context, check))
 
     def translate_stream(
-        self, text: str, source_lang: str, context: Sequence[tuple[str, str]] = ()
+        self,
+        text: str,
+        source_lang: str,
+        context: Sequence[tuple] = (),
+        check: Optional[Aligned] = None,
     ) -> Iterator[str]:
         """Translated sentences as soon as each one is complete.
 
         One streamed call per chunk of <= words_per_request words (in order);
         earlier chunks of this phrase become context of the next ones.
+
+        ``check`` (TASK-SYS-12): the Vosk transcript aligned with ``text``
+        (whisper) - two-text mode with the check prompts; each chunk gets
+        the Vosk words of its time span. Context items are ``(source,
+        translation)`` or ``(source, translation, check)``; in two-text mode
+        only the latter are used (a whisper-only pair has no EXACT text).
         """
         if source_lang == "en":
             yield text
@@ -121,10 +136,20 @@ class LlmClient:
         if source_lang not in SOURCE_LANGUAGES:
             raise ValueError(f"unsupported source language {source_lang!r}")
         s = self._settings
-        ctx = tuple(context)
+        if check is None:
+            system, template = s.system_prompt, s.user_template
+            ctx = tuple(context)
+        else:
+            system, template = s.check_system_prompt, s.check_user_template
+            ctx = tuple(c for c in context if len(c) > 2)
+        rest = check
         for chunk in split_words(text, s.words_per_request):
+            chunk_check = None
+            if rest is not None:
+                part, rest = rest.cut(len(chunk.split()))
+                chunk_check = part.check_text
             messages = build_messages(
-                s.system_prompt, s.user_template, chunk, source_lang, ctx
+                system, template, chunk, source_lang, ctx, check=chunk_check
             )
             parts = []
             for sentence in self._complete_stream(messages, chunk):
@@ -132,7 +157,10 @@ class LlmClient:
                 yield sentence
             if not parts:
                 raise ServiceError(self.service, "http", "empty translation")
-            ctx = ctx + ((chunk, " ".join(parts)),)
+            done = " ".join(parts)
+            ctx = ctx + (
+                (chunk, done) if chunk_check is None else (chunk, done, chunk_check),
+            )
 
     def _open_stream(self, body: dict) -> httpx.Response:
         """POST with stream=True; same one-retry policy as ``_request``."""

@@ -33,14 +33,14 @@ Modes (`services.mode`): `transcribe` (long chunks, ASR only), `translate` (phra
 | `src/main.py` | Entry point: Qt app, controllers, `MainWindow` |
 | `src/services/common/` | Shared service runtime: settings (`ENV_KEYS`, `TUNABLE_FIELDS`, `RELOAD_FIELDS`), `/config` (`runtime_config.py`), `/health`, `/status`, auth, model registry/store, `rt-models` CLI |
 | `src/services/asr/`, `src/services/tts/` | `rt-asr` (faster-whisper, `POST /audio/transcriptions`) and `rt-tts` (Kokoro ONNX, `POST /audio/speech`, `GET /audio/voices`; both `GET /v1/models`) FastAPI services |
-| `src/services/vosk/` | `rt-vosk` (Vosk/Kaldi, CPU only; rt-asr request shape, answer with per-word `conf`; `RT_MODEL` = one model per language). Not wired into the edge yet (TASK-SYS-12 hypothesis) |
+| `src/services/vosk/` | `rt-vosk` (Vosk/Kaldi, CPU only; rt-asr request shape, answer with per-word `conf`; `RT_MODEL` = one model per language). Edge translate mode: whisper cross-check (TASK-SYS-12; `core/crosscheck.py`, `services.use.vosk` = auto/node/off) |
 | `src/segmentation/` | VAD segmenter (`SegmenterConfig.translate()` / `.transcribe()`): pause-based phrase/chunk boundaries |
-| `src/clients/` | HTTP clients: `asr`, `tts`, `llm`, `discovery` (Django service list + cache), endpoint `pool` (priority order, failover), `session` (worker app session, failover/return-to-local), `health` |
+| `src/clients/` | HTTP clients: `asr`, `vosk`, `tts`, `llm`, `discovery` (Django service list + cache), endpoint `pool` (priority order, failover), `session` (worker app session, failover/return-to-local), `health` |
 | `src/translation_system.py`, `src/adapters/`, `src/controller/` | Edge pipeline, adapter and controller on top of clients |
 | `src/core/runtime.py` | `EdgeSettings`: `RT_EDGE_*` env > `config.yml` > defaults |
 | `src/core/config.py` | `ConfigManager`: `~/.config/real-time-translator/config.yml` (keys: `config/default.yml`) |
 | `src/core/preflight/pipewire.py`, `src/audio/` | PipeWire virtual device check and routing (`pactl`); capture records the chosen source via `parec` (`PulseCapture`), playback goes to the chosen sink(s) via `pacat` (`play_to_sinks`); system defaults are never changed |
-| `src/ui/` | PySide6 widgets and Qt controller: settings dialog (`settings_dialog.py`: allow-list + per-kind instance choice `services.use`; `service_tabs.py`: ASR/LLM/TTS tabs - per-user prompts/voice in config.yml, per-node tuning via `/config` + `/v1/models`), status panel with the instance chooser; kill switch (`DirectAdapter.standby/resume`) and the drawn tray icon (`widgets/tray_icon.py`) |
+| `src/ui/` | PySide6 widgets and Qt controller: settings dialog (`settings_dialog.py`: allow-list + per-kind instance choice `services.use`; `service_tabs.py`: ASR/Vosk/LLM/TTS tabs - per-user prompts/voice in config.yml, per-node tuning via `/config` + `/v1/models`), status panel with the instance chooser; kill switch (`DirectAdapter.standby/resume`) and the drawn tray icon (`widgets/tray_icon.py`) |
 
 ### Ports
 

@@ -20,7 +20,7 @@ def seg(start=0.0, end=1.0, reason="end"):
 class EchoLlm(SlowLlm):
     """English-looking output (the guard rejects Cyrillic)."""
 
-    def translate_stream(self, text, source_lang, context=()):
+    def translate_stream(self, text, source_lang, context=(), check=None):
         self.calls.append(text)
         yield f"EN{len(self.calls)}."
 

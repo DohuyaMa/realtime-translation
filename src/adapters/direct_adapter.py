@@ -148,7 +148,8 @@ class DirectAdapter:
         """«Зупинити все й звільнити пам'ять», in this order: stop capture and
         the pipeline, release the worker app session (the worker goes back to
         Django tasks), stop periodic discovery, unload THIS host's rt-asr /
-        rt-tts models (cluster nodes serve others). The llama worker's LLM
+        rt-vosk / rt-tts models (cluster nodes serve others; rt-vosk
+        switched off in the settings is left alone). The llama worker's LLM
         stays loaded - it serves the Django queue. Every step runs; the
         failed ones are returned and logged, never swallowed."""
         ts = self.translation_system
@@ -197,7 +198,7 @@ class DirectAdapter:
         return errors
 
     def _model_action(self, action: str) -> List[str]:
-        """POST /model/<action> on this host's rt-asr / rt-tts."""
+        """POST /model/<action> on this host's rt-asr / rt-vosk / rt-tts."""
         errors: List[str] = []
         for kind, client in self.translation_system.local_model_clients().items():
             try:

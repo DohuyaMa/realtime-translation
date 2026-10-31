@@ -1,4 +1,5 @@
-"""Service discovery: which llm workers / rt-asr / rt-tts the app may use.
+"""Service discovery: which llm workers / rt-asr / rt-tts / rt-vosk the app
+may use.
 
 Owner design (2026-10-31): the app asks Django for the list of services and
 their tokens (``GET <django>/api/llm/app-services/``, user DRF token), keeps
@@ -27,7 +28,7 @@ from urllib.parse import urlsplit, urlunsplit
 import httpx
 from loguru import logger
 
-from ..core.runtime import KINDS, EdgeSettings
+from ..core.runtime import KINDS, OFF, EdgeSettings
 from .base import Credential, read_token
 
 PATH = "/api/llm/app-services/"
@@ -333,7 +334,7 @@ def endpoints(
 
     Auto (``use.<kind>`` unset): this host's service first, then the allowed
     cluster services in discovery order. Pinned to a node: only that node's
-    endpoint (no failover). This host's service is always reached locally
+    endpoint (no failover). ``OFF``: none. This host's service is always reached locally
     (``local.<kind>`` or 127.0.0.1 on the discovered port), never via the
     cluster URL Django lists for it. ``register=False``: credentials are not
     refreshed by discovery (listing only, e.g. for the UI).
@@ -342,6 +343,8 @@ def endpoints(
     node = own_node(settings, hostname)
     allowed = settings.allowed_services
     pinned = getattr(settings.use, kind)
+    if pinned == OFF:  # switched off in the settings (optional kinds only)
+        return []
     own = [
         e
         for e in directory.services

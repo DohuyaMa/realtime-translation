@@ -47,6 +47,7 @@ def app():
 def test_services_labels():
     assert SERVICES == {
         "asr": "ASR (rt-asr)",
+        "vosk": "Звірка (rt-vosk)",
         "llm": "Переклад (LLM)",
         "tts": "TTS (rt-tts)",
     }
@@ -81,6 +82,65 @@ def test_status_panel_shows_serving_nodes(app):
     assert panel._texts["asr"].text() == "1/1 готові"
     asr = panel._details["asr"].text()
     assert "sktop" in asr and "локальний" in asr and "кеш" in asr
+
+
+@pytest.mark.parametrize(
+    "vosk, text, shown",
+    [
+        (
+            {"mode": "off", "error": "вимкнено в налаштуваннях"},
+            "вимкнено",
+            "лише з whisper",
+        ),
+        (
+            {"mode": "unavailable", "error": "vosk: unreachable"},
+            "не налаштовано",
+            "vosk: unreachable",
+        ),
+        ({"mode": "on", "error": None}, "1/1 готові", "звірка увімкнена"),
+    ],
+)
+def test_status_panel_shows_vosk_mode(app, vosk, text, shown):
+    panel = ServiceStatusPanel()
+    entries = [{"ready": True}] if vosk["mode"] == "on" else []
+    panel.update_status(
+        {
+            "vosk": vosk,
+            "use": {"vosk": "off" if vosk["mode"] == "off" else None},
+            "choices": {"vosk": []},
+            "health": {"vosk": entries},
+            "vosk_gate_dropped": 2,
+        }
+    )
+    assert panel._texts["vosk"].text() == text
+    assert shown in panel._details["vosk"].text()
+    assert "Vosk не чув слів" in panel._timing.text()
+    box = panel._use["vosk"]
+    assert box.findData("off") >= 0
+    assert box.currentData() == ("off" if vosk["mode"] == "off" else None)
+
+
+def test_settings_dialog_vosk_use_and_check_prompts_saved(app, cfg):
+    from src.core.prompt import DEFAULT_CHECK_USER_TEMPLATE
+    from src.ui.widgets.settings_dialog import current_settings
+
+    dlg = SettingsDialog(current_settings(), services=[])
+    assert dlg.vosk_tab.service.kind == "vosk"
+    box = dlg.endpoints_tab.use["vosk"]
+    box.setCurrentIndex(box.findData("off"))
+    tpl = "FLUENT: {{text}}\nEXACT: {{text_check}}"
+    dlg.llm_tab.check_user_template.setPlainText(tpl)
+    assert "EXACT: dzień dobry" in dlg.llm_tab.preview.toPlainText()
+    dlg.accept()
+    saved = _saved(cfg)["services"]
+    assert saved["use"]["vosk"] == "off"
+    assert saved["llm"]["check_user_template"] == tpl
+    assert "check_system_prompt" not in saved["llm"]  # default: not frozen
+    dlg = SettingsDialog(current_settings(), services=[])
+    dlg.llm_tab.check_user_template.setPlainText("{{text}}")  # no {{text_check}}
+    dlg.accept()
+    assert "text_check" in dlg.error_label.text()
+    assert DEFAULT_CHECK_USER_TEMPLATE != tpl
 
 
 def test_endpoints_dialog_values_and_segmentation(app):
@@ -175,7 +235,7 @@ def test_main_window_constructs(app, cfg):
     ctl.get_output_devices.return_value = []
     ctl.get_status.return_value = {"running": True}
     win = _window(ctl)
-    assert win.service_status_panel.get_service_names() == ["asr", "llm", "tts"]
+    assert win.service_status_panel.get_service_names() == ["asr", "vosk", "llm", "tts"]
     win._apply_ui_update({"input": 0.5, "health": {}})
     win.on_general_settings_changed(resolve_edge_settings({}, {}))
     for _ in range(100):

@@ -11,7 +11,7 @@ HEALTH_INTERVAL_S = 5.0
 # the same pipeline problem repeats per phrase: log it again only after this
 REPEAT_LOG_S = 10.0
 
-SERVICE_NAMES = {"asr": "ASR", "tts": "TTS", "llm": "LLM"}
+SERVICE_NAMES = {"asr": "ASR", "vosk": "Vosk", "tts": "TTS", "llm": "LLM"}
 
 
 def describe_pipeline_event(event: Dict) -> Optional[Tuple[str, str]]:
@@ -29,6 +29,18 @@ def describe_pipeline_event(event: Dict) -> Optional[Tuple[str, str]]:
         if event.get("output"):
             msg += f" → «{event['output']}»"
         return "WARN", msg
+    if status == "vosk_gate":
+        return "INFO", (
+            f"Vosk не чув слів ({event.get('check_text') or 'тиша'!r}) -"
+            f" не перекладено: «{event.get('original_text') or ''}»"
+        )
+    if status == "vosk_state":
+        v = event.get("vosk") or {}
+        if v.get("mode") == "on":
+            return "INFO", "Звірка Vosk знову працює"
+        return "WARN", (
+            f"Vosk недоступний ({v.get('error') or '?'}): переклад лише з whisper"
+        )
     if status == "llm_warmup":
         w = event.get("warmup") or {}
         where = w.get("url") or "?"

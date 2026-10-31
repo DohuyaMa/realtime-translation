@@ -11,6 +11,7 @@ services:
     llm: null                   #   a node name = only that node (no failover; down = explicit error)
     asr: null
     tts: null
+    vosk: null                  #   vosk: also "off" = no cross-check, whisper-only translation
   # Services on this host, always tried first. A discovered service of this
   # host is reached here, or at 127.0.0.1:<its port> when null - never via
   # the cluster (tailscale) URL Django lists for it.
@@ -19,6 +20,7 @@ services:
     llm: null                   # e.g. "http://127.0.0.1:8080"
     asr: "http://127.0.0.1:8091"
     tts: null                   # e.g. "http://127.0.0.1:8093"
+    vosk: null                  # e.g. "http://127.0.0.1:8092" (rt-vosk: cross-checks whisper in translate mode)
   local_token_file: /run/llama/local-token   # local worker token when Django is unreachable
   source_language: auto         # auto | pl | uk | ru | en
   timeouts:
@@ -48,6 +50,11 @@ services:
     # rejected with a WARNING and the default template is used.
     system_prompt: ""           # "" = built-in interpreter prompt
     user_template: ""           # "" = "{{text}}"
+    # Phrases Vosk also recognized (TASK-SYS-12): {{text}} = whisper, {{text_check}} =
+    # Vosk (both required in check_user_template). "" = built-in ("B3" prompt,
+    # "EXACT: {{text_check}}\nFLUENT: {{text}}").
+    check_system_prompt: ""
+    check_user_template: ""
 
 segmentation:
   translate:                    # SegmenterConfig fields (phrase-sized segments)

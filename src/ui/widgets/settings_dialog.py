@@ -1,5 +1,6 @@
 """Settings dialog of the edge: services (allow-list, which instance to use),
-per-service tabs (ASR / LLM / TTS, see service_tabs.py) and segmentation."""
+per-service tabs (ASR / Vosk / LLM / TTS, see service_tabs.py) and
+segmentation."""
 
 import os
 from typing import Any, Dict, Optional
@@ -29,6 +30,8 @@ from dataclasses import replace
 from ...core.runtime import (
     KINDS,
     MODES,
+    OFF,
+    OPTIONAL_KINDS,
     SOURCE_LANGUAGES,
     EdgeSettings,
     reset_runtime_config,
@@ -67,6 +70,7 @@ def service_choices(kind: str, settings: EdgeSettings, services=None) -> list:
 
 
 AUTO_LABEL = "auto (локальний першим, failover)"
+OFF_LABEL = "вимкнено (переклад лише з whisper, без звірки)"
 
 
 def endpoint_label(e) -> str:
@@ -77,6 +81,8 @@ def use_combo(kind: str, settings: EdgeSettings, endpoints) -> QComboBox:
     """auto + every instance of ``kind``; item data = node (None = auto)."""
     box = QComboBox()
     box.addItem(AUTO_LABEL, None)
+    if kind in OPTIONAL_KINDS:
+        box.addItem(OFF_LABEL, OFF)
     for e in endpoints:
         box.addItem(endpoint_label(e), e.node)
     pinned = getattr(settings.use, kind)
@@ -102,7 +108,7 @@ class EndpointsTab(QWidget):
         self.local_token_file = QLineEdit(settings.local_token_file or "")
         self.local = {
             kind: QLineEdit(getattr(settings.local, kind) or "")
-            for kind in ("llm", "asr", "tts")
+            for kind in ("llm", "asr", "vosk", "tts")
         }
         self.local_node = QLineEdit(settings.local.node or "")
         self.local_node.setPlaceholderText("hostname")
@@ -132,18 +138,20 @@ class EndpointsTab(QWidget):
         # llm: chosen in the Переклад tab (with the worker's model list)
         self.use = {
             kind: use_combo(kind, settings, service_choices(kind, settings, services))
-            for kind in ("asr", "tts")
+            for kind in ("asr", "vosk", "tts")
         }
         form.addRow("Django URL (свій хост першим):", self.django_urls)
         form.addRow("DRF token file:", self.django_token_file)
         form.addRow("Цей вузол у discovery:", self.local_node)
         form.addRow("Локальний LLM-воркер:", self.local["llm"])
         form.addRow("Локальний rt-asr:", self.local["asr"])
+        form.addRow("Локальний rt-vosk:", self.local["vosk"])
         form.addRow("Локальний rt-tts:", self.local["tts"])
         form.addRow("Локальний токен воркера:", self.local_token_file)
         form.addRow("Дозволені сервіси:", self.allow_all)
         form.addRow("", self.allowed)
         form.addRow("Використовувати ASR:", self.use["asr"])
+        form.addRow("Звірка Vosk:", self.use["vosk"])
         form.addRow("Використовувати TTS:", self.use["tts"])
         form.addRow("Режим:", self.mode)
         form.addRow("Мова:", self.source_language)
@@ -153,6 +161,7 @@ class EndpointsTab(QWidget):
             "local_token_file": self.local_token_file,
             "local.llm": self.local["llm"],
             "local.asr": self.local["asr"],
+            "local.vosk": self.local["vosk"],
             "local.tts": self.local["tts"],
             "local.node": self.local_node,
             "allowed_services": self.allowed,
@@ -315,8 +324,7 @@ def service_client_factory(kind: str, settings: EdgeSettings):
             timeout_s=10.0,
             connect_timeout_s=t.connect_s,
         )
-    f = client_factories(settings)
-    return f.tts if kind == "tts" else f.asr
+    return getattr(client_factories(settings), kind)
 
 
 class SettingsDialog(QDialog):
@@ -336,7 +344,7 @@ class SettingsDialog(QDialog):
         background=None,
     ):
         super().__init__(parent)
-        from .service_tabs import AsrTab, Background, LlmTab, TtsTab
+        from .service_tabs import AsrTab, Background, LlmTab, TtsTab, VoskTab
 
         self.setWindowTitle("Налаштування")
         self.setMinimumWidth(640)
@@ -350,6 +358,11 @@ class SettingsDialog(QDialog):
             settings,
             service_choices("asr", settings, services),
             service_client_factory("asr", settings),
+            self.bg,
+        )
+        self.vosk_tab = VoskTab(
+            service_choices("vosk", settings, services),
+            service_client_factory("vosk", settings),
             self.bg,
         )
         self.tts_tab = TtsTab(
@@ -368,6 +381,7 @@ class SettingsDialog(QDialog):
         self.segmentation_tab = SegmentationTab(settings)
         tabs.addTab(self.endpoints_tab, "Сервіси")
         tabs.addTab(self.asr_tab, "Розпізнавання (ASR)")
+        tabs.addTab(self.vosk_tab, "Звірка (Vosk)")
         tabs.addTab(self.llm_tab, "Переклад (LLM)")
         tabs.addTab(self.tts_tab, "Озвучка (TTS)")
         tabs.addTab(self.segmentation_tab, "Сегментація")

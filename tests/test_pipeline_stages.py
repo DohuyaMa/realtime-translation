@@ -51,7 +51,7 @@ class SlowLlm:
         self.gate = gate
         self.calls = []
 
-    def translate_stream(self, text, source_lang, context=()):
+    def translate_stream(self, text, source_lang, context=(), check=None):
         self.calls.append(text)
         if self.clock is not None:
             self.clock.t += self.delay
@@ -260,7 +260,7 @@ class MetaLlm(SlowLlm):
         super().__init__(0, sentences=sentences)
         self.closed = False
 
-    def translate_stream(self, text, source_lang, context=()):
+    def translate_stream(self, text, source_lang, context=(), check=None):
         try:
             yield from super().translate_stream(text, source_lang, context)
         finally:

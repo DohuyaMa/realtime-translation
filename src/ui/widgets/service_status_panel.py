@@ -1,4 +1,5 @@
-"""Status panel for the remote services: ASR, LLM worker and TTS (serving node)."""
+"""Status panel for the remote services: ASR, Vosk cross-check, LLM worker
+and TTS (serving node)."""
 
 from html import escape
 from typing import Dict, List, Optional
@@ -15,6 +16,7 @@ from PySide6.QtWidgets import (
 )
 
 from ...clients.model_status import ModelStatus
+from ...core.runtime import OFF, OPTIONAL_KINDS
 from .model_state import (
     ERROR_STYLE,
     format_dropped,
@@ -24,12 +26,20 @@ from .model_state import (
 
 SERVICES = {
     "asr": "ASR (rt-asr)",
+    "vosk": "Звірка (rt-vosk)",
     "llm": "Переклад (LLM)",
     "tts": "TTS (rt-tts)",
 }
 
 _DOT = "font-size: 16px; font-weight: bold; color: {};"
 AUTO = "auto (failover)"
+OFF_TEXT = "вимкнено"
+# get_stats()["vosk"]["mode"] -> label of the cross-check mode
+VOSK_MODES = {
+    "on": "звірка увімкнена",
+    "off": "вимкнено: переклад лише з whisper",
+    "unavailable": "недоступний: переклад лише з whisper",
+}
 
 
 def _aggregate(entries: List[Dict]) -> str:
@@ -120,7 +130,19 @@ PIPELINE_COUNTERS = {
     "playback_short": "відтворень, коротших за аудіо",
     "asr_merged": "незавершених фраз склеєно з наступними",
     "asr_held_flushed": "незавершених фраз надіслано окремо",
+    "vosk_gate_dropped": "відкинуто (Vosk не чув слів)",
+    "vosk_whisper_only": "без звірки Vosk (недоступний)",
 }
+
+
+def format_vosk_mode(vosk: Optional[Dict]) -> str:
+    """Cross-check mode line: on / off / unavailable plus the reason."""
+    if not vosk:
+        return ""
+    text = VOSK_MODES.get(vosk.get("mode"), str(vosk.get("mode")))
+    if vosk.get("error") and vosk.get("mode") != "off":
+        text += f" ({vosk['error']})"
+    return text
 
 
 def format_pipeline_stats(status: Dict) -> str:
@@ -186,6 +208,8 @@ class ServiceStatusPanel(QGroupBox):
             grid.addWidget(text, row, 2)
             use = QComboBox()
             use.addItem(AUTO, None)
+            if key in OPTIONAL_KINDS:
+                use.addItem(OFF_TEXT, OFF)
             use.setToolTip(
                 "Який екземпляр використовувати: auto - локальний першим з"
                 " failover; вузол - лише він (недоступний = помилка)"
@@ -233,6 +257,8 @@ class ServiceStatusPanel(QGroupBox):
         box.blockSignals(True)
         box.clear()
         box.addItem(AUTO, None)
+        if kind in OPTIONAL_KINDS:
+            box.addItem(OFF_TEXT, OFF)
         for i in items:
             label = f"{i['node']} ({i['url']})" + (
                 ", локальний" if i.get("local") else ""
@@ -259,11 +285,19 @@ class ServiceStatusPanel(QGroupBox):
             suffix = "; список сервісів: кеш (Django недоступний)"
         elif source == "none":
             suffix = "; список сервісів: лише локальні"
-        for key in ("asr", "tts"):
+        for key in ("asr", "vosk", "tts"):
             entries = health.get(key) or []
             ok = any(e.get("ready") for e in entries)
             nodes = {i["url"]: i["node"] for i in choices.get(key) or ()}
             detail = escape(format_node(active.get(key)) + suffix)
+            if key == "vosk":
+                mode = status.get("vosk") or {}
+                ok = ok and mode.get("mode") == "on"
+                line = escape(format_vosk_mode(mode))
+                detail = f"{line}<br>{detail}" if detail and line else line or detail
+                if mode.get("mode") == "off":
+                    self._set(key, False, OFF_TEXT, detail)
+                    continue
             instances = format_instances(entries, nodes)
             if instances:
                 detail = f"{detail}<br>{instances}" if detail else instances

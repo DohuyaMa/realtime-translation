@@ -1,4 +1,5 @@
-"""Ordered endpoint lists for rt-asr / rt-tts with failover and return-to-local.
+"""Ordered endpoint lists for rt-asr / rt-tts / rt-vosk with failover and
+return-to-local.
 
 ``urls`` is a priority order (local first, then cluster nodes). Every call
 goes to the first endpoint that is not marked down and not reported unhealthy
@@ -22,6 +23,7 @@ from .asr import AsrClient
 from .base import ServiceError
 from .discovery import Directory, Endpoint, endpoints
 from .tts import TtsClient
+from .vosk import VoskClient
 
 C = TypeVar("C")
 T = TypeVar("T")
@@ -141,11 +143,15 @@ class EndpointPool(Generic[C]):
 class SpeechPools:
     asr: EndpointPool[AsrClient]
     tts: Optional[EndpointPool[TtsClient]] = None
+    # None: rt-vosk switched off (services.use.vosk = off) or none found
+    vosk: Optional[EndpointPool[VoskClient]] = None
 
     def by_name(self) -> Dict[str, EndpointPool]:
         pools: Dict[str, EndpointPool] = {"asr": self.asr}
-        if self.tts is not None:
-            pools["tts"] = self.tts
+        for name in ("vosk", "tts"):
+            pool = getattr(self, name)
+            if pool is not None:
+                pools[name] = pool
         return pools
 
     def close(self) -> None:
@@ -164,4 +170,6 @@ def build_pools(
     asr = EndpointPool("asr", endpoints("asr", settings, directory), f.asr)
     tts_eps = endpoints("tts", settings, directory)
     tts = EndpointPool("tts", tts_eps, f.tts) if tts_eps else None
-    return SpeechPools(asr=asr, tts=tts)
+    vosk_eps = endpoints("vosk", settings, directory)
+    vosk = EndpointPool("vosk", vosk_eps, f.vosk) if vosk_eps else None
+    return SpeechPools(asr=asr, tts=tts, vosk=vosk)

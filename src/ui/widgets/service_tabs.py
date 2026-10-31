@@ -1,4 +1,4 @@
-"""Per-service settings tabs: ASR, TTS, LLM.
+"""Per-service settings tabs: ASR, Vosk, TTS, LLM.
 
 Two kinds of settings, two owners:
 - per service node (model incl. download, beam size, VAD, default voice, ...):
@@ -34,10 +34,13 @@ from PySide6.QtWidgets import (
 )
 
 from ...core.prompt import (
+    DEFAULT_CHECK_SYSTEM_PROMPT,
+    DEFAULT_CHECK_USER_TEMPLATE,
     DEFAULT_SYSTEM_PROMPT,
     DEFAULT_USER_TEMPLATE,
     asr_prompt_errors,
     build_messages,
+    check_template_errors,
     render_asr_prompt_counted,
     split_words,
     template_errors,
@@ -55,6 +58,11 @@ from ...core.runtime import EdgeSettings
 PREVIEW_SAMPLE = (
     "Dzień dobry wszystkim. Dzisiaj omówimy wdrożenie klastra NixOS i"
     " konfigurację usług rozpoznawania mowy na każdym węźle."
+)
+# the same audio as Vosk would hear it (no punctuation, misspellings)
+PREVIEW_CHECK = (
+    "dzień dobry wszystkim dzisiaj omówimy wdrożenie klastra nix os i"
+    " konfiguracje usług rozpoznawania mowy na każdym węźle"
 )
 
 # recognized words of the stream so far, for the Whisper prompt preview
@@ -584,6 +592,26 @@ class AsrTab(QWidget):
         }
 
 
+class VoskTab(QWidget):
+    """rt-vosk node: model state, load/unload and runtime config. Which
+    instance cross-checks whisper (or none): «Сервіси» / status panel."""
+
+    def __init__(self, endpoints, client_factory, bg, parent=None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        note = QLabel(
+            "Vosk розпізнає той самий звук, що й whisper, і не вигадує слів:"
+            " LLM перекладає лише те, що чув Vosk (промпт звірки - вкладка"
+            " «Переклад (LLM)»); сегмент без жодного слова у Vosk не"
+            " перекладається. Вимкнути звірку: «Сервіси» → «Звірка Vosk»."
+        )
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        self.service = ServiceConfigPanel("vosk", endpoints, client_factory, bg)
+        layout.addWidget(self.service)
+        layout.addStretch()
+
+
 class TtsTab(QWidget):
     """Voice/speed (per user, from GET /v1/audio/voices) + rt-tts node config."""
 
@@ -714,6 +742,11 @@ class LlmTab(QWidget):
         self.system_prompt.setFixedHeight(110)
         self.user_template = QPlainTextEdit(llm.user_template)
         self.user_template.setFixedHeight(60)
+        # two-text mode (whisper + Vosk cross-check, TASK-SYS-12)
+        self.check_system_prompt = QPlainTextEdit(llm.check_system_prompt)
+        self.check_system_prompt.setFixedHeight(110)
+        self.check_user_template = QPlainTextEdit(llm.check_user_template)
+        self.check_user_template.setFixedHeight(60)
         reset = QPushButton("Типові prompt і шаблон")
         reset.clicked.connect(self.reset_prompts)
         self.temperature = QDoubleSpinBox()
@@ -761,6 +794,8 @@ class LlmTab(QWidget):
         form.addRow("", self.models_status)
         form.addRow("System prompt:", self.system_prompt)
         form.addRow("Шаблон запиту:", self.user_template)
+        form.addRow("System prompt (звірка Vosk):", self.check_system_prompt)
+        form.addRow("Шаблон запиту (звірка Vosk):", self.check_user_template)
         form.addRow("Слів у {{text}} (максимум):", self.words_per_request)
         pause_row = QHBoxLayout()
         pause_row.addWidget(self.end_silence_ms)
@@ -770,7 +805,9 @@ class LlmTab(QWidget):
             "",
             QLabel(
                 "Змінні: {{text}} - сюди вставляються слова (обов'язкова),"
-                " {{source_lang}}, {{target_lang}}"
+                " {{source_lang}}, {{target_lang}}; у шаблоні звірки ще"
+                " {{text_check}} - текст Vosk (обов'язкова). Звірка - для кожної"
+                " фрази, яку розпізнав Vosk; без Vosk - звичайний prompt"
             ),
         )
         form.addRow("", reset)
@@ -778,7 +815,12 @@ class LlmTab(QWidget):
         form.addRow("Max tokens:", self.max_tokens_cap)
         form.addRow("Контекст (пар фраз):", self.context_pairs)
         form.addRow("Попередній перегляд:", self.preview)
-        for w in (self.system_prompt, self.user_template):
+        for w in (
+            self.system_prompt,
+            self.user_template,
+            self.check_system_prompt,
+            self.check_user_template,
+        ):
             w.textChanged.connect(self.update_preview)
         self.words_per_request.valueChanged.connect(self.update_preview)
         self.end_silence_ms.valueChanged.connect(self.update_preview)
@@ -834,8 +876,13 @@ class LlmTab(QWidget):
         """Rendered requests for PREVIEW_SAMPLE (or the template errors)."""
         system = self.system_prompt.toPlainText().strip()
         template = self.user_template.toPlainText().strip()
-        errors = template_errors("System prompt", system, False) + template_errors(
-            "Шаблон", template, True
+        check_system = self.check_system_prompt.toPlainText().strip()
+        check_template = self.check_user_template.toPlainText().strip()
+        errors = (
+            template_errors("System prompt", system, False)
+            + template_errors("Шаблон", template, True)
+            + check_template_errors("System prompt звірки", check_system, False)
+            + check_template_errors("Шаблон звірки", check_template, True)
         )
         if errors:
             self.preview.setPlainText("\n".join(errors))
@@ -857,11 +904,22 @@ class LlmTab(QWidget):
             lines.append(
                 f"[запит {n}/{len(chunks)}, {{{{text}}}} = {words} слів] {user}"
             )
+        check = build_messages(
+            check_system,
+            check_template,
+            PREVIEW_SAMPLE,
+            "pl",
+            check=PREVIEW_CHECK,
+        )
+        lines.append(f"[звірка Vosk, system] {check[0]['content']}")
+        lines.append(f"[звірка Vosk, запит] {check[-1]['content']}")
         self.preview.setPlainText("\n".join(lines))
 
     def reset_prompts(self) -> None:
         self.system_prompt.setPlainText(DEFAULT_SYSTEM_PROMPT)
         self.user_template.setPlainText(DEFAULT_USER_TEMPLATE)
+        self.check_system_prompt.setPlainText(DEFAULT_CHECK_SYSTEM_PROMPT)
+        self.check_user_template.setPlainText(DEFAULT_CHECK_USER_TEMPLATE)
 
     def values(self) -> Dict[str, Any]:
         return {
@@ -869,6 +927,12 @@ class LlmTab(QWidget):
             "services.llm.model": self.model.currentText().strip(),
             "services.llm.system_prompt": self.system_prompt.toPlainText().strip(),
             "services.llm.user_template": self.user_template.toPlainText().strip(),
+            "services.llm.check_system_prompt": (
+                self.check_system_prompt.toPlainText().strip()
+            ),
+            "services.llm.check_user_template": (
+                self.check_user_template.toPlainText().strip()
+            ),
             "services.llm.temperature": self.temperature.value(),
             "services.llm.max_tokens_cap": self.max_tokens_cap.value(),
             "services.llm.context_pairs": self.context_pairs.value(),
