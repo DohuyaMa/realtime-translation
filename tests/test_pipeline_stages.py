@@ -317,3 +317,23 @@ def test_long_source_streams_until_the_guard_rejects():
     assert tts_calls == ["This morning I went to the shop."]
     assert stats["llm_rejected"] == 1 and context == []
     assert llm.closed
+
+
+@pytest.mark.parametrize("text", [".", "...", "…", "-"])
+def test_asr_output_without_words_never_reaches_llm(text):
+    # live 2026-10-31: whisper returned punctuation for a short word; the LLM
+    # answered "I don't see any Polish speech transcript ... please provide"
+    played = []
+    llm = MetaLlm(["must not be called"])
+    asr = SlowAsr([AsrResult(text, "pl")], 0)
+    tts = SlowTts(0)
+    ts, vads, capture = system(asr, llm, tts, lambda a, sr: played.append(a[0]))
+    assert ts.start()
+    try:
+        vads[-1].pending.append(seg())
+        capture.push()
+        assert wait_for(lambda: ts.get_stats()["asr_no_words"] == 1)
+        time.sleep(0.2)
+        assert llm.calls == [] and tts.calls == [] and played == []
+    finally:
+        ts.stop()

@@ -204,6 +204,7 @@ class TranslationSystem:
         self._timing: Dict[str, Any] = {}
         self._backpressure: Dict[str, int] = {"llm": 0, "tts": 0, "playback": 0}
         self._dropped = 0
+        self._asr_no_words = 0
         self._audio_q: queue.Queue = queue.Queue()
         self._capturing = False
         self._threads: Dict[str, threading.Thread] = {}
@@ -668,12 +669,23 @@ class TranslationSystem:
             self._service_error(e)
             return
         text = (result.text or "").strip()
-        if not text:
+        if not self._has_words(text):
             return
         self._recognized.extend(text.split())
         with self._lock:
             self._pending_recognized.append(text)
         self._emit({"status": "transcription_complete", "original_text": text})
+
+    def _has_words(self, text: str) -> bool:
+        """ASR output with no letters ("", ".", "...", "-") is not speech:
+        the LLM answers it with a chat reply ("I don't see any transcript,
+        please provide ..."), so it never goes further - counted, logged."""
+        if any(ch.isalpha() for ch in text):
+            return True
+        if text:
+            self._asr_no_words += 1
+            logger.info("ASR output without words skipped: {!r}", text)
+        return False
 
     def _recognize(self, phrase: _Phrase) -> None:
         """ASR stage (translate mode): hand the text to the LLM stage."""
@@ -694,7 +706,7 @@ class TranslationSystem:
             return
         phrase.asr_ms = _ms(self._clock() - t0)
         text = (result.text or "").strip()
-        if not text:
+        if not self._has_words(text):
             return
         self._recognized.extend(text.split())
         with self._lock:
@@ -848,6 +860,7 @@ class TranslationSystem:
             },
             "backpressure": dict(self._backpressure),
             "dropped_segments": self._dropped,
+            "asr_no_words": self._asr_no_words,
             "use": {k: getattr(self.settings.use, k) for k in KINDS},
             "choices": {
                 k: [
