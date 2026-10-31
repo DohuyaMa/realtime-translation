@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import io
 import math
+import os
 
 import numpy as np
 
@@ -29,10 +29,22 @@ def decode_audio_file(data: bytes, target_rate: int = TARGET_RATE) -> np.ndarray
         raise AudioDecodeError("empty audio file")
     import soundfile as sf
 
+    # Decode from a file descriptor (sf_open_fd), not a BytesIO: soundfile's
+    # virtual IO needs cffi callbacks = write+execute memory, which the
+    # systemd unit forbids (MemoryDenyWriteExecute). An anonymous memfd keeps
+    # the upload in RAM, no temp file on disk.
+    fd = os.memfd_create("rt-upload", os.MFD_CLOEXEC)
     try:
-        audio, rate = sf.read(io.BytesIO(data), dtype="float32", always_2d=True)
+        with os.fdopen(fd, "w+b", closefd=False) as f:
+            f.write(data)
+        os.lseek(fd, 0, os.SEEK_SET)
+        with sf.SoundFile(fd, closefd=False) as snd:
+            rate = snd.samplerate
+            audio = snd.read(dtype="float32", always_2d=True)
     except Exception as exc:  # noqa: BLE001 - libsndfile raises various types
         raise AudioDecodeError(f"cannot decode audio: {exc}") from exc
+    finally:
+        os.close(fd)
     if audio.shape[0] == 0:
         raise AudioDecodeError("audio has no samples")
     return resample(audio.mean(axis=1), int(rate), target_rate)

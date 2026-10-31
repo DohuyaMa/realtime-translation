@@ -40,3 +40,32 @@ def test_resample_identity_and_ratio():
     x = tone(24000, sr=24000)
     assert resample(x, 24000, 24000) is not None
     assert resample(x, 24000, 16000).shape == (16000,)
+
+
+def test_decode_uses_fd_not_virtual_io(monkeypatch):
+    """BytesIO needs cffi callbacks (W+X memory), forbidden by the unit's
+    MemoryDenyWriteExecute; decoding goes through an fd (memfd)."""
+    import io
+    import wave
+
+    import numpy as np
+    import soundfile as sf
+
+    from src.services.common.audio import decode_audio_file
+
+    seen = []
+    real = sf.SoundFile
+
+    def spy(file, *a, **kw):
+        seen.append(type(file))
+        return real(file, *a, **kw)
+
+    monkeypatch.setattr(sf, "SoundFile", spy)
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(16000)
+        w.writeframes(np.zeros(1600, "<i2").tobytes())
+    assert decode_audio_file(buf.getvalue()).shape == (1600,)
+    assert seen == [int]

@@ -9,6 +9,10 @@ let
     name = "rt-tts-fake-deployed";
     paths = [ fakes.tts (pkgs.writeTextDir "env" "RT_TTS_VOICE=am_adam\n") ];
   };
+  # 0.1 s of 16 kHz silence for the real-package decode check
+  sampleWav = pkgs.runCommand "rt-sample.wav" { nativeBuildInputs = [ pkgs.python3 ]; } ''
+    python3 -c "import wave; w = wave.open('$out', 'wb'); w.setnchannels(1); w.setsampwidth(2); w.setframerate(16000); w.writeframes(bytes(3200)); w.close()"
+  '';
 in
 pkgs.testers.runNixOSTest {
   name = "rt-speech";
@@ -37,6 +41,24 @@ pkgs.testers.runNixOSTest {
       listenAddresses = [ "127.0.0.1" config.networking.primaryIPAddress ];
       openFirewall = true;
       firewallInterfaces = [ "eth9" ]; # not the test VLAN: must stay closed from the client
+    };
+  };
+
+  # Real rt-asr/rt-tts CPU bundles under the module's real hardening
+  # (rt-asr: MemoryDenyWriteExecute=yes); fake backends, so no model download.
+  nodes.real = { ... }: {
+    imports = [ self.nixosModules.rt-speech ];
+    virtualisation.memorySize = 2048;
+    environment.systemPackages = [ pkgs.curl ];
+    services.rtSpeech.asr = {
+      enable = true;
+      package = self.packages.x86_64-linux.rt-asr-cpu;
+      extraEnv.RT_ASR_BACKEND = "fake";
+    };
+    services.rtSpeech.tts = {
+      enable = true;
+      package = self.packages.x86_64-linux.rt-tts-cpu;
+      extraEnv.RT_TTS_BACKEND = "fake";
     };
   };
 
@@ -90,6 +112,17 @@ pkgs.testers.runNixOSTest {
         after = server.succeed("curl -sf http://127.0.0.1:8093/config")
         assert after == before, (before, after)
         server.succeed("test \"$(stat -c %U /var/lib/rt-tts/runtime-config.json)\" = rt-tts")
+
+    with subtest("real cpu bundles decode/encode audio under MemoryDenyWriteExecute"):
+        real.wait_for_unit("rt-asr.service")
+        real.wait_for_open_port(8091)
+        real.succeed("systemctl show rt-asr -p MemoryDenyWriteExecute --value | grep -qx yes")
+        out = real.succeed("curl -sf -F file=@${sampleWav} -F response_format=json http://127.0.0.1:8091/v1/audio/transcriptions")
+        assert '"text"' in out, out
+        real.wait_for_unit("rt-tts.service")
+        real.wait_for_open_port(8093)
+        real.succeed("curl -sf -o /tmp/s.wav -H 'Content-Type: application/json' -d '{\"input\": \"Hello.\"}' http://127.0.0.1:8093/v1/audio/speech")
+        real.succeed("test $(stat -c %s /tmp/s.wav) -gt 44")
 
     with subtest("firewall opens only the configured interface"):
         client.wait_for_unit("multi-user.target")
