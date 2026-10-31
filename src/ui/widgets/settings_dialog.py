@@ -129,9 +129,10 @@ class EndpointsTab(QWidget):
             self.allowed.addItem(item)
         self.allow_all.toggled.connect(self._on_allow_all)
         self.allowed.itemChanged.connect(self._on_item_changed)
+        # llm: chosen in the Переклад tab (with the worker's model list)
         self.use = {
             kind: use_combo(kind, settings, service_choices(kind, settings, services))
-            for kind in KINDS
+            for kind in ("asr", "tts")
         }
         form.addRow("Django URL (свій хост першим):", self.django_urls)
         form.addRow("DRF token file:", self.django_token_file)
@@ -143,7 +144,6 @@ class EndpointsTab(QWidget):
         form.addRow("Дозволені сервіси:", self.allow_all)
         form.addRow("", self.allowed)
         form.addRow("Використовувати ASR:", self.use["asr"])
-        form.addRow("Використовувати LLM:", self.use["llm"])
         form.addRow("Використовувати TTS:", self.use["tts"])
         form.addRow("Режим:", self.mode)
         form.addRow("Мова:", self.source_language)
@@ -307,6 +307,16 @@ def service_client_factory(kind: str, settings: EdgeSettings):
     """Endpoint -> client for the settings dialog (config, models, voices)."""
     from ...clients import client_factories
 
+    if kind == "llm":  # llama worker: GET /v1/models with its token
+        from ...clients import ServiceClient
+
+        t = settings.timeouts
+        return lambda e: ServiceClient(
+            e.url,
+            credential=e.credential,
+            timeout_s=10.0,
+            connect_timeout_s=t.connect_s,
+        )
     f = client_factories(settings)
     return f.tts if kind == "tts" else f.asr
 
@@ -350,7 +360,13 @@ class SettingsDialog(QDialog):
             service_client_factory("tts", settings),
             self.bg,
         )
-        self.llm_tab = LlmTab(settings, services)
+        self.llm_tab = LlmTab(
+            settings,
+            services,
+            service_choices("llm", settings, services),
+            service_client_factory("llm", settings),
+            self.bg,
+        )
         self.segmentation_tab = SegmentationTab(settings)
         tabs.addTab(self.endpoints_tab, "Сервіси")
         tabs.addTab(self.asr_tab, "Розпізнавання (ASR)")

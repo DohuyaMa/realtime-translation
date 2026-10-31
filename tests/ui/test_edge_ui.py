@@ -355,7 +355,10 @@ def test_asr_panel_lists_cached_models_and_applies_changes(app):
         lambda e: client,
         Background(sync=True),
     )
-    assert tab.values() == {"services.asr.prompt": "Kubernetes, NixOS"}
+    assert tab.values() == {
+        "services.asr.prompt": "Kubernetes, NixOS",
+        "services.asr.previous_words": 30,
+    }
     panel = tab.service
     panel.load()
     model = panel.editors["model"].widget
@@ -475,7 +478,7 @@ def test_use_choice_lists_local_via_loopback(app):
     asr.setCurrentIndex(2)
     v = tab.values()
     assert v["services.use.asr"] == "cyborg" and v["services.use.tts"] == "cyborg"
-    assert v["services.use.llm"] is None
+    assert "services.use.llm" not in v  # chosen in the Переклад tab
 
 
 def test_status_panel_use_combo_emits_choice(app):
@@ -547,3 +550,84 @@ def test_llm_tab_shows_legacy_template_notice(app):
     tab = LlmTab(s)
     assert not tab.notice.isHidden()
     assert "old {lang}/{text} syntax" in tab.notice.text()
+
+
+def test_llm_remote_worker_selectable_with_its_models(app, cfg):
+    """Owner bug 2026-10-31: the translation model/worker choice was greyed
+    out (HM always exported RT_EDGE_LLM_MODEL). Without env it is editable,
+    remote workers are listed and their models come from that worker."""
+    from src.ui.widgets.service_tabs import Background, LlmTab
+    from src.ui.widgets.settings_dialog import current_settings
+
+    s = current_settings()
+    assert "llm.model" not in s.managed
+    asked = []
+
+    class Worker:
+        def __init__(self, e):
+            self.e = e
+
+        def models(self):
+            asked.append((self.e.node, self.e.credential.value))
+            return {"data": [{"id": "Qwen3.5-4B.Q4_K_M.gguf"}]}
+
+        def close(self):
+            pass
+
+    from src.clients import Credential, Endpoint
+
+    eps = [
+        Endpoint(
+            "llm", "cyborg", "http://127.0.0.1:8080", Credential("t-l"), local=True
+        ),
+        Endpoint(
+            "llm", "SKTOP-NOTE27-NIXOS", "http://100.87.250.83:8080", Credential("t-r")
+        ),
+    ]
+    tab = LlmTab(s, (), eps, Worker, Background(sync=True))
+    assert tab.model.isEnabled() and tab.use.isEnabled()
+    assert tab.models_button.isEnabled()
+    assert [tab.use.itemData(i) for i in range(tab.use.count())] == [
+        None,
+        "cyborg",
+        "SKTOP-NOTE27-NIXOS",
+    ]
+    tab.use.setCurrentIndex(2)
+    tab.load_models()
+    assert asked == [("SKTOP-NOTE27-NIXOS", "t-r")]
+    tab.model.setCurrentText("Qwen3.5-4B.Q4_K_M.gguf")
+    v = tab.values()
+    assert v["services.use.llm"] == "SKTOP-NOTE27-NIXOS"
+    assert v["services.llm.model"] == "Qwen3.5-4B.Q4_K_M.gguf"
+
+
+def test_llm_model_read_only_only_when_set_by_env(app):
+    from src.ui.widgets.service_tabs import LlmTab
+
+    s = resolve_edge_settings({}, {"RT_EDGE_LLM_MODEL": "m"})
+    tab = LlmTab(s)
+    assert not tab.model.isEnabled() and tab.use.isEnabled()
+
+
+def test_asr_tab_template_previous_words_and_preview(app):
+    from src.ui.widgets.service_tabs import AsrTab, Background
+
+    s = resolve_edge_settings({"services": {"source_language": "uk"}}, {})
+    assert s.asr.prompt == "{{previous_text}}" and s.asr.previous_words == 30
+    tab = AsrTab(s, [], lambda e: None, Background(sync=True))
+    tab.previous_words.setValue(3)
+    assert tab.preview.toPlainText() == "сервісів розпізнавання мовлення"
+    tab.prompt.setPlainText("NixOS, Kubernetes ({{source_lang}}). {{previous_text}}")
+    assert tab.preview.toPlainText() == (
+        "NixOS, Kubernetes (Ukrainian). сервісів розпізнавання мовлення"
+    )
+    tab.prompt.setPlainText("Тільки словник")  # no variables: sent as-is
+    assert tab.preview.toPlainText() == "Тільки словник"
+    tab.prompt.setPlainText("{{previous}}")
+    assert "unknown placeholder(s) previous" in tab.preview.toPlainText()
+    tab.prompt.setPlainText("")
+    assert tab.preview.toPlainText() == "(без prompt)"
+    assert tab.values() == {
+        "services.asr.prompt": "",
+        "services.asr.previous_words": 3,
+    }

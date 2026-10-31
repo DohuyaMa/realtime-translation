@@ -172,12 +172,13 @@ curl -s -X POST http://127.0.0.1:8091/config -H "$H" \
 | `services.source_language` | - | `auto`/`pl`/`uk`/`ru`/`en` |
 | `services.timeouts.{connect_s,asr_s,tts_s}` | - | 3 / 30 / 30 |
 | `services.llm.session_ttl_s` | - | ttl app-сесії, 6..300, default 30 (heartbeat кожні ttl/3) |
-| `services.llm.model` | `RT_EDGE_LLM_MODEL` | default `local` |
+| `services.llm.model` | `RT_EDGE_LLM_MODEL` | default `local`; вибір у вкладці «Переклад» зі списку `GET /v1/models` обраного воркера (env/HM `llm.model` робить поле лише для читання) |
 | `services.llm.{max_tokens_cap,temperature,context_pairs,timeout_s}` | - | 512 / 0.1 / 3 / 15 |
 | `services.llm.system_prompt` | - | system prompt перекладу; змінні `{{source_lang}}`, `{{target_lang}}`; `""` = вбудований |
 | `services.llm.user_template` | - | шаблон запиту до LLM: `{{text}}` (обов'язкова - куди вставляються слова), `{{source_lang}}`, `{{target_lang}}`; `""` = `{{text}}`. Старий синтаксис `{lang}`/`{text}` - WARNING, використовується типовий шаблон (видно в діалозі) |
 | `services.llm.words_per_request` | - | скільки слів розпізнаного тексту в одному запиті до LLM (default 40, >= 1); довший текст ділиться по кінцях речень (якщо вміщаються, інакше по словах), кожна частина йде через шаблон, результати з'єднуються по порядку. Вкладка «Переклад» показує попередній перегляд запитів для зразкового речення |
-| `services.asr.prompt` | - | Whisper prompt (словник, імена, стиль), додається перед контекстом останніх фраз |
+| `services.asr.prompt` | - | шаблон Whisper prompt (словник, імена, стиль); необов'язкові змінні `{{previous_text}}` (останні `previous_words` розпізнаних слів) і `{{source_lang}}`. Без змінних текст іде як є, попередні слова не додаються; `""` - без prompt; `null` = `{{previous_text}}`. Обрізається до ~300 символів (найстаріші слова цілими). Невідомі змінні - помилка збереження; у вкладці «Розпізнавання» попередній перегляд |
+| `services.asr.previous_words` | - | скільки останніх розпізнаних слів іде в `{{previous_text}}` (default 30, 0 = жодних) |
 | `services.tts.{voice,speed}` | - | голос (з `GET /v1/audio/voices`) і швидкість; `null` = типові сервісу |
 | `segmentation.translate.*` | - | `threshold, min_speech_ms, end_silence_ms, soft_max_ms, soft_silence_ms, hard_max_ms, lookback_ms, preroll_ms` |
 | `segmentation.transcribe.*` | - | `chunk_min_s` (300), `chunk_max_s` (600, <= 900), `soft_silence_ms, lookback_ms, keep_silence_ms` |
@@ -199,7 +200,7 @@ services:
 
 Сервіс слухає кожну адресу з `RT_LISTEN_ADDRESSES` (список через кому, default `127.0.0.1`; окремий сокет на адресу, ще не піднята адреса теж біндиться - `IP_FREEBIND`). Для віддаленого доступу додайте кластерну адресу вузла поряд із `127.0.0.1`, напр. `RT_LISTEN_ADDRESSES=127.0.0.1,100.64.0.10` (+ firewall, + `RT_API_TOKEN_FILE`); `0.0.0.0` не потрібен.
 
-HM-модуль edge: `homeManagerModules.rt-translator` (також `default`), опції `rt-translator.*`: `django.urls`, `django.tokenFile`, `local.{llm,asr,tts}` (default `http://127.0.0.1:{8080,8091,8093}`, `null` - сервісу на хості немає), `localTokenFile` (default `/run/llama/local-token`), `allowedServices` (`null` - усі; тоді вибір в UI), `llm.model`, `mode` (`null` = auto), `autostart`, `virtualSinks.enable`. Вони перетворюються на `RT_EDGE_*` env. Assertions: `mode = "translate"` потребує `local.llm` і `local.tts` або `django.urls`; `django.urls` потребує `django.tokenFile`; токен-файли не можуть бути в `/nix/store`.
+HM-модуль edge: `homeManagerModules.rt-translator` (також `default`), опції `rt-translator.*`: `django.urls`, `django.tokenFile`, `local.{llm,asr,tts}` (default `http://127.0.0.1:{8080,8091,8093}`, `null` - сервісу на хості немає), `localTokenFile` (default `/run/llama/local-token`), `allowedServices` (`null` - усі; тоді вибір в UI), `llm.model` (`null` - вибір в UI), `mode` (`null` = auto), `autostart`, `virtualSinks.enable`. Вони перетворюються на `RT_EDGE_*` env. Assertions: `mode = "translate"` потребує `local.llm` і `local.tts` або `django.urls`; `django.urls` потребує `django.tokenFile`; токен-файли не можуть бути в `/nix/store`.
 
 Звук: потрібні PipeWire null-sink-и `rt_virtual_input` і `rt_virtual_output` (створює `nix develop`, `nixosModules.virtual-sinks` або HM `virtualSinks.enable`).
 

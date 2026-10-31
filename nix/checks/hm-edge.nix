@@ -59,7 +59,6 @@ let
         "RT_EDGE_ALLOWED_SERVICES=llm:cyborg,tts:cyborg"
         "RT_EDGE_DJANGO_TOKEN_FILE=/run/user/1000/dj-token"
         "RT_EDGE_DJANGO_URLS=http://127.0.0.1:8000,http://dj:8000"
-        "RT_EDGE_LLM_MODEL=local"
         "RT_EDGE_LOCAL_ASR_URL=http://127.0.0.1:8091"
         "RT_EDGE_LOCAL_LLM_URL=http://127.0.0.1:8080"
         "RT_EDGE_LOCAL_TOKEN_FILE=/run/llama/local-token"
@@ -77,8 +76,8 @@ let
         sinks = transcribe.config.xdg.configFile ? "pipewire/pipewire.conf.d/30-rt-virtual-sinks.conf";
       };
       expected = {
+        # llm.model = null by default: no RT_EDGE_LLM_MODEL, model stays selectable in the UI
         env = [
-          "RT_EDGE_LLM_MODEL=local"
           "RT_EDGE_LOCAL_ASR_URL=http://127.0.0.1:8091"
           "RT_EDGE_LOCAL_LLM_URL=http://127.0.0.1:8080"
           "RT_EDGE_LOCAL_TOKEN_FILE=/run/llama/local-token"

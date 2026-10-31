@@ -33,15 +33,24 @@ from PySide6.QtWidgets import (
 from ...core.prompt import (
     DEFAULT_SYSTEM_PROMPT,
     DEFAULT_USER_TEMPLATE,
+    asr_prompt_errors,
     build_messages,
+    render_asr_prompt,
     split_words,
     template_errors,
 )
+from ...translation_system import PREVIOUS_WORDS_MAX
 from ...core.runtime import EdgeSettings
 
 PREVIEW_SAMPLE = (
     "Dzień dobry wszystkim. Dzisiaj omówimy wdrożenie klastra NixOS i"
     " konfigurację usług rozpoznawania mowy na każdym węźle."
+)
+
+# recognized words of the stream so far, for the Whisper prompt preview
+PREVIEW_PREVIOUS = (
+    "Добрий день усім. Сьогодні говоримо про розгортання кластера NixOS"
+    " і налаштування сервісів розпізнавання мовлення"
 )
 
 # A model switch reloads the service and may download the model first.
@@ -281,18 +290,55 @@ class AsrTab(QWidget):
         form = QFormLayout(user)
         self.prompt = QPlainTextEdit(settings.asr.prompt)
         self.prompt.setPlaceholderText(
-            "Whisper prompt: словник, імена, терміни, стиль; додається перед"
-            " контекстом останніх фраз"
+            "Whisper prompt: словник, імена, терміни, стиль. Порожньо = без prompt"
         )
         self.prompt.setFixedHeight(80)
-        form.addRow("Prompt (шаблон):", self.prompt)
+        self.previous_words = QSpinBox()
+        self.previous_words.setRange(0, PREVIOUS_WORDS_MAX)
+        self.previous_words.setValue(settings.asr.previous_words)
+        self.previous_words.setToolTip(
+            "Скільки останніх розпізнаних слів підставляється в {{previous_text}}"
+            " (0 = жодних); без змінної в шаблоні нічого не додається"
+        )
+        self.preview = QPlainTextEdit()
+        self.preview.setReadOnly(True)
+        self.preview.setFixedHeight(80)
+        form.addRow("Шаблон prompt:", self.prompt)
+        form.addRow(
+            "",
+            QLabel(
+                "Змінні (необов'язкові): {{previous_text}} - попередні слова,"
+                " {{source_lang}}"
+            ),
+        )
+        form.addRow("Попередніх слів:", self.previous_words)
+        form.addRow("Попередній перегляд:", self.preview)
+        self._source_lang = settings.source_language
+        self.prompt.textChanged.connect(self.update_preview)
+        self.previous_words.valueChanged.connect(self.update_preview)
+        self.update_preview()
         layout.addWidget(user)
         self.service = ServiceConfigPanel("asr", endpoints, client_factory, bg)
         layout.addWidget(self.service)
         layout.addStretch()
 
+    def update_preview(self) -> None:
+        template = self.prompt.toPlainText().strip()
+        errors = asr_prompt_errors("Шаблон prompt", template)
+        if errors:
+            self.preview.setPlainText("\n".join(errors))
+            return
+        lang = None if self._source_lang == "auto" else self._source_lang
+        prompt = render_asr_prompt(
+            template, PREVIEW_PREVIOUS.split(), self.previous_words.value(), lang
+        )
+        self.preview.setPlainText(prompt or "(без prompt)")
+
     def values(self) -> Dict[str, Any]:
-        return {"services.asr.prompt": self.prompt.toPlainText().strip()}
+        return {
+            "services.asr.prompt": self.prompt.toPlainText().strip(),
+            "services.asr.previous_words": self.previous_words.value(),
+        }
 
 
 class TtsTab(QWidget):
@@ -381,10 +427,40 @@ class TtsTab(QWidget):
 class LlmTab(QWidget):
     """Translation prompt/template and request parameters (per user)."""
 
-    def __init__(self, settings: EdgeSettings, services=(), parent=None):
+    def __init__(
+        self,
+        settings: EdgeSettings,
+        services=(),
+        endpoints=(),
+        client_factory: Optional[Callable[[Any], Any]] = None,
+        bg: Optional[Background] = None,
+        parent=None,
+    ):
         super().__init__(parent)
         llm = settings.llm
         form = QFormLayout(self)
+        self.endpoints = list(endpoints)
+        self._factory = client_factory
+        self._bg = bg or Background(self)
+        # which worker translates: auto (local first, failover) or one node,
+        # local or remote alike (services.use.llm)
+        self.use = QComboBox()
+        self.use.addItem("auto (локальний першим, failover)", None)
+        for e in self.endpoints:
+            label = f"{e.node} — {e.url}" + (" (локальний)" if e.local else "")
+            self.use.addItem(label, e.node)
+        pinned = settings.use.llm
+        if pinned is not None:
+            if self.use.findData(pinned) < 0:
+                self.use.addItem(f"{pinned} (недоступний)", pinned)
+            self.use.setCurrentIndex(self.use.findData(pinned))
+        self.models_button = QPushButton("Моделі вузла")
+        self.models_button.setEnabled(
+            bool(self.endpoints) and client_factory is not None
+        )
+        self.models_button.clicked.connect(self.load_models)
+        self.models_status = QLabel("")
+        self.models_status.setWordWrap(True)
         self.model = QComboBox()
         self.model.setEditable(True)
         names = [m for e in services if e.kind == "llm" for m in e.models]
@@ -423,7 +499,12 @@ class LlmTab(QWidget):
         self.preview.setReadOnly(True)
         self.preview.setFixedHeight(150)
         form.addRow(self.notice)
-        form.addRow("Модель:", self.model)
+        form.addRow("Воркер (вузол):", self.use)
+        model_row = QHBoxLayout()
+        model_row.addWidget(self.model, 1)
+        model_row.addWidget(self.models_button)
+        form.addRow("Модель:", model_row)
+        form.addRow("", self.models_status)
         form.addRow("System prompt:", self.system_prompt)
         form.addRow("Шаблон запиту:", self.user_template)
         form.addRow(
@@ -446,6 +527,44 @@ class LlmTab(QWidget):
         if "llm.model" in settings.managed:
             self.model.setEnabled(False)
             self.model.setToolTip("Задано через RT_EDGE_* (лише читання)")
+
+    def model_endpoint(self):
+        """Chosen worker, or the first one (auto order) for the model list."""
+        node = self.use.currentData()
+        for e in self.endpoints:
+            if node is None or e.node == node:
+                return e
+        return None
+
+    def load_models(self) -> None:
+        """GET /v1/models of the chosen worker (its discovered token)."""
+        endpoint = self.model_endpoint()
+        if endpoint is None or self._factory is None:
+            self.models_status.setText("воркер недоступний")
+            return
+        client = self._factory(endpoint)
+        self.models_status.setText(f"запит моделей у {endpoint.node}…")
+
+        def fetch():
+            try:
+                return client.models()
+            finally:
+                client.close()
+
+        def done(ok: bool, result: Any) -> None:
+            if not ok:
+                self.models_status.setText(f"{endpoint.node}: {result}")
+                return
+            items = result.get("data") or result.get("models") or []
+            ids = [str(m.get("id")) for m in items if m.get("id")]
+            current = self.model.currentText()
+            self.model.clear()
+            for name in dict.fromkeys(["local", *ids, current]):
+                self.model.addItem(name)
+            self.model.setCurrentText(current)
+            self.models_status.setText(f"{endpoint.node}: {', '.join(ids) or '-'}")
+
+        self._bg.run(fetch, done)
 
     def update_preview(self) -> None:
         """Rendered requests for PREVIEW_SAMPLE (or the template errors)."""
@@ -470,6 +589,7 @@ class LlmTab(QWidget):
 
     def values(self) -> Dict[str, Any]:
         return {
+            "services.use.llm": self.use.currentData(),
             "services.llm.model": self.model.currentText().strip(),
             "services.llm.system_prompt": self.system_prompt.toPlainText().strip(),
             "services.llm.user_template": self.user_template.toPlainText().strip(),

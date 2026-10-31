@@ -35,7 +35,12 @@ def is_legacy(template: str) -> bool:
     return bool(_LEGACY.search(template))
 
 
-def template_errors(name: str, template: str, require_text: bool) -> list[str]:
+def template_errors(
+    name: str,
+    template: str,
+    require_text: bool,
+    allowed: tuple[str, ...] = PLACEHOLDERS,
+) -> list[str]:
     errors = []
     if is_legacy(template):
         errors.append(
@@ -43,11 +48,11 @@ def template_errors(name: str, template: str, require_text: bool) -> list[str]:
             " use {{source_lang}} / {{text}}"
         )
     names = {m.group(1) for m in _PLACEHOLDER.finditer(template)}
-    unknown = sorted(names - set(PLACEHOLDERS))
+    unknown = sorted(names - set(allowed))
     if unknown:
         errors.append(
             f"{name}: unknown placeholder(s) {', '.join(unknown)};"
-            f" allowed: {', '.join('{{' + p + '}}' for p in PLACEHOLDERS)}"
+            f" allowed: {', '.join('{{' + p + '}}' for p in allowed)}"
         )
     if require_text and "text" not in names:
         errors.append(f"{name} must contain {{{{text}}}} (where the words go)")
@@ -100,3 +105,46 @@ def build_messages(
         messages.append({"role": "assistant", "content": tr})
     messages.append({"role": "user", "content": render(user_template, values(chunk))})
     return messages
+
+
+# -- Whisper prompt (rt-asr ``prompt`` / initial_prompt) ----------------------
+
+ASR_PLACEHOLDERS = ("previous_text", "source_lang")
+# Optional variables: a template without them is sent as-is (nothing is
+# appended). Default keeps continuity: just the previous words.
+DEFAULT_ASR_PROMPT = "{{previous_text}}"
+DEFAULT_PREVIOUS_WORDS = 30
+# Whisper's prompt holds at most 223 tokens; Cyrillic/Polish text runs at
+# ~1 token per 1.5 chars, so 300 chars stays below the limit.
+ASR_PROMPT_MAX_CHARS = 300
+
+
+def asr_prompt_errors(name: str, template: str) -> list[str]:
+    errors = template_errors(name, template, False, ASR_PLACEHOLDERS)
+    static = render(template, {"previous_text": "", "source_lang": "Ukrainian"})
+    if len(static.strip()) > ASR_PROMPT_MAX_CHARS:
+        errors.append(
+            f"{name}: {len(static.strip())} characters without previous words;"
+            f" Whisper accepts ~{ASR_PROMPT_MAX_CHARS}"
+        )
+    return errors
+
+
+def render_asr_prompt(
+    template: str,
+    previous_words: list[str],
+    count: int,
+    source_lang: str | None,
+    max_chars: int = ASR_PROMPT_MAX_CHARS,
+) -> str | None:
+    """Rendered Whisper prompt; ``{{previous_text}}`` = the last ``count``
+    words, dropped from the oldest (whole words) until within ``max_chars``."""
+    words = list(previous_words[-count:]) if count > 0 else []
+    lang = LANGUAGE_NAMES.get(source_lang or "", "")
+    while True:
+        text = render(
+            template, {"previous_text": " ".join(words), "source_lang": lang}
+        ).strip()
+        if len(text) <= max_chars or not words:
+            return text or None
+        words.pop(0)

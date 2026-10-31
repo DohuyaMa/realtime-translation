@@ -18,9 +18,12 @@ from typing import Any, Literal, Mapping, Optional
 from src.segmentation import SegmenterConfig
 
 from .prompt import (
+    DEFAULT_ASR_PROMPT,
+    DEFAULT_PREVIOUS_WORDS,
     DEFAULT_SYSTEM_PROMPT,
     DEFAULT_USER_TEMPLATE,
     DEFAULT_WORDS_PER_REQUEST,
+    asr_prompt_errors,
     is_legacy,
     template_errors,
 )
@@ -85,9 +88,11 @@ class ServiceUse:
 class AsrRequestSettings:
     """Sent with every rt-asr request (per user, not per service node)."""
 
-    # Whisper initial prompt (vocabulary / spelling / style hint); prepended
-    # to the rolling context of the last recognized phrases.
-    prompt: str = ""
+    # Whisper prompt template (vocabulary / names / style). Optional
+    # variables {{previous_text}} (last ``previous_words`` recognized words)
+    # and {{source_lang}}; without them the text is sent as-is.
+    prompt: str = DEFAULT_ASR_PROMPT
+    previous_words: int = DEFAULT_PREVIOUS_WORDS
 
 
 @dataclass(frozen=True)
@@ -171,6 +176,9 @@ class EdgeSettings:
         errors += template_errors(
             "llm.user_template", self.llm.user_template, require_text=True
         )
+        errors += asr_prompt_errors("asr.prompt", self.asr.prompt)
+        if self.asr.previous_words < 0:
+            errors.append("asr.previous_words must be >= 0")
         if self.llm.words_per_request < 1:
             errors.append("llm.words_per_request must be >= 1")
         if self.tts.speed is not None and not 0.25 <= self.tts.speed <= 4.0:
@@ -351,7 +359,15 @@ def resolve_edge_settings(cfg: Mapping, environ: Mapping) -> EdgeSettings:
         allowed_services=None if allowed is None else _items(allowed),
         use=ServiceUse(llm=use("llm"), asr=use("asr"), tts=use("tts")),
         llm=llm,
-        asr=AsrRequestSettings(prompt=_text(asr_cfg.get("prompt")) or ""),
+        asr=AsrRequestSettings(
+            # null/absent = default template; "" = no prompt at all
+            prompt=(
+                DEFAULT_ASR_PROMPT
+                if asr_cfg.get("prompt") is None
+                else str(asr_cfg["prompt"]).strip()
+            ),
+            previous_words=int(asr_cfg.get("previous_words", DEFAULT_PREVIOUS_WORDS)),
+        ),
         tts=TtsRequestSettings(
             voice=_clean(tts_cfg.get("voice")),
             speed=None if speed in (None, "") else float(speed),

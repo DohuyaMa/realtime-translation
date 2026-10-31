@@ -26,7 +26,12 @@ services:
     asr_s: 30
     tts_s: 30
   asr:
-    prompt: ""                  # Whisper prompt (vocabulary/names/style), prepended to the last phrases
+    # Whisper prompt template (vocabulary/names/style). Optional variables:
+    # {{previous_text}} = last previous_words recognized words, {{source_lang}}.
+    # Without variables the text is sent as-is (nothing appended); "" = no prompt;
+    # null = default "{{previous_text}}". Trimmed to ~300 chars (oldest words first).
+    prompt: null
+    previous_words: 30          # 0 = none
   tts:
     voice: null                 # null = service default; list: GET /v1/audio/voices (UI: Озвучка)
     speed: null                 # 0.25..4.0; null = service default

@@ -30,6 +30,7 @@ from .clients import (
     endpoints,
 )
 from .clients.discovery import choices
+from .core.prompt import render_asr_prompt
 from .core.runtime import KINDS, EdgeSettings, LlmSettings
 from .segmentation import Segment, SegmenterConfig
 
@@ -38,7 +39,8 @@ BLOCKSIZE = 1024
 ASR_RATE = 16000
 TRANSLATE_QUEUE_MAX = 5
 PLAYBACK_QUEUE_MAX = 8
-PROMPT_HISTORY = 3
+# recognized words kept for {{previous_text}} (asr.previous_words <= this)
+PREVIOUS_WORDS_MAX = 1000
 
 # LlmSettings fields that only shape the prompt/request; everything else
 # changes where/how the LLM is reached and requires a restart.
@@ -154,7 +156,7 @@ class TranslationSystem:
         self._capturing = False
         self._threads: Dict[str, threading.Thread] = {}
 
-        self._recognized: deque = deque(maxlen=PROMPT_HISTORY)
+        self._recognized: deque = deque(maxlen=PREVIOUS_WORDS_MAX)
         self._translation_context: deque = deque(maxlen=settings.llm.context_pairs)
         self._pending_recognized: List[str] = []
         self._pending_translated: List[str] = []
@@ -512,6 +514,12 @@ class TranslationSystem:
         lang = self.settings.source_language
         return None if lang == "auto" else lang
 
+    def _asr_prompt(self) -> Optional[str]:
+        asr = self.settings.asr
+        return render_asr_prompt(
+            asr.prompt, list(self._recognized), asr.previous_words, self._language()
+        )
+
     def _transcribe_segment(self, segment: Segment) -> None:
         audio = segment.audio
         timeout_s = max(60.0, len(audio) / ASR_RATE)
@@ -520,7 +528,7 @@ class TranslationSystem:
                 lambda c: c.transcribe(
                     audio,
                     language=self._language(),
-                    prompt=self.settings.asr.prompt or None,
+                    prompt=self._asr_prompt(),
                     priority="batch",
                     timeout_s=timeout_s,
                 )
@@ -531,13 +539,14 @@ class TranslationSystem:
         text = (result.text or "").strip()
         if not text:
             return
+        self._recognized.extend(text.split())
         with self._lock:
             self._pending_recognized.append(text)
         self._emit({"status": "transcription_complete", "original_text": text})
 
     def _translate_segment(self, segment: Segment) -> None:
         lang = self._language()
-        prompt = " ".join([self.settings.asr.prompt, *self._recognized]).strip() or None
+        prompt = self._asr_prompt()
         try:
             result = self._pools.asr.call(
                 lambda c: c.transcribe(
@@ -550,7 +559,7 @@ class TranslationSystem:
         text = (result.text or "").strip()
         if not text:
             return
-        self._recognized.append(text)
+        self._recognized.extend(text.split())
         with self._lock:
             self._pending_recognized.append(text)
         src = lang or result.language
