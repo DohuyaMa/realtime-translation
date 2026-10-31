@@ -17,19 +17,19 @@ from typing import Any, Literal, Mapping, Optional
 
 from src.segmentation import SegmenterConfig
 
+from .prompt import (
+    DEFAULT_SYSTEM_PROMPT,
+    DEFAULT_USER_TEMPLATE,
+    DEFAULT_WORDS_PER_REQUEST,
+    is_legacy,
+    template_errors,
+)
+
 DEFAULT_ASR_URL = "http://127.0.0.1:8091"
 DEFAULT_LOCAL_TOKEN_FILE = "/run/llama/local-token"
 KINDS = ("llm", "asr", "tts")
 MODES = ("auto", "transcribe", "translate")
 SOURCE_LANGUAGES = ("auto", "pl", "uk", "ru", "en")
-# {lang}: source language name (e.g. "Polish")
-DEFAULT_SYSTEM_PROMPT = (
-    "You are a professional interpreter. Translate the user's {lang} speech transcript "
-    "into natural English. Output only the English translation, nothing else. "
-    "Fix obvious speech-recognition errors using context."
-)
-# {text}: recognized phrase, {lang}: source language name
-DEFAULT_USER_TEMPLATE = "{text}"
 
 
 @dataclass(frozen=True)
@@ -65,6 +65,9 @@ class LlmSettings:
     timeout_s: float = 15.0
     system_prompt: str = DEFAULT_SYSTEM_PROMPT
     user_template: str = DEFAULT_USER_TEMPLATE
+    # words of recognized text per LLM call; longer text is split (sentence
+    # ends preferred) and every chunk goes through user_template
+    words_per_request: int = DEFAULT_WORDS_PER_REQUEST
 
 
 @dataclass(frozen=True)
@@ -118,6 +121,8 @@ class EdgeSettings:
     timeouts: Timeouts = Timeouts(connect_s=3.0, asr_s=30.0, tts_s=30.0)
     segmentation: SegmentationSettings = SegmentationSettings()
     managed: frozenset[str] = frozenset()
+    # config values replaced on load (e.g. old template syntax), for the UI
+    notices: tuple[str, ...] = ()
 
     def has_source(self, kind: str) -> bool:
         """A local endpoint or a Django that can list cluster ones."""
@@ -160,19 +165,14 @@ class EdgeSettings:
                 errors.append(f"use.{kind}: {kind}:{node} is not an allowed service")
         if not 6 <= self.llm.session_ttl_s <= 300:
             errors.append("llm.session_ttl_s must be in 6..300")
-        for name, template in (
-            ("llm.system_prompt", self.llm.system_prompt),
-            ("llm.user_template", self.llm.user_template),
-        ):
-            try:
-                template.format(lang="Polish", text="x")
-            except (KeyError, IndexError, ValueError) as e:
-                errors.append(
-                    f"{name}: only {{lang}} and {{text}} placeholders allowed"
-                    f" (use {{{{ }}}} for literal braces): {e}"
-                )
-        if "{text}" not in self.llm.user_template:
-            errors.append("llm.user_template must contain {text}")
+        errors += template_errors(
+            "llm.system_prompt", self.llm.system_prompt, require_text=False
+        )
+        errors += template_errors(
+            "llm.user_template", self.llm.user_template, require_text=True
+        )
+        if self.llm.words_per_request < 1:
+            errors.append("llm.words_per_request must be >= 1")
         if self.tts.speed is not None and not 0.25 <= self.tts.speed <= 4.0:
             errors.append("tts.speed must be in 0.25..4.0")
         for name in ("translate", "transcribe"):
@@ -271,6 +271,24 @@ def resolve_edge_settings(cfg: Mapping, environ: Mapping) -> EdgeSettings:
             ", ".join(obsolete),
         )
     ld = LlmSettings()
+    notices: list[str] = []
+
+    def template(name: str, default: str) -> str:
+        value = _text(llm_cfg.get(name))
+        if value is None:
+            return default
+        if is_legacy(value):
+            from loguru import logger
+
+            msg = (
+                f"llm.{name}: old {{lang}}/{{text}} syntax - using the default"
+                " template; rewrite it with {{source_lang}} / {{text}}"
+            )
+            logger.warning("config: {}", msg)
+            notices.append(msg)
+            return default
+        return value
+
     llm = LlmSettings(
         session_ttl_s=int(llm_cfg.get("session_ttl_s", ld.session_ttl_s)),
         model=_clean(pick("RT_EDGE_LLM_MODEL", "llm.model", llm_cfg.get("model")))
@@ -279,8 +297,9 @@ def resolve_edge_settings(cfg: Mapping, environ: Mapping) -> EdgeSettings:
         temperature=float(llm_cfg.get("temperature", ld.temperature)),
         context_pairs=int(llm_cfg.get("context_pairs", ld.context_pairs)),
         timeout_s=float(llm_cfg.get("timeout_s", ld.timeout_s)),
-        system_prompt=_text(llm_cfg.get("system_prompt")) or ld.system_prompt,
-        user_template=_text(llm_cfg.get("user_template")) or ld.user_template,
+        system_prompt=template("system_prompt", ld.system_prompt),
+        user_template=template("user_template", ld.user_template),
+        words_per_request=int(llm_cfg.get("words_per_request", ld.words_per_request)),
     )
     asr_cfg = svc.get("asr") or {}
     tts_cfg = svc.get("tts") or {}
@@ -348,6 +367,7 @@ def resolve_edge_settings(cfg: Mapping, environ: Mapping) -> EdgeSettings:
             transcribe=_seg_transcribe(seg_cfg.get("transcribe") or {}),
         ),
         managed=frozenset(managed),
+        notices=tuple(notices),
     )
 
 

@@ -37,8 +37,12 @@ services:
     temperature: 0.1
     context_pairs: 3
     timeout_s: 15
-    system_prompt: ""           # "" = built-in interpreter prompt; placeholder {lang}
-    user_template: ""           # "" = "{text}"; placeholders {text} (required), {lang}
+    words_per_request: 40       # words per LLM call; longer text is split (sentence ends preferred)
+    # Placeholders (double braces): {{text}} - the words of one request (required in
+    # user_template), {{source_lang}}, {{target_lang}}. Old {lang}/{text} values are
+    # rejected with a WARNING and the default template is used.
+    system_prompt: ""           # "" = built-in interpreter prompt
+    user_template: ""           # "" = "{{text}}"
 
 segmentation:
   translate:                    # SegmenterConfig fields (phrase-sized segments)

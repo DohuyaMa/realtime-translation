@@ -174,8 +174,9 @@ curl -s -X POST http://127.0.0.1:8091/config -H "$H" \
 | `services.llm.session_ttl_s` | - | ttl app-сесії, 6..300, default 30 (heartbeat кожні ttl/3) |
 | `services.llm.model` | `RT_EDGE_LLM_MODEL` | default `local` |
 | `services.llm.{max_tokens_cap,temperature,context_pairs,timeout_s}` | - | 512 / 0.1 / 3 / 15 |
-| `services.llm.system_prompt` | - | system prompt перекладу, плейсхолдер `{lang}`; `""` = вбудований |
-| `services.llm.user_template` | - | шаблон фрази для LLM, `{text}` обов'язковий, `{lang}`; `""` = `{text}` |
+| `services.llm.system_prompt` | - | system prompt перекладу; змінні `{{source_lang}}`, `{{target_lang}}`; `""` = вбудований |
+| `services.llm.user_template` | - | шаблон запиту до LLM: `{{text}}` (обов'язкова - куди вставляються слова), `{{source_lang}}`, `{{target_lang}}`; `""` = `{{text}}`. Старий синтаксис `{lang}`/`{text}` - WARNING, використовується типовий шаблон (видно в діалозі) |
+| `services.llm.words_per_request` | - | скільки слів розпізнаного тексту в одному запиті до LLM (default 40, >= 1); довший текст ділиться по кінцях речень (якщо вміщаються, інакше по словах), кожна частина йде через шаблон, результати з'єднуються по порядку. Вкладка «Переклад» показує попередній перегляд запитів для зразкового речення |
 | `services.asr.prompt` | - | Whisper prompt (словник, імена, стиль), додається перед контекстом останніх фраз |
 | `services.tts.{voice,speed}` | - | голос (з `GET /v1/audio/voices`) і швидкість; `null` = типові сервісу |
 | `segmentation.translate.*` | - | `threshold, min_speech_ms, end_silence_ms, soft_max_ms, soft_silence_ms, hard_max_ms, lookback_ms, preroll_ms` |

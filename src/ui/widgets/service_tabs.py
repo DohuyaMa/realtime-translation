@@ -30,7 +30,19 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ...core.runtime import DEFAULT_SYSTEM_PROMPT, DEFAULT_USER_TEMPLATE, EdgeSettings
+from ...core.prompt import (
+    DEFAULT_SYSTEM_PROMPT,
+    DEFAULT_USER_TEMPLATE,
+    build_messages,
+    split_words,
+    template_errors,
+)
+from ...core.runtime import EdgeSettings
+
+PREVIEW_SAMPLE = (
+    "Dzień dobry wszystkim. Dzisiaj omówimy wdrożenie klastra NixOS i"
+    " konfigurację usług rozpoznawania mowy na każdym węźle."
+)
 
 # A model switch reloads the service and may download the model first.
 APPLY_TIMEOUT_S = 3600.0
@@ -395,16 +407,62 @@ class LlmTab(QWidget):
         self.context_pairs = QSpinBox()
         self.context_pairs.setRange(0, 20)
         self.context_pairs.setValue(llm.context_pairs)
+        self.words_per_request = QSpinBox()
+        self.words_per_request.setRange(1, 2000)
+        self.words_per_request.setValue(llm.words_per_request)
+        self.words_per_request.setToolTip(
+            "Скільки слів розпізнаного тексту йде в один запит до LLM; довший"
+            " текст ділиться (по кінцях речень, якщо вміщаються) і кожна частина"
+            " підставляється в шаблон замість {{text}}"
+        )
+        self.notice = QLabel("\n".join(settings.notices))
+        self.notice.setStyleSheet("color: #b36b00;")
+        self.notice.setWordWrap(True)
+        self.notice.setVisible(bool(settings.notices))
+        self.preview = QPlainTextEdit()
+        self.preview.setReadOnly(True)
+        self.preview.setFixedHeight(150)
+        form.addRow(self.notice)
         form.addRow("Модель:", self.model)
-        form.addRow("System prompt ({lang}):", self.system_prompt)
-        form.addRow("Шаблон фрази ({text}, {lang}):", self.user_template)
+        form.addRow("System prompt:", self.system_prompt)
+        form.addRow("Шаблон запиту:", self.user_template)
+        form.addRow(
+            "",
+            QLabel(
+                "Змінні: {{text}} - сюди вставляються слова (обов'язкова),"
+                " {{source_lang}}, {{target_lang}}"
+            ),
+        )
         form.addRow("", reset)
+        form.addRow("Слів на запит:", self.words_per_request)
         form.addRow("Temperature:", self.temperature)
         form.addRow("Max tokens:", self.max_tokens_cap)
         form.addRow("Контекст (пар фраз):", self.context_pairs)
+        form.addRow("Попередній перегляд:", self.preview)
+        for w in (self.system_prompt, self.user_template):
+            w.textChanged.connect(self.update_preview)
+        self.words_per_request.valueChanged.connect(self.update_preview)
+        self.update_preview()
         if "llm.model" in settings.managed:
             self.model.setEnabled(False)
             self.model.setToolTip("Задано через RT_EDGE_* (лише читання)")
+
+    def update_preview(self) -> None:
+        """Rendered requests for PREVIEW_SAMPLE (or the template errors)."""
+        system = self.system_prompt.toPlainText().strip()
+        template = self.user_template.toPlainText().strip()
+        errors = template_errors("System prompt", system, False) + template_errors(
+            "Шаблон", template, True
+        )
+        if errors:
+            self.preview.setPlainText("\n".join(errors))
+            return
+        chunks = split_words(PREVIEW_SAMPLE, self.words_per_request.value())
+        lines = [f"[system] {build_messages(system, template, '', 'pl')[0]['content']}"]
+        for n, chunk in enumerate(chunks, 1):
+            user = build_messages(system, template, chunk, "pl")[-1]["content"]
+            lines.append(f"[запит {n}/{len(chunks)}] {user}")
+        self.preview.setPlainText("\n".join(lines))
 
     def reset_prompts(self) -> None:
         self.system_prompt.setPlainText(DEFAULT_SYSTEM_PROMPT)
@@ -418,4 +476,5 @@ class LlmTab(QWidget):
             "services.llm.temperature": self.temperature.value(),
             "services.llm.max_tokens_cap": self.max_tokens_cap.value(),
             "services.llm.context_pairs": self.context_pairs.value(),
+            "services.llm.words_per_request": self.words_per_request.value(),
         }

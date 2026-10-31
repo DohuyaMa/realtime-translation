@@ -49,6 +49,7 @@ _LLM_LIVE_FIELDS = (
     "context_pairs",
     "system_prompt",
     "user_template",
+    "words_per_request",
 )
 
 _STOP = object()

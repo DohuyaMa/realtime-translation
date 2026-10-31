@@ -409,8 +409,8 @@ def test_llm_tab_prompt_template_and_reset(app):
         {
             "services": {
                 "llm": {
-                    "system_prompt": "Translate {lang}.",
-                    "user_template": "T: {text}",
+                    "system_prompt": "Translate {{source_lang}}.",
+                    "user_template": "T: {{text}}",
                 }
             }
         },
@@ -418,11 +418,11 @@ def test_llm_tab_prompt_template_and_reset(app):
     )
     tab = LlmTab(s)
     v = tab.values()
-    assert v["services.llm.system_prompt"] == "Translate {lang}."
-    assert v["services.llm.user_template"] == "T: {text}"
+    assert v["services.llm.system_prompt"] == "Translate {{source_lang}}."
+    assert v["services.llm.user_template"] == "T: {{text}}"
     tab.reset_prompts()
     assert tab.values()["services.llm.system_prompt"] == DEFAULT_SYSTEM_PROMPT
-    assert tab.values()["services.llm.user_template"] == "{text}"
+    assert tab.values()["services.llm.user_template"] == "{{text}}"
 
 
 def test_dialog_saves_per_service_settings(app, cfg):
@@ -430,12 +430,12 @@ def test_dialog_saves_per_service_settings(app, cfg):
 
     dlg = SettingsDialog(current_settings(), services=[])
     dlg.asr_tab.prompt.setPlainText("NixOS, Kubernetes")
-    dlg.llm_tab.user_template.setPlainText("Переклади: {text}")
+    dlg.llm_tab.user_template.setPlainText("Переклади: {{text}}")
     got = []
     dlg.settings_changed.connect(got.append)
     dlg.accept()
     assert got[0].asr.prompt == "NixOS, Kubernetes"
-    assert got[0].llm.user_template == "Переклади: {text}"
+    assert got[0].llm.user_template == "Переклади: {{text}}"
     saved = _saved(cfg)["services"]
     assert saved["asr"]["prompt"] == "NixOS, Kubernetes"
 
@@ -446,7 +446,7 @@ def test_dialog_rejects_template_without_text(app, cfg):
     dlg = SettingsDialog(current_settings(), services=[])
     dlg.llm_tab.user_template.setPlainText("no placeholder")
     dlg.accept()
-    assert "{text}" in dlg.error_label.text() and dlg.result() == 0
+    assert "must contain {{text}}" in dlg.error_label.text() and dlg.result() == 0
 
 
 def test_use_choice_lists_local_via_loopback(app):
@@ -513,3 +513,37 @@ def test_apply_use_persists_and_validates(app, cfg):
     save_values({"services.allowed_services": ["asr:sktop"]})
     settings, errors = apply_use("asr", "cyborg")
     assert settings is None and "not an allowed service" in errors[0]
+
+
+def test_llm_tab_preview_and_words_per_request(app):
+    from src.ui.widgets.service_tabs import LlmTab
+
+    s = resolve_edge_settings(
+        {
+            "services": {
+                "llm": {"user_template": "[{{source_lang}}->{{target_lang}}] {{text}}"}
+            }
+        },
+        {},
+    )
+    tab = LlmTab(s)
+    assert tab.words_per_request.value() == 40
+    text = tab.preview.toPlainText()
+    assert "[system] You are a professional interpreter" in text and "Polish" in text
+    assert "[запит 1/1] [Polish->English] Dzień dobry wszystkim." in text
+    tab.words_per_request.setValue(3)
+    lines = tab.preview.toPlainText().splitlines()
+    assert lines[1] == "[запит 1/6] [Polish->English] Dzień dobry wszystkim."
+    assert tab.values()["services.llm.words_per_request"] == 3
+    tab.user_template.setPlainText("no placeholder")
+    assert "must contain {{text}}" in tab.preview.toPlainText()
+
+
+def test_llm_tab_shows_legacy_template_notice(app):
+    from src.ui.widgets.service_tabs import LlmTab
+
+    s = resolve_edge_settings({"services": {"llm": {"user_template": "T: {text}"}}}, {})
+    assert s.llm.user_template == "{{text}}"  # default used
+    tab = LlmTab(s)
+    assert not tab.notice.isHidden()
+    assert "old {lang}/{text} syntax" in tab.notice.text()

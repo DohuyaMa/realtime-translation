@@ -5,10 +5,11 @@ from typing import Optional, Protocol, Sequence
 
 import httpx
 
+from ..core.prompt import build_messages, split_words
 from ..core.runtime import LlmSettings
 from .base import ServiceError, json_body, raise_for_response
 
-LANGUAGE_NAMES = {"pl": "Polish", "uk": "Ukrainian", "ru": "Russian"}
+SOURCE_LANGUAGES = ("pl", "uk", "ru")
 _THINK = re.compile(r"(?s)<think>.*?</think>")
 
 
@@ -74,27 +75,31 @@ class LlmClient:
     ) -> str:
         if source_lang == "en":
             return text
-        if source_lang not in LANGUAGE_NAMES:
+        if source_lang not in SOURCE_LANGUAGES:
             raise ValueError(f"unsupported source language {source_lang!r}")
         s = self._settings
-        lang = LANGUAGE_NAMES[source_lang]
+        ctx = tuple(context)
+        results = []
+        # one call per chunk of <= words_per_request words, results in order;
+        # earlier chunks of this phrase become context of the next ones
+        for chunk in split_words(text, s.words_per_request):
+            result = self._complete(
+                build_messages(
+                    s.system_prompt, s.user_template, chunk, source_lang, ctx
+                ),
+                chunk,
+            )
+            results.append(result)
+            ctx = ctx + ((chunk, result),)
+        return " ".join(results)
 
-        def user(phrase: str) -> dict:
-            return {
-                "role": "user",
-                "content": s.user_template.format(lang=lang, text=phrase),
-            }
-
-        messages = [{"role": "system", "content": s.system_prompt.format(lang=lang)}]
-        for src, tr in context:
-            messages.append(user(src))
-            messages.append({"role": "assistant", "content": tr})
-        messages.append(user(text))
+    def _complete(self, messages: list, chunk: str) -> str:
+        s = self._settings
         body = {
             "model": s.model,
             "messages": messages,
             "temperature": s.temperature,
-            "max_tokens": min(s.max_tokens_cap, 32 + 3 * len(text.split())),
+            "max_tokens": min(s.max_tokens_cap, 32 + 3 * len(chunk.split())),
             "chat_template_kwargs": {"enable_thinking": False},
         }
         payload = json_body(
