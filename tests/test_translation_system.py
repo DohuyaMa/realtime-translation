@@ -21,7 +21,11 @@ from src.core.runtime import (
     SegmentationSettings,
 )
 from src.segmentation import Segment, SegmenterConfig
-from src.translation_system import TranslationSystem, default_llm_target
+from src.translation_system import (
+    TTS_WARMUP_TEXT,
+    TranslationSystem,
+    default_llm_target,
+)
 
 
 def seg(seconds: float = 1.0) -> Segment:
@@ -45,10 +49,17 @@ class FakeAsr:
 
 
 class FakeTts:
+    """Records synthesized sentences; the pipeline-start warm-up call
+    (``warmups``) is kept apart so call lists stay about phrases."""
+
     def __init__(self):
         self.calls = []
+        self.warmups = 0
 
     def synthesize(self, text, voice=None, speed=None):
+        if text == TTS_WARMUP_TEXT:
+            self.warmups += 1
+            return np.zeros(10, dtype=np.float32), 24000
         self.calls.append((text, voice, speed))
         return np.zeros(240, dtype=np.float32), 24000
 

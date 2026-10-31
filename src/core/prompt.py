@@ -35,23 +35,26 @@ DEFAULT_SYSTEM_PROMPT = (
 DEFAULT_USER_TEMPLATE = "{{text}}"
 
 # TASK-SYS-12: two-text mode - the same audio recognized by whisper ({{text}},
-# FLUENT) and Vosk ({{vosk_text}}, EXACT). Prompt "B3" won the simulated
-# test on the real LLM (swarm-nix system-conf/context/tasks.md, TASK-SYS-12
-# "Результат перевірки (2026-10-31)"): compact, Vosk first, neutral labels.
-# Silence is dropped by code before the LLM (gate), never by the model.
+# TEXT: the PRIMARY transcript, translated whole) and Vosk ({{vosk_text}},
+# HINT: only fixes misrecognized TEXT words). The earlier "B3" prompt (Vosk
+# decides which words were spoken) cut live translations down to the few
+# words a sparse Vosk-nano transcript had (live test 2026-10-31 §10); this
+# one won the real-LLM re-test there. Hallucinated phrases are vetoed by
+# code before the LLM (``core.crosscheck.gate_reason``), never by the model.
 DEFAULT_CHECK_SYSTEM_PROMPT = (
     "You are a live {{source_lang}}-to-{{target_lang}} interpreter. The user"
-    " message has two transcripts of the same audio. EXACT: never invents"
-    " words but misspells them, no punctuation; empty = silence. FLUENT:"
-    " correct spelling, but may hallucinate a phrase that was never spoken"
-    ' (e.g. "Дякую за перегляд!", "Субтитри зроблені спільнотою Amara.org").'
-    " Words count as spoken only if EXACT contains them (maybe misspelled);"
-    " use FLUENT only to fix their spelling and punctuation. If EXACT is empty"
-    " or has no real word, output nothing. Translate only the spoken words"
-    " into natural {{target_lang}}; short fragments are translated as-is."
-    " Output only the translation - no comments, no {{source_lang}} words."
+    " message has two independent speech-recognition transcripts of the same"
+    " audio. TEXT is the main one: fluent, but some words may be misheard."
+    " HINT is rougher: often garbled, with words missing. Translate everything"
+    " TEXT says - every clause, never shortened or summarized; a word missing"
+    " from HINT is still translated. TEXT words that are misheard - not real"
+    " words, or out of place - are corrected from HINT, which often has the"
+    " right word where TEXT is wrong. HINT may run past the end of TEXT: never"
+    " translate HINT words that have no counterpart in TEXT. Never"
+    " transliterate. Short fragments are translated as-is. Output only the"
+    " {{target_lang}} translation - no comments, no {{source_lang}} words."
 )
-DEFAULT_CHECK_USER_TEMPLATE = "EXACT: {{vosk_text}}\nFLUENT: {{text}}"
+DEFAULT_CHECK_USER_TEMPLATE = "TEXT: {{text}}\nHINT: {{vosk_text}}"
 DEFAULT_WORDS_PER_REQUEST = 40
 
 _PLACEHOLDER = re.compile(r"\{\{\s*([A-Za-z_]+)\s*\}\}")

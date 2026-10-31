@@ -34,6 +34,8 @@ MONITOR_KEY = "audio.monitor_device"
 MONITOR_ON_KEY = "audio.monitor_enabled"
 # «Показувати текст Vosk» under each recognized phrase
 SHOW_CHECK_KEY = "ui.show_vosk_text"
+RECORD_KEY = "services.record_session"
+RECORD_TEXT = "Записувати сесію для аналізу"
 
 
 def _save_choice(key: str, value) -> None:
@@ -251,6 +253,16 @@ class MainWindow(QMainWindow):
         self.minimize_to_tray = QCheckBox("Minimize to Tray")
         self.minimize_to_tray.setChecked(True)
         status_layout.addWidget(self.minimize_to_tray)
+
+        # «Записувати сесію для аналізу» (services.record_session)
+        self.record_check = QCheckBox(RECORD_TEXT)
+        self.record_check.setToolTip(
+            "Аудіо кожної фрази (WAV) + whisper, Vosk, рішення фільтра і переклад"
+            " (JSONL) у ~/.local/state/real-time-translator/sessions/<час>/ -"
+            " для офлайн-аналізу. Типово вимкнено."
+        )
+        self._restore_record_check()
+        status_layout.addWidget(self.record_check)
         
         upper_layout.addLayout(status_layout)
         
@@ -389,6 +401,27 @@ class MainWindow(QMainWindow):
         box = self.status_logger.show_check
         box.setChecked(bool(get_config_manager().get(SHOW_CHECK_KEY)))
         box.toggled.connect(lambda on: _save_choice(SHOW_CHECK_KEY, on))
+
+    def _restore_record_check(self) -> None:
+        """The record toggle mirrors the settings; RT_EDGE_RECORD_SESSION
+        makes it read-only (managed)."""
+        from .settings_dialog import current_settings
+
+        s = current_settings()
+        self.record_check.setChecked(s.record_session)
+        if "record_session" in s.managed:
+            self.record_check.setEnabled(False)
+            self.record_check.setToolTip("Задано змінною RT_EDGE_RECORD_SESSION")
+        self.record_check.toggled.connect(self.on_record_session_changed)
+
+    def on_record_session_changed(self, on: bool) -> None:
+        from .settings_dialog import apply_value
+
+        settings, errors = apply_value(RECORD_KEY, bool(on))
+        if errors:
+            self.status_manager.log_error(f"Запис сесії: {'; '.join(errors)}")
+            return
+        self.on_general_settings_changed(settings)
 
     def refresh_device_lists(self):
         """Fill the device lists, select the saved choices (config.yml) and

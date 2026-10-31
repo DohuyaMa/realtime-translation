@@ -128,7 +128,7 @@ class LlmClient:
         (whisper) - two-text mode with the check prompts; each chunk gets
         the Vosk words of its time span. Context items are ``(source,
         translation)`` or ``(source, translation, check)``; in two-text mode
-        only the latter are used (a whisper-only pair has no EXACT text).
+        only the latter are used (a whisper-only pair has no Vosk text).
         """
         if source_lang == "en":
             yield text

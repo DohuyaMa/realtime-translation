@@ -322,6 +322,20 @@ def loopback_url(url: str) -> str:
     return urlunsplit((parts.scheme, netloc, parts.path, "", "")).rstrip("/")
 
 
+# (kind, node) -> (loopback URL, discovered URL) last logged: endpoints() runs
+# on every stats poll (~2x/s), the substitution is logged once per change
+_loopback_logged: dict[tuple[str, str], tuple[str, str]] = {}
+
+
+def _log_loopback(kind: str, node: str, local_url: str, url: str) -> None:
+    if _loopback_logged.get((kind, node)) == (local_url, url):
+        return
+    _loopback_logged[(kind, node)] = (local_url, url)
+    logger.info(
+        "{}:{} is this host: using {} instead of {}", kind, node, local_url, url
+    )
+
+
 def endpoints(
     kind: str,
     settings: EdgeSettings,
@@ -356,13 +370,7 @@ def endpoints(
     local_url = getattr(settings.local, kind)
     if not local_url and own_entry is not None:
         local_url = loopback_url(own_entry.url)
-        logger.info(
-            "{}:{} is this host: using {} instead of {}",
-            kind,
-            own_entry.node,
-            local_url,
-            own_entry.url,
-        )
+        _log_loopback(kind, own_entry.node, local_url, own_entry.url)
     own_allowed = allowed is None or f"{kind}:{own_name}" in allowed
     own_picked = pinned is None or pinned.lower() in (own_name.lower(), node.lower())
     if local_url and own_allowed and own_picked:

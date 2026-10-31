@@ -30,10 +30,27 @@ def describe_pipeline_event(event: Dict) -> Optional[Tuple[str, str]]:
             msg += f" → «{event['output']}»"
         return "WARN", msg
     if status == "vosk_gate":
+        if event.get("reason") == "disagree":
+            return "INFO", (
+                f"Whisper не збігся з Vosk («{event.get('check_text') or ''}») -"
+                f" імовірна галюцинація, не перекладено:"
+                f" «{event.get('original_text') or ''}»"
+            )
         return "INFO", (
             f"Vosk не чув слів ({event.get('check_text') or 'тиша'!r}) -"
             f" не перекладено: «{event.get('original_text') or ''}»"
         )
+    if status == "session_record":
+        if event.get("error"):
+            return "ERROR", f"Запис сесії не працює: {event['error']}"
+        if event.get("path"):
+            return "INFO", f"Запис сесії для аналізу: {event['path']}"
+        return "INFO", "Запис сесії зупинено"
+    if status == "tts_warmup":
+        w = event.get("warmup") or {}
+        if w.get("error"):
+            return "WARN", f"Прогрів TTS не вдався ({w.get('ms')} мс): {w['error']}"
+        return "INFO", f"TTS прогріто за {w.get('ms')} мс"
     if status == "vosk_state":
         v = event.get("vosk") or {}
         if v.get("mode") == "on":

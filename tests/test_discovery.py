@@ -349,3 +349,26 @@ def test_is_local_address_uses_host_addresses(monkeypatch):
     )
     assert not discovery.is_local_address("100.64.0.1")
     assert not discovery.is_local_address("cyborg")
+
+
+def test_loopback_substitution_is_logged_once_per_change():
+    """endpoints() runs on every stats poll (~2x/s): the «is this host»
+    line is logged once, again only when the URL changes."""
+    from loguru import logger
+
+    from src.clients import discovery
+
+    discovery._loopback_logged.clear()
+    seen = []
+    sink = logger.add(lambda m: seen.append(str(m)), level="INFO")
+    try:
+        s = EdgeSettings(local=LocalUrls(asr=None, llm=None, tts=None))
+        d = _dir(("asr", "box", "http://100.1.1.1:8091", "t"))
+        for _ in range(5):
+            endpoints("asr", s, d, hostname="box", local_address=_no_local)
+        d2 = _dir(("asr", "box", "http://100.1.1.1:9091", "t"))
+        endpoints("asr", s, d2, hostname="box", local_address=_no_local)
+    finally:
+        logger.remove(sink)
+    lines = [m for m in seen if "is this host" in m]
+    assert len(lines) == 2 and "127.0.0.1:9091" in lines[1]

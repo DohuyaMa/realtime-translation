@@ -15,7 +15,16 @@ from src.clients.asr import AsrResult
 from src.clients.discovery import endpoints
 from src.clients.llm import LlmClient
 from src.clients.vosk import VoskClient, VoskResult, VoskWord
-from src.core.crosscheck import Aligned, has_real_word, whisper_word_times
+from src.core.crosscheck import (
+    GATE_DISAGREE,
+    GATE_NO_WORD,
+    Aligned,
+    agreement,
+    gate_reason,
+    has_real_word,
+    mean_conf,
+    whisper_word_times,
+)
 from src.core.prompt import (
     DEFAULT_CHECK_SYSTEM_PROMPT,
     build_messages,
@@ -175,7 +184,7 @@ def test_check_messages_carry_both_texts_only_in_the_user_message():
         "You are a live Ukrainian-to-English interpreter."
     )
     assert "{{" not in msgs[0]["content"]
-    assert msgs[-1] == {"role": "user", "content": "EXACT: дякую\nFLUENT: Дякую."}
+    assert msgs[-1] == {"role": "user", "content": "TEXT: Дякую.\nHINT: дякую"}
 
 
 def test_check_template_validation():
@@ -228,11 +237,11 @@ def test_llm_client_sends_check_prompts_per_chunk():
     first, second = (b["messages"] for b in bodies)
     assert first[0]["content"].startswith("You are a live Ukrainian")
     # whisper-only context pairs are not shown in two-text mode
-    assert first[1:] == [{"role": "user", "content": "EXACT: раз два\nFLUENT: Раз два"}]
+    assert first[1:] == [{"role": "user", "content": "TEXT: Раз два\nHINT: раз два"}]
     assert second[1:] == [
-        {"role": "user", "content": "EXACT: раз два\nFLUENT: Раз два"},
+        {"role": "user", "content": "TEXT: Раз два\nHINT: раз два"},
         {"role": "assistant", "content": "T1."},
-        {"role": "user", "content": "EXACT: три\nFLUENT: три"},
+        {"role": "user", "content": "TEXT: три\nHINT: три"},
     ]
 
 
@@ -477,3 +486,224 @@ def test_recognized_phrase_carries_vosk_text():
     assert stats["pending_recognized"] == [
         {"text": "Добрий день.", "check": "добрий день"}
     ]
+
+
+# -- segment-level gate: veto hallucinations, never delete real words (§10) --
+
+# the owner's live whisper lines (2026-10-31 20:27) and what rt-vosk with
+# vosk-small-uk-v3-nano heard on espeak-ng audio of the same text
+OWNER_LINES = [
+    (
+        "Запитайте про відео або аудіо, яке ви відтворювали.",
+        "відео або аудіо сповнювали",
+    ),
+    (
+        "Ви можете ставити запитання про те, що почули у відео і аудіо."
+        " У геніві хром відповідатиме на них.",
+        "хліба та ставити питання про те що почули звук відео аудіо а біля"
+        " і відповідатиме реальний",
+    ),
+    (
+        "Попросіть надати докладну інформацію або підсумки, щоб краще"
+        " зрозуміти прислуханий контент.",
+        "попросив надати докладну інформацію або підсумки щоб краще зрозуміти"
+        " уяві фонтенбло",
+    ),
+    # sparse Vosk: one shared word is enough to keep the whole phrase
+    ("Запитайте про відео або аудіо, яке ви відтворювали.", "або"),
+]
+HALLUCINATIONS = [
+    ("Дякую за перегляд!", "що можна зробити із віспером щоб він не галюцинував"),
+    ("Субтитри зроблені спільнотою Amara.org", "відкрийте файл пдф і натисніть"),
+    ("Продовження в наступній серії.", "запитайте про відео або аудіо яке в лівії"),
+    ("Дякую!", "так"),
+]
+
+
+@pytest.mark.parametrize("whisper,vosk", OWNER_LINES)
+def test_gate_keeps_real_speech_with_garbled_vosk(whisper, vosk):
+    assert gate_reason(whisper, vosk) is None
+    assert agreement(whisper, vosk) > 0
+
+
+@pytest.mark.parametrize("whisper,vosk", HALLUCINATIONS)
+def test_gate_drops_whisper_phrase_vosk_disagrees_with(whisper, vosk):
+    assert gate_reason(whisper, vosk) == GATE_DISAGREE
+    assert agreement(whisper, vosk) == 0.0
+
+
+def test_gate_silence_and_short_words():
+    assert gate_reason("Дякую за перегляд!", "е") == GATE_NO_WORD
+    # whisper without a word of >= 3 letters: no evidence, kept
+    assert agreement("Ну, ок.", "та") is None
+    assert gate_reason("Ну, ок.", "та") is None
+    # split Vosk words still agree («інформа ції»)
+    assert agreement("Інформації.", "інформа ції") == 1.0
+
+
+def test_mean_conf():
+    assert mean_conf(()) is None
+    assert mean_conf((VoskWord("а", 0.5, 0, 1), VoskWord("б", 1.0, 1, 2))) == 0.75
+
+
+def test_gate_drops_disagreeing_segment_and_counts_it():
+    asr = SlowAsr(
+        [AsrResult("Дякую за перегляд!", "uk"), AsrResult("Добрий день.", "uk")], 0
+    )
+    vosk = FakeVosk(
+        [
+            VoskResult("що можна зробити", "uk", words("що можна зробити")),
+            VoskResult("добрий день", "uk", words("добрий день")),
+        ]
+    )
+    ts, vads, capture, llm, events = system(asr, vosk)
+    stats = run(ts, vads, capture, [seg(), seg()], lambda: llm.calls)
+    assert llm.calls == ["Добрий день."]
+    assert stats["vosk_gate_dropped"] == 1 and stats["vosk_gate_disagree"] == 1
+    assert any(
+        e.get("status") == "vosk_gate" and e["reason"] == GATE_DISAGREE for e in events
+    )
+
+
+def test_sparse_vosk_keeps_the_whole_whisper_text():
+    text = "Запитайте про відео або аудіо, яке ви відтворювали."
+    asr = SlowAsr([AsrResult(text, "uk")], 0)
+    vosk = FakeVosk([VoskResult("або", "uk", words("або"))])
+    ts, vads, capture, llm, _ = system(asr, vosk)
+    stats = run(ts, vads, capture, [seg()], lambda: llm.calls)
+    assert llm.calls == [text] and llm.checks == ["або"]
+    assert stats["vosk_gate_dropped"] == 0
+
+
+def test_held_piece_with_empty_vosk_span_is_still_translated():
+    """Vosk words are split by interpolated time; a held tail whose span got
+    no Vosk word was spoken all the same - no per-piece gate."""
+    whisper = AsrResult(
+        "Новий спосіб перегляду вкладок. Вертикальні вкладки",
+        "uk",
+        [
+            {"start": 0.0, "end": 1.0, "text": "Новий спосіб перегляду вкладок."},
+            {"start": 1.0, "end": 2.0, "text": "Вертикальні вкладки"},
+        ],
+    )
+    vosk_words = words("новий спосіб перегляду вкладок", 0.0, 0.2)
+    asr = SlowAsr([whisper], 0)
+    vosk = FakeVosk([VoskResult("новий спосіб перегляду вкладок", "uk", vosk_words)])
+    ts, vads, capture, llm, _ = system(asr, vosk)
+    stats = run(ts, vads, capture, [seg(0, 2)], lambda: len(llm.calls) == 2)
+    assert llm.calls == ["Новий спосіб перегляду вкладок.", "Вертикальні вкладки"]
+    assert llm.checks == ["новий спосіб перегляду вкладок", ""]
+    assert stats["vosk_gate_dropped"] == 0 and stats["asr_held_flushed"] == 1
+
+
+# -- session recording and per-phrase log ------------------------------------
+
+
+def _recording_system(tmp_path, asr, vosk, **kw):
+    from src.core.session_record import SessionRecorder
+
+    ts, vads, capture, llm, events = system(asr, vosk, **kw)
+    ts._recorder_factory = lambda: SessionRecorder(tmp_path)
+    return ts, vads, capture, llm, events
+
+
+def test_session_recording_writes_wav_and_jsonl(tmp_path):
+    asr = SlowAsr(
+        [AsrResult("Дякую за перегляд!", "uk"), AsrResult("Добрий день.", "uk")], 0
+    )
+    vosk = FakeVosk(
+        [
+            VoskResult("що можна", "uk", words("що можна")),
+            VoskResult("добрий день", "uk", words("добрий день")),
+        ]
+    )
+    ts, vads, capture, llm, events = _recording_system(
+        tmp_path, asr, vosk, record_session=True
+    )
+    stats = run(ts, vads, capture, [seg(), seg()], lambda: llm.calls)
+    (session,) = list(tmp_path.iterdir())
+    assert sorted(p.name for p in session.glob("*.wav")) == [
+        "seg-00001.wav",
+        "seg-00002.wav",
+    ]
+    lines = [
+        json.loads(x) for x in (session / "phrases.jsonl").read_text().splitlines()
+    ]
+    segs = [x for x in lines if x["type"] == "segment"]
+    assert [x["gate"] for x in segs] == [GATE_DISAGREE, None]
+    assert segs[1]["vosk"] == "добрий день" and segs[1]["vosk_conf"] == 1.0
+    assert segs[1]["vosk_words"][0]["word"] == "добрий"
+    (tr,) = [x for x in lines if x["type"] == "translation"]
+    assert tr["mode"] == "two-text" and tr["text"] == "Добрий день."
+    assert tr["hint"] == "добрий день" and tr["translation"] == "EN1."
+    assert stats["session_record"]["on"] is True
+    assert ts.get_stats()["session_record"]["on"] is False  # closed at stop
+    assert any(e.get("status") == "session_record" and e["path"] for e in events)
+
+
+def test_session_recording_is_off_by_default_and_toggles_live(tmp_path):
+    asr = SlowAsr([AsrResult("Раз.", "uk"), AsrResult("Два.", "uk")], 0)
+    vosk = FakeVosk(
+        [VoskResult("раз", "uk", words("раз")), VoskResult("два", "uk", words("два"))]
+    )
+    ts, vads, capture, llm, _ = _recording_system(tmp_path, asr, vosk)
+    assert ts.start()
+    try:
+        vads[-1].pending.append(seg())
+        capture.push()
+        assert wait_for(lambda: len(llm.calls) == 1)
+        assert not tmp_path.exists() or not list(tmp_path.iterdir())
+        ts.apply_settings(dataclasses.replace(ts.settings, record_session=True))
+        vads[-1].pending.append(seg())
+        capture.push()
+        assert wait_for(lambda: len(llm.calls) == 2)
+        assert ts.get_stats()["session_record"]["on"] is True
+    finally:
+        ts.stop()
+    (session,) = list(tmp_path.iterdir())
+    assert [p.name for p in session.glob("*.wav")] == ["seg-00002.wav"]
+
+
+def test_session_recording_write_error_is_explicit(tmp_path):
+    from src.core.session_record import SessionRecorder
+
+    rec = SessionRecorder(tmp_path)
+    path = rec.start()
+    assert rec.active and path is not None
+    path.chmod(0o500)  # read-only directory: the WAV write fails
+    try:
+        rec.segment(1, np.zeros(10, dtype=np.int16), 16000, {})
+    finally:
+        path.chmod(0o700)
+    assert not rec.active and "PermissionError" in rec.error
+
+
+def test_tts_is_warmed_up_at_start():
+    from test_translation_system import FakeTts
+
+    asr = SlowAsr([AsrResult("Раз.", "uk")], 0)
+    tts = FakeTts()
+    ts, vads, capture, llm, events = system(asr, None, use=ServiceUse(vosk=OFF))
+    ts._pools.tts.client = tts
+    stats = run(ts, vads, capture, [seg()], lambda: tts.calls)
+    assert tts.warmups == 1 and [c[0] for c in tts.calls] == ["EN1."]
+    assert stats["tts_warmup"]["error"] is None
+    assert any(e.get("status") == "tts_warmup" for e in events)
+
+
+def test_gate_and_record_events_are_described():
+    from src.ui.controller.ui_controller import describe_pipeline_event
+
+    level, msg = describe_pipeline_event(
+        {
+            "status": "vosk_gate",
+            "reason": GATE_DISAGREE,
+            "original_text": "Дякую!",
+            "check_text": "так",
+        }
+    )
+    assert level == "INFO" and "не збігся" in msg
+    level, msg = describe_pipeline_event(
+        {"status": "session_record", "path": None, "error": "PermissionError: x"}
+    )
+    assert level == "ERROR"

@@ -67,3 +67,17 @@ def test_transcribe_chunk_max_over_900s_invalid():
 def test_translate_mode_requires_llm_and_tts():
     errors = resolve_edge_settings({"services": {"mode": "translate"}}, {}).validate()
     assert len(errors) == 2
+
+
+def test_record_session_flag_from_config_and_env():
+    import pytest
+
+    from src.core.runtime import resolve_edge_settings
+
+    assert resolve_edge_settings({}, {}).record_session is False
+    on = resolve_edge_settings({"services": {"record_session": True}}, {})
+    assert on.record_session is True and "record_session" not in on.managed
+    env = resolve_edge_settings({}, {"RT_EDGE_RECORD_SESSION": "1"})
+    assert env.record_session is True and "record_session" in env.managed
+    with pytest.raises(ValueError):
+        resolve_edge_settings({"services": {"record_session": "maybe"}}, {})

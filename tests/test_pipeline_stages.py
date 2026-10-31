@@ -23,7 +23,7 @@ from test_translation_system import (
     wait_for,
 )
 from src.clients import Directory
-from src.translation_system import TranslationSystem
+from src.translation_system import TTS_WARMUP_TEXT, TranslationSystem
 
 STAGE_S = 0.1
 
@@ -77,6 +77,8 @@ class SlowTts(FakeTts):
         self.delay, self.clock = delay, clock
 
     def synthesize(self, text, voice=None, speed=None):
+        if text == TTS_WARMUP_TEXT:
+            return super().synthesize(text, voice, speed)
         if self.clock is not None:
             self.clock.t += self.delay
         else:

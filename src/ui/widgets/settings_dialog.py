@@ -437,14 +437,20 @@ class SettingsDialog(QDialog):
         super().accept()
 
 
-def apply_use(kind: str, node: Optional[str]):
-    """Persist ``services.use.<kind>`` (status panel choice); returns
-    (settings, errors) - settings is None when rejected."""
-    settings, to_save = build_settings({f"services.use.{kind}": node})
+def apply_value(key: str, value: Any):
+    """Persist one config key chosen outside the dialog (status panel,
+    main window toggle); returns (settings, errors) - settings is None when
+    rejected."""
+    settings, to_save = build_settings({key: value})
     errors = settings.validate()
     if errors:
         return None, errors
     return save_values(to_save), []
+
+
+def apply_use(kind: str, node: Optional[str]):
+    """Persist ``services.use.<kind>`` (status panel choice)."""
+    return apply_value(f"services.use.{kind}", node)
 
 
 class SettingsButton(QPushButton):

@@ -140,6 +140,9 @@ class EdgeSettings:
     source_language: Literal["auto", "pl", "uk", "ru", "en"] = "auto"
     timeouts: Timeouts = Timeouts(connect_s=3.0, asr_s=30.0, tts_s=30.0)
     segmentation: SegmentationSettings = SegmentationSettings()
+    # «Записувати сесію для аналізу»: per-phrase JSONL + segment WAVs
+    # (core/session_record.py); explicit opt-in, applied live
+    record_session: bool = False
     managed: frozenset[str] = frozenset()
     # config values replaced on load (e.g. old template syntax), for the UI
     notices: tuple[str, ...] = ()
@@ -233,6 +236,20 @@ def _text(value: Any) -> Optional[str]:
     if value is None:
         return None
     return str(value).strip() or None
+
+
+def _flag(value: Any) -> bool:
+    """YAML bool or env string; anything else is an explicit error."""
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    text = str(value).strip().lower()
+    if text in ("1", "true", "yes", "on"):
+        return True
+    if text in ("", "0", "false", "no", "off"):
+        return False
+    raise ValueError(f"not a boolean: {value!r}")
 
 
 def _url(value: Any) -> Optional[str]:
@@ -412,6 +429,13 @@ def resolve_edge_settings(cfg: Mapping, environ: Mapping) -> EdgeSettings:
         segmentation=SegmentationSettings(
             translate=_seg_translate(seg_cfg.get("translate") or {}),
             transcribe=_seg_transcribe(seg_cfg.get("transcribe") or {}),
+        ),
+        record_session=_flag(
+            pick(
+                "RT_EDGE_RECORD_SESSION",
+                "record_session",
+                svc.get("record_session", False),
+            )
         ),
         managed=frozenset(managed),
         notices=tuple(notices),

@@ -114,7 +114,7 @@ def test_status_panel_shows_vosk_mode(app, vosk, text, shown):
     )
     assert panel._texts["vosk"].text() == text
     assert shown in panel._details["vosk"].text()
-    assert "Vosk не чув слів" in panel._timing.text()
+    assert "галюцинацію whisper" in panel._timing.text()
     box = panel._use["vosk"]
     assert box.findData("off") >= 0
     assert box.currentData() == ("off" if vosk["mode"] == "off" else None)
@@ -1251,3 +1251,21 @@ def test_llm_tab_lists_variables_and_active_prompt_pair(app, cfg):
     lang = dlg.endpoints_tab.source_language
     lang.setCurrentText("pl")
     assert dlg.vosk_tab.source_language == "pl"
+
+
+def test_record_session_toggle_saves_and_applies(app, cfg):
+    """«Записувати сесію для аналізу»: off by default, the toggle persists
+    services.record_session and hands the settings to the backend."""
+    from unittest.mock import MagicMock
+
+    ctl = MagicMock()
+    ctl.get_input_devices.return_value = []
+    ctl.get_output_devices.return_value = []
+    ctl.get_status.return_value = {"running": False}
+    win = _window(ctl)
+    assert not win.record_check.isChecked()
+    win.record_check.setChecked(True)
+    assert _saved(cfg)["services"]["record_session"] is True
+    _wait(app, lambda: ctl.reconfigure_services.called)
+    (settings,), _ = ctl.reconfigure_services.call_args
+    assert settings.record_session is True

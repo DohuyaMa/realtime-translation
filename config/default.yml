@@ -23,6 +23,10 @@ services:
     vosk: null                  # e.g. "http://127.0.0.1:8092" (rt-vosk: cross-checks whisper in translate mode)
   local_token_file: /run/llama/local-token   # local worker token when Django is unreachable
   source_language: auto         # auto | pl | uk | ru | en
+  # «Записувати сесію для аналізу» (env RT_EDGE_RECORD_SESSION): every translate-mode
+  # segment's WAV + per-phrase JSONL (whisper, Vosk + conf, gate, translation) in
+  # ~/.local/state/real-time-translator/sessions/<timestamp>/ for offline replay
+  record_session: false
   timeouts:
     connect_s: 3
     asr_s: 30
@@ -51,8 +55,8 @@ services:
     system_prompt: ""           # "" = built-in interpreter prompt
     user_template: ""           # "" = "{{text}}"
     # Phrases Vosk also recognized (TASK-SYS-12): {{text}} = whisper, {{vosk_text}} =
-    # Vosk (both required in check_user_template). "" = built-in ("B3" prompt,
-    # "EXACT: {{vosk_text}}\nFLUENT: {{text}}").
+    # Vosk (both required in check_user_template). "" = built-in (whisper = TEXT, translated
+    # whole; Vosk = HINT, fixes misheard words: "TEXT: {{text}}\nHINT: {{vosk_text}}").
     check_system_prompt: ""
     check_user_template: ""
 
