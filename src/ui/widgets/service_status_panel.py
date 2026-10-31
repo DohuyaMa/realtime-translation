@@ -32,6 +32,8 @@ def format_llm_detail(entry: Optional[Dict], lease: Optional[Dict], source: str)
     """Text for the LLM row: worker, model, expires_at and source."""
     entry = entry or {}
     lease = lease or entry.get("lease") or {}
+    if lease.get("mode") == "no_lease":
+        source = f"без lease ({lease.get('no_lease_source')})"
     parts = [f"джерело: {source}"]
     if lease.get("service"):
         parts.append(f"воркер: {lease['service']}")
@@ -40,6 +42,8 @@ def format_llm_detail(entry: Optional[Dict], lease: Optional[Dict], source: str)
         parts.append(f"модель: {model}")
     if lease.get("expires_at"):
         parts.append(f"lease до: {lease['expires_at']}")
+    if lease.get("skipped"):
+        parts.append(f"недоступні Django: {', '.join(lease['skipped'])}")
     if lease.get("error"):
         parts.append(f"помилка: {lease['error']}")
     return ", ".join(parts)
@@ -109,7 +113,11 @@ class ServiceStatusPanel(QGroupBox):
         source = self.llm_source or (
             "lease" if (lease or (llm or {}).get("lease")) else "direct"
         )
+        detail = format_llm_detail(llm, lease, source)
+        if (lease or {}).get("mode") == "no_lease":  # explicit, never green
+            self._set("llm", False, "без lease", detail)
+            return
         ok = bool(llm and llm.get("ready"))
         has_lease = bool(lease and lease.get("service"))
         text = "готовий" if ok else ("lease" if has_lease else "Offline")
-        self._set("llm", ok or has_lease, text, format_llm_detail(llm, lease, source))
+        self._set("llm", ok or has_lease, text, detail)

@@ -245,3 +245,106 @@ def test_heartbeat_server_error_after_deadline_reacquires(env):
     assert k.current()[0] == "http://w2:8080"
     assert k.snapshot()["error"] is None
     finish(k)
+
+
+# -- no-lease mode (owner 2026-10-31: translation survives Django outages) --
+
+
+def make_with_direct(tmp_path, transport, urls=("http://a", "http://b")):
+    tf = tmp_path / "tok"
+    tf.write_text("usertoken\n")
+    wt = tmp_path / "wt"
+    wt.write_text("sha256:local\n")
+    s = LlmSettings(
+        django_urls=urls,
+        django_token_file=str(tf),
+        direct_url="http://127.0.0.1:8080/",
+        direct_token_file=str(wt),
+    )
+    gate = threading.Event()
+    k = LeaseKeeper(
+        s,
+        "rt-edge@test",
+        api_factory=lambda u: DjangoLeaseApi(u, str(tf), transport=transport),
+        sleep=lambda _s: gate.wait(5),
+    )
+    k._gate = gate
+    return k
+
+
+def test_all_django_down_enters_no_lease_mode_with_direct_url(tmp_path, caplog):
+    fake = FakeDjango()
+    k = make_with_direct(tmp_path, httpx.MockTransport(fake))
+    assert k.start() is None
+    assert k.current() == ("http://127.0.0.1:8080", "sha256:local")
+    snap = k.snapshot()
+    assert snap["mode"] == "no_lease" and snap["no_lease_source"] == "direct_url"
+    assert snap["base_url"] == "http://127.0.0.1:8080"
+    assert snap["skipped"] == ["http://a", "http://b"]
+    finish(k)
+
+
+def test_all_django_down_without_target_raises(env):
+    _, make = env
+    with pytest.raises(ServiceError) as ei:
+        make().start()
+    assert "direct_url" in str(ei.value)
+
+
+def test_django_refusal_does_not_enter_no_lease(tmp_path):
+    fake = FakeDjango()
+    fake.handlers["b"] = lambda r, b: httpx.Response(503, json={"detail": "none"})
+    k = make_with_direct(tmp_path, httpx.MockTransport(fake))
+    with pytest.raises(ServiceError):
+        k.start()
+    assert k.snapshot()["mode"] is None
+
+
+def test_partial_down_leases_on_reachable_and_mirrors_on_recovery(env):
+    fake, make = env
+    fake.handlers["b"] = lambda r, b: (
+        httpx.Response(200, json=lease_json("b1", "w1"))
+        if r.url.path.endswith("heartbeat/")
+        else httpx.Response(201, json=lease_json("b1", "w1"))
+    )
+    k = make(("http://a", "http://b"))
+    assert k.start().django_url == "http://b"
+    snap = k.snapshot()
+    assert snap["mode"] == "lease" and snap["skipped"] == ["http://a"]
+    fake.handlers["a"] = ok_acquire("a9", "w1")  # a comes back
+    k.tick()
+    assert fake.of("a", "POST")[-1][3]["service"] == "w1"
+    snap = k.snapshot()
+    assert snap["skipped"] == [] and snap["mirrors"][0]["django"] == "http://a"
+    finish(k)
+
+
+def test_recovery_leaves_no_lease_mode(tmp_path):
+    fake = FakeDjango()
+    k = make_with_direct(tmp_path, httpx.MockTransport(fake))
+    assert k.start() is None
+    k.tick()  # still down: stays in no-lease
+    assert k.snapshot()["mode"] == "no_lease"
+    fake.handlers["a"] = ok_acquire("a1", "w1")
+    k.tick()
+    assert k.current() == ("http://w1:8080", "sha256:t1")
+    snap = k.snapshot()
+    assert snap["mode"] == "lease" and snap["no_lease_source"] is None
+    finish(k)
+
+
+def test_django_lost_mid_session_uses_last_leased_worker(tmp_path):
+    fake = FakeDjango()
+    fake.handlers["a"] = ok_acquire("a1", "w1")
+    k = make_with_direct(tmp_path, httpx.MockTransport(fake), urls=("http://a",))
+    k.start()
+    k._clock = lambda: 1e12  # the next heartbeat failure is past the deadline
+    del fake.handlers["a"]  # django goes down
+    k.tick()
+    assert k.current() == ("http://w1:8080", "sha256:t1")
+    assert k.snapshot()["no_lease_source"] == "last_lease:w1"
+    # the cached worker fails too -> direct_url
+    k.invalidate("unreachable")
+    assert k.current() == ("http://127.0.0.1:8080", "sha256:local")
+    assert k.snapshot()["no_lease_source"] == "direct_url"
+    finish(k)

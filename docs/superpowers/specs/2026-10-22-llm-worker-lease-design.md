@@ -147,6 +147,7 @@ if calling_service is not None and lease_is_live(calling_service):
 2. **Heartbeat** кожні `heartbeat_interval_s`. При 410/404 — новий acquire (можливо, інший воркер).
 3. **Зупинка:** release на всіх Django.
 4. **Помилки воркера:** при 401 — heartbeat і повтор. При unreachable/timeout/503 — release і acquire іншого воркера, один повтор запиту.
+5. **Django недоступні (owner 2026-10-31: переклад працює, навіть якщо інстанс вимкнений).** Недоступні Django пропускаються, дзеркальний lease на них береться, щойно вони відповідають. Якщо не відповідає жоден — явний режим «без lease» (WARNING + статус у UI) на воркері останнього lease або `direct_url`; heartbeat-потік повторює acquire і виходить з режиму. Відмова Django (409/503) цей режим не вмикає.
 
 DRF-токен користувача зберігається у файлі (sops на ПК). Отримується один раз:
 ```bash

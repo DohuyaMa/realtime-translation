@@ -209,3 +209,23 @@ def test_overlapping_exclusive_tasks_dropped(app, cfg):
     win = MainWindow(ctl)
     win._busy = True
     assert win._run_async(lambda: None, lambda r: None) is False
+
+
+def test_status_panel_shows_no_lease_mode_explicitly(app):
+    panel = ServiceStatusPanel()
+    panel.llm_source = "lease"
+    panel.update_status(
+        {
+            "lease": {
+                "mode": "no_lease",
+                "no_lease_source": "direct_url",
+                "base_url": "http://127.0.0.1:8080",
+                "skipped": ["http://a", "http://b"],
+            },
+            "health": {"llm": [{"ready": True}]},
+        }
+    )
+    assert panel._texts["llm"].text() == "без lease"
+    assert "red" in panel._dots["llm"].styleSheet()
+    detail = panel._details["llm"].text()
+    assert "без lease (direct_url)" in detail and "http://a" in detail

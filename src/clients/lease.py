@@ -1,4 +1,13 @@
-"""Lease an existing llama worker through Django (lease design spec 2.3, 5)."""
+"""Lease an existing llama worker through Django (lease design spec 2.3, 5).
+
+When no configured Django is reachable the keeper enters an explicit
+*no-lease* mode instead of failing translation: it talks to the worker
+directly, either the worker of the last lease of this session (its
+``worker_token`` stays valid until the worker re-registers) or
+``llm.direct_url`` / ``llm.direct_token_file``. The mode is logged at WARNING
+and exposed in ``snapshot()``; the heartbeat thread keeps retrying the lease
+and leaves the mode as soon as a Django answers.
+"""
 
 from __future__ import annotations
 
@@ -29,6 +38,13 @@ class Lease:
     ttl_s: int
     heartbeat_interval_s: int
     expires_at: datetime
+
+
+@dataclass(frozen=True)
+class NoLeaseTarget:
+    base_url: str
+    token: str
+    source: str  # "last_lease:<service>" | "direct_url"
 
 
 class LeaseError(Exception):
@@ -121,6 +137,14 @@ class DjangoLeaseApi:
             raise LeaseError(resp.status_code, self._detail(resp))
 
 
+class _AllUnreachable(ServiceError):
+    """No configured Django answered the acquire."""
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(SERVICE, "unreachable", f"no lease available: {detail}")
+        self.detail = detail
+
+
 class LeaseKeeper:
     """LlmTarget backed by a Django lease, kept alive by a heartbeat thread."""
 
@@ -147,6 +171,9 @@ class LeaseKeeper:
         self._mirrors: dict[str, Lease] = {}
         self._deadline = 0.0
         self._error: Optional[str] = None
+        self._skipped: list[str] = []  # djangos unreachable on the last acquire
+        self._last_lease: Optional[Lease] = None  # worker of the last lease
+        self._no_lease: Optional[NoLeaseTarget] = None
         self._started = False
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -159,7 +186,14 @@ class LeaseKeeper:
     # -- acquire / release -------------------------------------------------
 
     def _acquire_all(self, service: Optional[str]) -> Lease:
+        """Lease on the first Django that grants one, mirror on the rest.
+
+        Raises ``_AllUnreachable`` when no Django answered at all (the caller
+        may enter no-lease mode) and ``ServiceError`` when some Django answered
+        but refused (409/503/...): that is a real refusal, not an outage.
+        """
         errors: list[str] = []
+        skipped: list[str] = []
         primary: Optional[Lease] = None
         for url in self._settings.django_urls:
             try:
@@ -167,30 +201,98 @@ class LeaseKeeper:
                     self._client_name, service, self._settings.lease_ttl_s
                 )
                 break
-            except (LeaseError, ServiceError) as e:
+            except ServiceError as e:
+                logger.warning("lease acquire on {} skipped (unreachable): {}", url, e)
+                errors.append(f"{url}: {e}")
+                skipped.append(url)
+            except LeaseError as e:
                 logger.warning("lease acquire on {} failed: {}", url, e)
                 errors.append(f"{url}: {e}")
         if primary is None:
             msg = "; ".join(errors) or "no django configured"
             with self._lock:
                 self._error = msg
+                self._skipped = skipped
+            if errors and len(skipped) == len(errors):
+                raise _AllUnreachable(msg)
             raise ServiceError(SERVICE, "unreachable", f"no lease available: {msg}")
         mirrors: dict[str, Lease] = {}
         for url in self._settings.django_urls:
-            if url == primary.django_url:
+            if url == primary.django_url or url in skipped:
                 continue
             try:
                 mirrors[url] = self._api(url).acquire(
                     self._client_name, primary.service_name, self._settings.lease_ttl_s
                 )
-            except (LeaseError, ServiceError) as e:
+            except ServiceError as e:
+                logger.warning("mirror lease on {} skipped (unreachable): {}", url, e)
+                skipped.append(url)
+            except LeaseError as e:
                 logger.info("mirror lease on {} skipped: {}", url, e)
+        if skipped:
+            logger.warning(
+                "lease held on {} without unreachable djangos {}",
+                primary.django_url,
+                skipped,
+            )
         with self._lock:
+            was_no_lease = self._no_lease
             self._primary = primary
+            self._last_lease = primary
             self._mirrors = mirrors
+            self._skipped = skipped
+            self._no_lease = None
             self._deadline = self._clock() + primary.ttl_s
             self._error = None
+        if was_no_lease is not None:
+            logger.warning(
+                "leaving no-lease mode ({}): lease {} on {} via {}",
+                was_no_lease.source,
+                primary.id,
+                primary.service_name,
+                primary.django_url,
+            )
         return primary
+
+    def _acquire_or_no_lease(self, service: Optional[str]) -> Optional[Lease]:
+        """Acquire a lease or, when every Django is unreachable, enter no-lease."""
+        try:
+            return self._acquire_all(service)
+        except _AllUnreachable as e:
+            self._enter_no_lease(e.detail)
+            return None
+
+    def _enter_no_lease(self, reason: str) -> None:
+        with self._lock:
+            last = self._last_lease
+            current = self._no_lease
+        if last is not None:
+            target = NoLeaseTarget(
+                last.base_url, last.worker_token, f"last_lease:{last.service_name}"
+            )
+        elif self._settings.direct_url:
+            target = NoLeaseTarget(
+                self._settings.direct_url.rstrip("/"),
+                read_token(self._settings.direct_token_file) or "",
+                "direct_url",
+            )
+        else:
+            raise ServiceError(
+                SERVICE,
+                "unreachable",
+                f"no lease available and no no-lease target "
+                f"(set llm.direct_url): {reason}",
+            )
+        with self._lock:
+            self._no_lease = target
+        if current != target:
+            logger.warning(
+                "NO-LEASE mode: all djangos unreachable ({}); using worker {} "
+                "directly (source: {}), retrying the lease in background",
+                reason,
+                target.base_url,
+                target.source,
+            )
 
     def _release_all(self) -> None:
         with self._lock:
@@ -207,9 +309,10 @@ class LeaseKeeper:
 
     # -- public ------------------------------------------------------------
 
-    def start(self) -> Lease:
+    def start(self) -> Optional[Lease]:
+        """Acquire the lease; ``None`` means the keeper runs in no-lease mode."""
         with self._op_lock:
-            lease = self._acquire_all(self._settings.service)
+            lease = self._acquire_or_no_lease(self._settings.service)
             self._started = True
             if self._thread is None:
                 self._stop = threading.Event()
@@ -227,6 +330,9 @@ class LeaseKeeper:
         with self._op_lock:
             self._started = False
             self._release_all()
+            with self._lock:
+                self._no_lease = None
+                self._last_lease = None
         t = self._thread
         self._thread = None
         if t is not None and t is not threading.current_thread():
@@ -234,17 +340,24 @@ class LeaseKeeper:
 
     def current(self) -> tuple[str, str]:
         with self._lock:
-            if self._primary is None:
-                raise ServiceError(
-                    SERVICE, "unreachable", self._error or "lease not started"
-                )
-            return self._primary.base_url, self._primary.worker_token
+            if self._primary is not None:
+                return self._primary.base_url, self._primary.worker_token
+            if self._no_lease is not None:
+                return self._no_lease.base_url, self._no_lease.token
+            raise ServiceError(
+                SERVICE, "unreachable", self._error or "lease not started"
+            )
 
     def invalidate(self, kind: str) -> None:
         with self._op_lock:
             if not self._started:
                 return
-            if kind == "auth":
+            with self._lock:
+                no_lease = self._no_lease
+                if no_lease is not None and no_lease.source != "direct_url":
+                    # the cached worker failed: fall through to direct_url
+                    self._last_lease = None
+            if kind == "auth" and no_lease is None:
                 with self._lock:
                     primary = self._primary
                 if primary is not None:
@@ -252,16 +365,22 @@ class LeaseKeeper:
                 return
             self._release_all()
             try:
-                self._acquire_all(None)
+                self._acquire_or_no_lease(None)
             except ServiceError as e:
+                with self._lock:
+                    self._no_lease = None
                 logger.warning("re-acquire after {} failed: {}", kind, e)
 
     def snapshot(self) -> dict:
         with self._lock:
             p = self._primary
+            n = self._no_lease
             return {
+                "mode": "lease" if p else ("no_lease" if n else None),
+                "no_lease_source": n.source if n else None,
+                "skipped": list(self._skipped),
                 "service": p.service_name if p else None,
-                "base_url": p.base_url if p else None,
+                "base_url": p.base_url if p else (n.base_url if n else None),
                 "model": p.current_model if p else None,
                 "expires_at": p.expires_at.isoformat() if p else None,
                 "django": p.django_url if p else None,
@@ -289,9 +408,31 @@ class LeaseKeeper:
     def _reacquire(self) -> None:
         self._release_all()
         try:
-            self._acquire_all(self._settings.service)
+            self._acquire_or_no_lease(self._settings.service)
         except ServiceError as e:
+            with self._lock:
+                self._no_lease = None
             logger.warning("lease re-acquire failed: {}", e)
+
+    def _retry_skipped_mirrors(self, primary: Lease) -> None:
+        with self._lock:
+            skipped = [u for u in self._skipped if u not in self._mirrors]
+        for url in skipped:
+            try:
+                new = self._api(url).acquire(
+                    self._client_name, primary.service_name, self._settings.lease_ttl_s
+                )
+            except ServiceError:
+                continue
+            except LeaseError as e:
+                logger.info("mirror lease on recovered {} refused: {}", url, e)
+                with self._lock:
+                    self._skipped = [u for u in self._skipped if u != url]
+                continue
+            logger.warning("django {} reachable again: mirror lease taken", url)
+            with self._lock:
+                self._mirrors[url] = new
+                self._skipped = [u for u in self._skipped if u != url]
 
     def _heartbeat_primary(self, primary: Lease) -> None:
         try:
@@ -334,6 +475,7 @@ class LeaseKeeper:
             with self._lock:
                 if self._primary is None or self._primary.id != primary.id:
                     return  # re-acquired, mirrors were recreated
+            self._retry_skipped_mirrors(primary)
             for url, m in mirrors.items():
                 try:
                     fresh = self._api(url).heartbeat(m)

@@ -167,8 +167,8 @@ curl -s -X POST http://127.0.0.1:8091/config -H "$H" \
 | `services.llm.django_token_file` | `RT_EDGE_DJANGO_TOKEN_FILE` | DRF-токен користувача |
 | `services.llm.service` | `RT_EDGE_LLM_SERVICE` | бажаний воркер (`null` - Django обирає) |
 | `services.llm.lease_ttl_s` | - | 15..300, default 60 |
-| `services.llm.direct_url` | `RT_EDGE_LLM_DIRECT_URL` | dev: OpenAI-сумісний сервер (діє, якщо `django_urls` порожній) |
-| `services.llm.direct_token_file` | `RT_EDGE_LLM_DIRECT_TOKEN_FILE` | токен dev-сервера |
+| `services.llm.direct_url` | `RT_EDGE_LLM_DIRECT_URL` | OpenAI-сумісний сервер: dev-режим, якщо `django_urls` порожній; інакше - ціль режиму «без lease» |
+| `services.llm.direct_token_file` | `RT_EDGE_LLM_DIRECT_TOKEN_FILE` | токен `direct_url` (для llama-воркера - його `worker_token`) |
 | `services.llm.model` | `RT_EDGE_LLM_MODEL` | default `local` |
 | `services.llm.{max_tokens_cap,temperature,context_pairs,timeout_s}` | - | 512 / 0.1 / 3 / 15 |
 | `segmentation.translate.*` | - | `threshold, min_speech_ms, end_silence_ms, soft_max_ms, soft_silence_ms, hard_max_ms, lookback_ms, preroll_ms` |
@@ -289,6 +289,15 @@ curl -s -X DELETE -H "$AUTH" $D/api/llm/leases/<uuid>/
 Поки lease живий, `next()` для воркера повертає `{"paused": true, "reason": "leased", "retry_after": 10}`.
 
 Що бачить UI: статус LLM (`lease` / `direct` / `none`), ім'я воркера та модель, помилки acquire (409 - зайнятий, 503 - немає воркера); edge сам робить heartbeat і release на `stop`.
+
+**Режим «без lease» (Django недоступні).** Переклад не зупиняється, якщо якийсь Django або інший хост вимкнений:
+
+- частина Django недоступна - lease береться на доступних, недоступні пропускаються (WARNING у лозі, `skipped` у статусі); коли Django знову відповідає, edge сам бере на ньому дзеркальний lease;
+- жоден Django не відповідає - edge переходить у режим **без lease**: WARNING `NO-LEASE mode` у лозі, у UI рядок LLM «без lease» (червоний) з джерелом. Ціль: воркер останнього lease цієї сесії (`last_lease:<воркер>`), інакше `direct_url` + `direct_token_file`. Без жодної цілі старт падає з явною помилкою;
+- heartbeat-потік кожні ~10 с пробує взяти lease; щойно вдалося - WARNING `leaving no-lease mode`, UI знову показує `lease`;
+- якщо Django відповів відмовою (409 - воркер зайнятий, 503 - немає воркера), режим «без lease» **не** вмикається: це відмова, а не збій.
+
+Без lease воркер не на паузі й паралельно бере WorkItem - переклад може бути повільнішим.
 
 **Dev-режим без Django:** `services.llm.django_urls: []`, `direct_url: "http://127.0.0.1:8080"`, `direct_token_file: <файл з --api-key-file>`; `llama-server` - див. розділ 2.
 
