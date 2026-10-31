@@ -55,6 +55,8 @@ PREVIEW_PREVIOUS = (
     " і налаштування сервісів розпізнавання мовлення"
 )
 
+PAUSE_MIN_MS, PAUSE_MAX_MS = 200, 3000
+
 # A model switch reloads the service and may download the model first.
 APPLY_TIMEOUT_S = 3600.0
 
@@ -571,6 +573,17 @@ class LlmTab(QWidget):
             " текст ділиться (по кінцях речень, якщо вміщаються) і кожна частина"
             " підставляється в шаблон замість {{text}}"
         )
+        # phrase boundary: a pause this long after the last word sends the
+        # phrase to translation (segmentation.translate.end_silence_ms); the
+        # word count above is only a maximum per request, never awaited
+        pause = settings.segmentation.translate.end_silence_ms
+        self.end_silence_ms = QSpinBox()
+        self.end_silence_ms.setRange(PAUSE_MIN_MS, PAUSE_MAX_MS)
+        self.end_silence_ms.setSingleStep(50)
+        self.end_silence_ms.setValue(min(max(pause or 700, PAUSE_MIN_MS), PAUSE_MAX_MS))
+        self.end_silence_off = QCheckBox("вимкнено (лише soft/hard max)")
+        self.end_silence_off.setChecked(pause is None)
+        self.end_silence_ms.setEnabled(pause is not None)
         self.notice = QLabel("\n".join(settings.notices))
         self.notice.setStyleSheet("color: #b36b00;")
         self.notice.setWordWrap(True)
@@ -587,7 +600,11 @@ class LlmTab(QWidget):
         form.addRow("", self.models_status)
         form.addRow("System prompt:", self.system_prompt)
         form.addRow("Шаблон запиту:", self.user_template)
-        form.addRow("Слів у {{text}}:", self.words_per_request)
+        form.addRow("Слів у {{text}} (максимум):", self.words_per_request)
+        pause_row = QHBoxLayout()
+        pause_row.addWidget(self.end_silence_ms)
+        pause_row.addWidget(self.end_silence_off)
+        form.addRow("Пауза для перекладу, мс:", pause_row)
         form.addRow(
             "",
             QLabel(
@@ -603,10 +620,16 @@ class LlmTab(QWidget):
         for w in (self.system_prompt, self.user_template):
             w.textChanged.connect(self.update_preview)
         self.words_per_request.valueChanged.connect(self.update_preview)
+        self.end_silence_ms.valueChanged.connect(self.update_preview)
+        self.end_silence_off.toggled.connect(self._on_pause_off)
         self.update_preview()
         if "llm.model" in settings.managed:
             self.model.setEnabled(False)
             self.model.setToolTip("Задано через RT_EDGE_* (лише читання)")
+
+    def _on_pause_off(self, off: bool) -> None:
+        self.end_silence_ms.setEnabled(not off)
+        self.update_preview()
 
     def model_endpoint(self):
         """Chosen worker, or the first one (auto order) for the model list."""
@@ -657,7 +680,16 @@ class LlmTab(QWidget):
             self.preview.setPlainText("\n".join(errors))
             return
         chunks = split_words(PREVIEW_SAMPLE, self.words_per_request.value())
-        lines = [f"[system] {build_messages(system, template, '', 'pl')[0]['content']}"]
+        pause = (
+            "без паузи (лише soft/hard max)"
+            if self.end_silence_off.isChecked()
+            else f"пауза {self.end_silence_ms.value()} мс"
+        )
+        lines = [
+            f"[фраза йде в переклад: до {self.words_per_request.value()} слів"
+            f" у {{{{text}}}} на запит, або {pause}; неповний запит не чекає]",
+            f"[system] {build_messages(system, template, '', 'pl')[0]['content']}",
+        ]
         for n, chunk in enumerate(chunks, 1):
             user = build_messages(system, template, chunk, "pl")[-1]["content"]
             words = len(chunk.split())
@@ -680,4 +712,9 @@ class LlmTab(QWidget):
             "services.llm.max_tokens_cap": self.max_tokens_cap.value(),
             "services.llm.context_pairs": self.context_pairs.value(),
             "services.llm.words_per_request": self.words_per_request.value(),
+            "segmentation.translate.end_silence_ms": (
+                None
+                if self.end_silence_off.isChecked()
+                else self.end_silence_ms.value()
+            ),
         }

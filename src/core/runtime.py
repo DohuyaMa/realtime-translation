@@ -188,6 +188,9 @@ class EdgeSettings:
                 getattr(self.segmentation, name).validate()
             except ValueError as e:
                 errors.append(f"segmentation.{name}: {e}")
+        pause = self.segmentation.translate.end_silence_ms
+        if pause is not None and not 200 <= pause <= 3000:
+            errors.append("segmentation.translate.end_silence_ms must be in 200..3000")
         if self.segmentation.transcribe.hard_max_ms > 900_000:
             errors.append("segmentation.transcribe chunk_max_s must be <= 900")
         return errors

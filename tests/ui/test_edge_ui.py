@@ -89,7 +89,7 @@ def test_endpoints_dialog_values_and_segmentation(app):
     dlg.endpoints_tab.django_urls.setPlainText("http://a:1\nhttp://b:2")
     dlg.endpoints_tab.local["asr"].setText("http://x:1")
     dlg.segmentation_tab.chunk_min_s.setValue(120)
-    dlg.segmentation_tab.end_silence_ms.setValue(400)
+    dlg.llm_tab.end_silence_ms.setValue(400)
     v = dlg.values()
     assert v["services.django_urls"] == ["http://a:1", "http://b:2"]
     assert v["services.local.asr"] == "http://x:1"
@@ -136,7 +136,7 @@ def test_accept_persists_and_emits(app, cfg):
     got = []
     dlg.settings_changed.connect(got.append)
     dlg.endpoints_tab.local["asr"].setText("http://a:1")
-    dlg.segmentation_tab.end_silence_off.setChecked(True)
+    dlg.llm_tab.end_silence_off.setChecked(True)
     dlg.accept()
     assert got and got[0].local.asr == "http://a:1"
     assert got[0].segmentation.translate.end_silence_ms is None
@@ -544,7 +544,7 @@ def test_llm_tab_preview_and_words_per_request(app):
     )
     tab.words_per_request.setValue(3)
     lines = tab.preview.toPlainText().splitlines()
-    assert lines[1] == (
+    assert lines[2] == (
         "[запит 1/6, {{text}} = 3 слів] [Polish->English] Dzień dobry wszystkim."
     )
     assert tab.values()["services.llm.words_per_request"] == 3
@@ -691,3 +691,14 @@ def test_node_editor_without_schema_says_so(app):
     )
     panel.load()
     assert "не публікує схему" in panel.status.text()
+
+
+def test_llm_tab_pause_setting(app):
+    from src.ui.widgets.service_tabs import LlmTab
+
+    tab = LlmTab(resolve_edge_settings({}, {}))
+    assert tab.end_silence_ms.value() == 700
+    assert (tab.end_silence_ms.minimum(), tab.end_silence_ms.maximum()) == (200, 3000)
+    tab.end_silence_ms.setValue(450)
+    assert "пауза 450 мс" in tab.preview.toPlainText()
+    assert tab.values()["segmentation.translate.end_silence_ms"] == 450

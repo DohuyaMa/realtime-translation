@@ -218,19 +218,14 @@ class SegmentationTab(QWidget):
         self.chunk_max_s.setValue(tr.hard_max_ms / 1000)
         self.soft_max_ms = self._ms(tl.soft_max_ms)
         self.hard_max_ms = self._ms(tl.hard_max_ms)
-        self.end_silence_ms = self._ms(tl.end_silence_ms or 0)
-        self.end_silence_off = QCheckBox("вимкнено (None)")
-        self.end_silence_off.setChecked(tl.end_silence_ms is None)
-        self.end_silence_ms.setEnabled(tl.end_silence_ms is not None)
-        self.end_silence_off.toggled.connect(
-            lambda off: self.end_silence_ms.setEnabled(not off)
-        )
         form.addRow("transcribe: chunk_min_s", self.chunk_min_s)
         form.addRow("transcribe: chunk_max_s", self.chunk_max_s)
         form.addRow("translate: soft_max_ms", self.soft_max_ms)
         form.addRow("translate: hard_max_ms", self.hard_max_ms)
-        form.addRow("translate: end_silence_ms", self.end_silence_ms)
-        form.addRow("", self.end_silence_off)
+        form.addRow(
+            "",
+            QLabel("Пауза, після якої фраза йде в переклад: вкладка «Переклад (LLM)»"),
+        )
 
     @staticmethod
     def _ms(value: int) -> QSpinBox:
@@ -246,11 +241,6 @@ class SegmentationTab(QWidget):
             "segmentation.transcribe.chunk_max_s": self.chunk_max_s.value(),
             "segmentation.translate.soft_max_ms": self.soft_max_ms.value(),
             "segmentation.translate.hard_max_ms": self.hard_max_ms.value(),
-            "segmentation.translate.end_silence_ms": (
-                None
-                if self.end_silence_off.isChecked()
-                else self.end_silence_ms.value()
-            ),
         }
 
 
