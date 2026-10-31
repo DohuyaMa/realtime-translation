@@ -74,6 +74,7 @@ def test_monitor_updates_pool_health_and_skips_unhealthy_first():
         "model_error": None,
         "download": None,
         "memory": {"rss_mb": 900.0, "swap_mb": 0.0, "vram_mb": None},
+        "dropped": None,
         "device": "cpu",
         "error": None,
     }

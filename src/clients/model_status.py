@@ -4,8 +4,8 @@ progress, error, and the process memory."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Mapping, Optional
+from dataclasses import dataclass, field
+from typing import Any, Dict, Mapping, Optional
 
 STATES = ("unloaded", "downloading", "loading", "ready", "error")
 TRANSITIONAL = frozenset({"downloading", "loading"})
@@ -27,6 +27,9 @@ class ModelStatus:
     swap_mb: Optional[float] = None
     vram_mb: Optional[float] = None
     ready: bool = False
+    # rt-asr: output segments dropped by the service, per reason
+    # (e.g. {"hallucination": 3}); empty for rt-tts
+    dropped: Dict[str, int] = field(default_factory=dict)
 
     @property
     def transitional(self) -> bool:
@@ -49,6 +52,8 @@ def parse_status(status: Mapping[str, Any]) -> ModelStatus:
     memory = memory if isinstance(memory, Mapping) else {}
     state = str(model.get("state") or "unknown")
     error = model.get("error")
+    dropped = status.get("dropped_segments")
+    dropped = dropped if isinstance(dropped, Mapping) else {}
     return ModelStatus(
         model_id=model.get("id"),
         state=state,
@@ -60,4 +65,5 @@ def parse_status(status: Mapping[str, Any]) -> ModelStatus:
         swap_mb=_num(memory.get("swap_mb")),
         vram_mb=_num(memory.get("vram_mb")),
         ready=bool(status.get("ready", state == "ready")),
+        dropped={str(k): int(v) for k, v in dropped.items() if v},
     )

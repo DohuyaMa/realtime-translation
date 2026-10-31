@@ -843,6 +843,7 @@ def test_status_panel_per_instance_model_state_and_counters(app):
                         "state": "error",
                         "model_error": "CUDA out of memory",
                         "memory": {"rss_mb": 2800, "swap_mb": 5700, "vram_mb": 1600},
+                        "dropped": {"hallucination": 4},
                     },
                     {"url": "http://x:8091", "connected": False, "error": "timeout"},
                 ],
@@ -855,7 +856,7 @@ def test_status_panel_per_instance_model_state_and_counters(app):
     asr = panel._details["asr"].text()
     assert "cyborg: модель: <b>whisper-distil-large-v3.5</b>" in asr
     assert "помилка: CUDA out of memory" in asr
-    assert "VRAM 1.6 ГБ" in asr
+    assert "VRAM 1.6 ГБ" in asr and "відкинуто сервісом: hallucination 4" in asr
     assert "http://x:8091" in asr and "недоступний (timeout)" in asr
     stats = panel._timing.text()
     assert "відкинуто LLM-відповідей (не переклад): 2" in stats

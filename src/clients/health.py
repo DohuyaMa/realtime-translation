@@ -26,6 +26,7 @@ def _entry(service: str, url: Optional[str], **kw: Any) -> Dict[str, Any]:
         "model_error": None,
         "download": None,
         "memory": None,
+        "dropped": None,
         "device": None,
         "error": "unreachable",
     }
@@ -54,6 +55,7 @@ def _from_status(service: str, url: str, status: dict) -> Dict[str, Any]:
         model_error=ms.error,
         download=download,
         memory=memory if any(v is not None for v in memory.values()) else None,
+        dropped=ms.dropped or None,
         device=ms.device,
         error=None,
     )

@@ -19,6 +19,7 @@ DOWNLOADING = {
         "device": "cuda",
     },
     "memory": {"rss_mb": 2800, "swap_mb": 5700, "vram_mb": None},
+    "dropped_segments": {"hallucination": 3, "repetition": 0},
 }
 
 
@@ -32,6 +33,7 @@ def test_parse_status_actual_model_download_and_memory():
     assert ms.download_percent == 25
     assert (ms.rss_mb, ms.swap_mb, ms.vram_mb) == (2800, 5700, None)
     assert ms.ready is False
+    assert ms.dropped == {"hallucination": 3}
 
 
 def test_parse_status_error_state():

@@ -15,7 +15,12 @@ from PySide6.QtWidgets import (
 )
 
 from ...clients.model_status import ModelStatus
-from .model_state import ERROR_STYLE, format_memory, format_model_html
+from .model_state import (
+    ERROR_STYLE,
+    format_dropped,
+    format_memory,
+    format_model_html,
+)
 
 SERVICES = {
     "asr": "ASR (rt-asr)",
@@ -79,6 +84,7 @@ def _entry_status(entry: Dict) -> ModelStatus:
         swap_mb=memory.get("swap_mb"),
         vram_mb=memory.get("vram_mb"),
         ready=bool(entry.get("ready")),
+        dropped=entry.get("dropped") or {},
     )
 
 
@@ -98,7 +104,10 @@ def format_instances(entries: List[Dict], nodes: Dict[str, str]) -> str:
             )
             continue
         ms = _entry_status(e)
-        lines.append(f"{name}: {format_model_html(ms)}; {escape(format_memory(ms))}")
+        line = f"{name}: {format_model_html(ms)}; {escape(format_memory(ms))}"
+        if ms.dropped:
+            line += f"; {escape(format_dropped(ms))}"
+        lines.append(line)
     return "<br>".join(lines)
 
 

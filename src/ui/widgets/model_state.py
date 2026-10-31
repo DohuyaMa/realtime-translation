@@ -67,3 +67,12 @@ def format_memory(ms: ModelStatus) -> str:
         return "пам'ять: сервіс не повідомляє"
     vram = "немає" if ms.vram_mb is None else _size(ms.vram_mb)
     return f"RAM {_size(ms.rss_mb)} · swap {_size(ms.swap_mb)} · VRAM {vram}"
+
+
+def format_dropped(ms: ModelStatus) -> str:
+    """'відкинуто сервісом: hallucination 3' (rt-asr output filter)."""
+    if not ms.dropped:
+        return ""
+    return "відкинуто сервісом: " + ", ".join(
+        f"{reason} {n}" for reason, n in sorted(ms.dropped.items())
+    )

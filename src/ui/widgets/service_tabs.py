@@ -44,7 +44,12 @@ from ...core.prompt import (
 )
 from ...clients.model_status import ModelStatus, parse_status
 from ...translation_system import PREVIOUS_WORDS_MAX
-from .model_state import ERROR_STYLE, format_memory, format_model_html
+from .model_state import (
+    ERROR_STYLE,
+    format_dropped,
+    format_memory,
+    format_model_html,
+)
 from ...core.runtime import EdgeSettings
 
 PREVIEW_SAMPLE = (
@@ -371,7 +376,11 @@ class ServiceConfigPanel(QGroupBox):
             self.model_state.setText(
                 format_model_html(self.model_status, self.configured_model())
             )
-            self.memory.setText(format_memory(self.model_status))
+            texts = (
+                format_memory(self.model_status),
+                format_dropped(self.model_status),
+            )
+            self.memory.setText("; ".join(t for t in texts if t))
         self._update_buttons()
 
     def _model_action(self, action: str) -> None:
