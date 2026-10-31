@@ -282,12 +282,20 @@ def build_settings(values: Dict[str, Any]):
 
 
 def save_values(to_save: Dict[str, Any]) -> EdgeSettings:
-    """Persist dotted config values and return the re-resolved settings."""
+    """Persist dotted config values and return the re-resolved settings.
+
+    Only real overrides are written: a value that resolves to the same
+    settings as leaving the key out (the default of config/default.yml / the
+    code) is removed from config.yml, so later default changes apply."""
     from ...core.config import get_config_manager
 
     cfg = get_config_manager()
     for key, value in to_save.items():
+        cfg.unset(key)
+        default = resolve_edge_settings(cfg.get_all(), {})
         cfg.set(key, value)
+        if resolve_edge_settings(cfg.get_all(), {}) == default:
+            cfg.unset(key)
     cfg.save()
     reset_runtime_config()
     return current_settings()

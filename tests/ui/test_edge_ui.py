@@ -900,3 +900,34 @@ def test_main_window_logs_pipeline_events(app, cfg):
     assert (
         "ERROR: TTS: модель не завантажена" in win.status_logger.log_view.toPlainText()
     )
+
+
+def test_save_values_persists_only_overrides(app, cfg):
+    from src.core.prompt import DEFAULT_SYSTEM_PROMPT
+    from src.ui.widgets.settings_dialog import save_values
+
+    default = resolve_edge_settings({}, {})
+    hard_max = default.segmentation.translate.hard_max_ms
+    # a stale copy of a default in the user file is dropped on the next save
+    cfg.set("services.llm.temperature", default.llm.temperature)
+    cfg.save()
+    settings = save_values(
+        {
+            "services.llm.temperature": default.llm.temperature,
+            "services.llm.system_prompt": DEFAULT_SYSTEM_PROMPT,
+            "segmentation.translate.hard_max_ms": hard_max,
+            "services.llm.model": "m2",
+        }
+    )
+    assert _saved(cfg) == {"services": {"llm": {"model": "m2"}}}
+    assert settings.llm.model == "m2"
+    assert settings.segmentation.translate.hard_max_ms == hard_max
+    save_values({"services.llm.model": default.llm.model})
+    assert _saved(cfg) == {}
+
+
+def test_dialog_accept_writes_no_defaults(app, cfg):
+    from src.ui.widgets.settings_dialog import current_settings
+
+    SettingsDialog(current_settings(), services=[]).accept()
+    assert _saved(cfg) == {}

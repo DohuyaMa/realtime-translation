@@ -111,6 +111,22 @@ class ConfigManager:
         # Set the final value
         config[keys[-1]] = value
     
+    def unset(self, key: str) -> None:
+        """Remove a dotted key (the default applies again); empty parent
+        sections are pruned so the user file keeps only real overrides."""
+        keys = key.split('.')
+        path = [self._config]
+        for k in keys[:-1]:
+            node = path[-1].get(k)
+            if not isinstance(node, dict):
+                return
+            path.append(node)
+        path[-1].pop(keys[-1], None)
+        for depth in range(len(keys) - 1, 0, -1):
+            if path[depth]:
+                break
+            path[depth - 1].pop(keys[depth - 1], None)
+
     def get_all(self) -> Dict[str, Any]:
         """Get the entire configuration dictionary.
         
@@ -120,10 +136,16 @@ class ConfigManager:
         return self._config.copy()
     
     def save(self):
-        """Save the current configuration to file."""
+        """Save the user's overrides only: values equal to the built-in
+        defaults are not written, so a changed default takes effect."""
         try:
             with open(self.config_file, 'w') as f:
-                yaml.dump(self._config, f, default_flow_style=False)
+                yaml.dump(
+                    _overrides(self._config, self._default_config),
+                    f,
+                    default_flow_style=False,
+                    allow_unicode=True,
+                )
             logger.info(f"Configuration saved to {self.config_file}")
         except Exception as e:
             logger.error(f"Error saving config file: {e}")
@@ -181,6 +203,20 @@ class ConfigManager:
             'target_lang': self.get('translation.target_lang', 'en'),
             'whisper_model': self.get('translation.whisper_model', 'medium')
         }
+
+
+def _overrides(config: Dict, defaults: Dict) -> Dict:
+    """The part of ``config`` that differs from ``defaults`` (recursive)."""
+    out: Dict[str, Any] = {}
+    for key, value in config.items():
+        default = defaults.get(key) if isinstance(defaults, dict) else None
+        if isinstance(value, dict) and isinstance(default, dict):
+            sub = _overrides(value, default)
+            if sub:
+                out[key] = sub
+        elif key not in defaults or value != default:
+            out[key] = value
+    return out
 
 
 # Global configuration instance
