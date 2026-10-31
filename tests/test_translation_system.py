@@ -23,6 +23,7 @@ from src.core.runtime import (
 from src.segmentation import Segment, SegmenterConfig
 from src.translation_system import (
     TTS_WARMUP_TEXT,
+    WARMUP_AUDIO,
     TranslationSystem,
     default_llm_target,
 )
@@ -33,12 +34,31 @@ def seg(seconds: float = 1.0) -> Segment:
     return Segment(audio=audio, start_s=0.0, end_s=seconds, reason="pause")
 
 
-class FakeAsr:
+class FakeModelService:
+    """/status + /model/load of rt-asr / rt-vosk / rt-tts (warm-up)."""
+
+    state = "ready"
+    loads = 0
+
+    def get_status(self):
+        return {"model": {"state": self.state}}
+
+    def load_model(self, timeout_s=None):
+        self.loads += 1
+        self.state = "ready"
+        return {}
+
+
+class FakeAsr(FakeModelService):
     def __init__(self, results):
         self.results = list(results)
         self.calls = []
+        self.warmups = 0
 
     def transcribe(self, audio, sample_rate=16000, language=None, prompt=None, **kw):
+        if audio is WARMUP_AUDIO:  # pipeline-start warm-up, kept apart
+            self.warmups += 1
+            return AsrResult("", language)
         self.calls.append(
             {"n": len(audio), "language": language, "prompt": prompt, **kw}
         )
@@ -48,7 +68,7 @@ class FakeAsr:
         return r
 
 
-class FakeTts:
+class FakeTts(FakeModelService):
     """Records synthesized sentences; the pipeline-start warm-up call
     (``warmups``) is kept apart so call lists stay about phrases."""
 
@@ -216,6 +236,11 @@ class Sink:
         self.played.append((len(audio), sr))
 
 
+def _phrase_events(events):
+    """Events without the pipeline-start warm-up ones."""
+    return [e for e in events if e.get("status") not in ("warmup", "warmup_state")]
+
+
 def translate_settings(**kw):
     llm = kw.pop("llm", LlmSettings(context_pairs=3))
     local = LocalUrls(llm="http://llm", tts="http://tts")
@@ -350,7 +375,7 @@ def test_transcribe_mode_uses_batch_priority_scaled_timeout_and_no_session():
     assert ts.start() is True
     try:
         feed(ts, vads, capture, seg(120.0))
-        assert wait_for(lambda: events)
+        assert wait_for(lambda: _phrase_events(events))
     finally:
         ts.stop()
     call = pools.asr.client.calls[0]
@@ -358,7 +383,7 @@ def test_transcribe_mode_uses_batch_priority_scaled_timeout_and_no_session():
     assert keeper.events == []
     assert llm.calls == [] and pools.tts.client.calls == [] and sink.played == []
     assert vads[0].cfg == settings.segmentation.transcribe
-    assert events == [
+    assert _phrase_events(events) == [
         {"status": "transcription_complete", "original_text": "довгий текст"}
     ]
 
@@ -382,7 +407,10 @@ def test_stop_flushes_and_drains_transcribe_chunk():
     ts.stop()
     assert [c["n"] for c in asr.calls] == [300 * 16000, 30 * 16000]
     assert [c["timeout_s"] for c in asr.calls] == [300.0, 60.0]
-    assert [e["original_text"] for e in events] == ["середина", "кінець"]
+    assert [e["original_text"] for e in _phrase_events(events)] == [
+        "середина",
+        "кінець",
+    ]
 
 
 def test_service_error_skips_phrase_and_continues():

@@ -23,7 +23,7 @@ from test_translation_system import (
     wait_for,
 )
 from src.clients import Directory
-from src.translation_system import TTS_WARMUP_TEXT, TranslationSystem
+from src.translation_system import TTS_WARMUP_TEXT, WARMUP_AUDIO, TranslationSystem
 
 STAGE_S = 0.1
 
@@ -34,7 +34,8 @@ class SlowAsr(FakeAsr):
         self.delay, self.clock = delay, clock
 
     def transcribe(self, audio, **kw):
-        self._advance()
+        if audio is not WARMUP_AUDIO:
+            self._advance()
         return super().transcribe(audio, **kw)
 
     def _advance(self):
@@ -429,13 +430,13 @@ def test_llm_is_warmed_up_when_the_pipeline_starts():
     ts.set_status_callback(events.append)
     assert ts.start()
     try:
-        assert wait_for(lambda: ts.get_stats()["llm_warmup"])
+        assert wait_for(lambda: "llm" in ts.get_stats()["warmup"])
     finally:
         ts.stop()
-    w = ts.get_stats()["llm_warmup"]
+    w = ts.get_stats()["warmup"]["llm"]
     assert WarmLlm.warmups == 1
     assert w["reason"] == "start" and w["url"] == "http://llm" and w["error"] is None
-    assert any(e.get("status") == "llm_warmup" for e in events)
+    assert any(e.get("status") == "warmup" and e["kind"] == "llm" for e in events)
 
 
 def test_failed_warm_up_is_reported_and_the_stage_keeps_working():
@@ -457,7 +458,7 @@ def test_failed_warm_up_is_reported_and_the_stage_keeps_working():
         assert wait_for(lambda: played)
     finally:
         ts.stop()
-    assert "cold" in ts.get_stats()["llm_warmup"]["error"]
+    assert "cold" in ts.get_stats()["warmup"]["llm"]["error"]
 
 
 def test_cyrillic_in_translation_is_rejected_as_foreign_script():

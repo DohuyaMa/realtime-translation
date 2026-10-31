@@ -42,10 +42,11 @@ from src.core.runtime import (
     resolve_edge_settings,
 )
 from src.segmentation import Segment
-from src.translation_system import TranslationSystem
+from src.translation_system import WARMUP_AUDIO, TranslationSystem
 from test_pipeline_stages import SlowAsr, SlowLlm, SlowTts
 from test_translation_system import (
     FakeCapture,
+    FakeModelService,
     FakePools,
     FakeVad,
     StaticTarget,
@@ -65,13 +66,17 @@ def words(text, start=0.0, step=0.2):
     )
 
 
-class FakeVosk:
+class FakeVosk(FakeModelService):
     def __init__(self, results, delay=0.0):
         self.results = list(results)
         self.delay = delay
         self.calls = []
+        self.warmups = 0
 
     def transcribe(self, audio, language, sample_rate=16000, **kw):
+        if audio is WARMUP_AUDIO:
+            self.warmups += 1
+            return VoskResult("", language)
         self.calls.append({"language": language, "t": time.monotonic()})
         time.sleep(self.delay)
         r = self.results.pop(0) if self.results else VoskResult("", language)
@@ -690,8 +695,8 @@ def test_tts_is_warmed_up_at_start():
     ts._pools.tts.client = tts
     stats = run(ts, vads, capture, [seg()], lambda: tts.calls)
     assert tts.warmups == 1 and [c[0] for c in tts.calls] == ["EN1."]
-    assert stats["tts_warmup"]["error"] is None
-    assert any(e.get("status") == "tts_warmup" for e in events)
+    assert stats["warmup"]["tts"]["error"] is None
+    assert any(e.get("status") == "warmup" and e["kind"] == "tts" for e in events)
 
 
 def test_gate_and_record_events_are_described():
@@ -779,3 +784,78 @@ def test_terms_segment_passes_merges_and_echo_releases_it():
     assert stats["vosk_gate_foreign_terms"] == 1
     assert stats["vosk_gate_dropped"] == 0 and stats["asr_echo"] == 1
     assert any(e.get("status") == "asr_echo" for e in events)
+
+
+# -- pipeline-start warm-up of every service (owner 2026-10-31) --------------
+
+
+def test_start_warms_up_asr_vosk_llm_tts_in_parallel():
+    class SlowLoadAsr(SlowAsr):
+        state = "unloaded"
+
+        def get_status(self):
+            time.sleep(0.2)  # a model load takes time
+            return super().get_status()
+
+    asr = SlowLoadAsr([AsrResult("Добрий день.", "uk")], 0)
+    vosk = FakeVosk([VoskResult("добрий день", "uk", words("добрий день"))])
+    vosk.state = "unloaded"
+    ts, vads, capture, llm, events = system(asr, vosk)
+    assert ts.start()
+    try:
+        # capture runs at once: a phrase spoken during the warm-up queues
+        vads[-1].pending.append(seg())
+        capture.push()
+        assert ts.get_stats()["warmup_pending"]
+        assert wait_for(lambda: llm.calls and not ts.get_stats()["warmup_pending"])
+        stats = ts.get_stats()
+    finally:
+        ts.stop()
+    assert asr.loads == 1 and asr.warmups == 1 and asr.calls[0]["n"] == 16000
+    assert vosk.loads == 1 and vosk.warmups == 1
+    assert set(stats["warmup"]) == {"asr", "vosk", "llm", "tts"}
+    assert stats["warmup"]["asr"]["loaded"] and not stats["warmup"]["tts"]["loaded"]
+    states = [e for e in events if e.get("status") == "warmup_state"]
+    assert states[0]["ready"] is False
+    assert sorted(states[0]["pending"]) == ["asr", "llm", "tts", "vosk"]
+    assert states[-1]["ready"] is True and states[-1]["failed"] == []
+    # parallel: ASR (2 status polls) and Vosk loads overlap
+    assert states[-1]["ms"] < 1000
+    assert llm.calls == ["Добрий день."]
+
+
+def test_failed_service_warm_up_is_reported_and_translation_goes_on():
+    vosk = FakeVosk([VoskResult("добрий день", "uk", words("добрий день"))])
+
+    def broken():
+        raise ServiceError("vosk", "http", "boom")
+
+    vosk.get_status = broken
+    asr = SlowAsr([AsrResult("Добрий день.", "uk")], 0)
+    ts, vads, capture, llm, events = system(asr, vosk)
+    stats = run(ts, vads, capture, [seg()], lambda: llm.calls)
+    assert "boom" in stats["warmup"]["vosk"]["error"]
+    assert any(
+        e.get("status") == "warmup_state" and e.get("failed") == ["vosk"]
+        for e in events
+    )
+    assert llm.calls == ["Добрий день."]
+
+
+def test_warm_up_events_are_described():
+    from src.ui.controller.ui_controller import describe_pipeline_event
+
+    assert describe_pipeline_event(
+        {"status": "warmup_state", "ready": False, "pending": ["asr", "vosk"]}
+    ) == ("INFO", "Прогрів… (ASR, Vosk)")
+    assert describe_pipeline_event(
+        {"status": "warmup_state", "ready": True, "ms": 812.0, "failed": []}
+    ) == ("INFO", "Усе прогріто за 812.0 мс від старту")
+    level, msg = describe_pipeline_event(
+        {
+            "status": "warmup",
+            "kind": "asr",
+            "warmup": {"url": "http://a", "error": None, "ms": 9.0, "loaded": True},
+        }
+    )
+    assert level == "INFO" and msg.endswith("(модель завантажено)")

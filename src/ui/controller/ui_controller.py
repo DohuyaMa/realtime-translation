@@ -51,11 +51,26 @@ def describe_pipeline_event(event: Dict) -> Optional[Tuple[str, str]]:
         if event.get("path"):
             return "INFO", f"Запис сесії для аналізу: {event['path']}"
         return "INFO", "Запис сесії зупинено"
-    if status == "tts_warmup":
+    if status == "warmup":
         w = event.get("warmup") or {}
+        name = SERVICE_NAMES.get(event.get("kind"), event.get("kind") or "?")
+        where = w.get("url") or "?"
         if w.get("error"):
-            return "WARN", f"Прогрів TTS не вдався ({w.get('ms')} мс): {w['error']}"
-        return "INFO", f"TTS прогріто за {w.get('ms')} мс"
+            return "WARN", (
+                f"Прогрів {name} на {where} не вдався ({w.get('ms')} мс): {w['error']}"
+            )
+        loaded = " (модель завантажено)" if w.get("loaded") else ""
+        return "INFO", f"{name} прогріто на {where}: {w.get('ms')} мс{loaded}"
+    if status == "warmup_state":
+        if not event.get("ready"):
+            names = ", ".join(SERVICE_NAMES.get(k, k) for k in event.get("pending", []))
+            return "INFO", f"Прогрів… ({names})"
+        failed = ", ".join(SERVICE_NAMES.get(k, k) for k in event.get("failed", []))
+        if failed:
+            return "WARN", (
+                f"Прогрів завершено за {event.get('ms')} мс, не вдався: {failed}"
+            )
+        return "INFO", f"Усе прогріто за {event.get('ms')} мс від старту"
     if status == "vosk_state":
         v = event.get("vosk") or {}
         if v.get("mode") == "on":
@@ -63,12 +78,6 @@ def describe_pipeline_event(event: Dict) -> Optional[Tuple[str, str]]:
         return "WARN", (
             f"Vosk недоступний ({v.get('error') or '?'}): переклад лише з whisper"
         )
-    if status == "llm_warmup":
-        w = event.get("warmup") or {}
-        where = w.get("url") or "?"
-        if w.get("error"):
-            return "WARN", f"Прогрів LLM на {where} не вдався: {w['error']}"
-        return "INFO", f"LLM прогріто на {where}: {w.get('ms')} мс"
     if status == "error":
         service = SERVICE_NAMES.get(event.get("service"), event.get("service") or "?")
         kind = event.get("kind")

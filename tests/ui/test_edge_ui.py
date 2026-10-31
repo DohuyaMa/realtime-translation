@@ -1070,8 +1070,12 @@ def test_pipeline_events_described_and_deduplicated():
     now[0] = 11.0
     assert log.lines(err)[1].endswith("(ще ×1 за 10 с)")
     assert log.lines({"status": "timing", "timing": {}}) is None
-    warm = {"status": "llm_warmup", "warmup": {"url": "http://w", "error": "x"}}
-    assert log.lines(warm) == ("WARN", "Прогрів LLM на http://w не вдався: x")
+    warm = {
+        "status": "warmup",
+        "kind": "llm",
+        "warmup": {"url": "http://w", "error": "x", "ms": 5.0},
+    }
+    assert log.lines(warm) == ("WARN", "Прогрів LLM на http://w не вдався (5.0 мс): x")
 
 
 def test_main_window_logs_pipeline_events(app, cfg):
@@ -1088,6 +1092,15 @@ def test_main_window_logs_pipeline_events(app, cfg):
     assert (
         "ERROR: TTS: модель не завантажена" in win.status_logger.log_view.toPlainText()
     )
+    # «прогрів…» in the status line until every service is warm
+    win.is_translating = True
+    emit({"status": "warmup_state", "ready": False, "pending": ["asr", "llm"]})
+    app.processEvents()
+    assert win.status_logger.status_area.text() == "Translation active - прогрів…"
+    emit({"status": "warmup_state", "ready": True, "ms": 900.0, "failed": []})
+    app.processEvents()
+    assert win.status_logger.status_area.text() == "Translation active"
+    assert "Усе прогріто за 900.0 мс" in win.status_logger.log_view.toPlainText()
 
 
 def test_save_values_persists_only_overrides(app, cfg):

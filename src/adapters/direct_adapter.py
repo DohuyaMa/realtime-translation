@@ -11,14 +11,17 @@ from ..clients.model_status import parse_status
 from ..controller.controller import Device
 from ..core.preflight.pipewire import PipeWirePreflight
 from ..core.runtime import EdgeSettings, get_runtime_config
-from ..translation_system import TranslationSystem
 
-# POST /model/load|unload only start the transition on the service
-MODEL_ACTION_TIMEOUT_S = 60.0
-# «Запустити» waits this long for the local models before restarting the
-# pipeline (a first load may download the model)
-MODEL_READY_TIMEOUT_S = 600.0
-MODEL_POLL_S = 0.5
+# «Запустити» waits MODEL_READY_TIMEOUT_S for the local models before
+# restarting the pipeline (a first load may download the model); the same
+# limits as the pipeline-start warm-up
+from ..translation_system import (
+    MODEL_ACTION_TIMEOUT_S,
+    MODEL_POLL_S,
+    MODEL_READY_TIMEOUT_S,
+    TranslationSystem,
+)
+
 STANDBY_ERROR = "система зупинена рубильником: спершу «Запустити»"
 
 

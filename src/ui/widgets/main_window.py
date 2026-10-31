@@ -70,6 +70,7 @@ class MainWindow(QMainWindow):
         
         # UI state
         self.is_translating = False
+        self._warming = False  # pipeline-start warm-up still running
         # kill switch: standby after «Зупинити все…»; busy while it works
         self._standby = False
         self._power_busy: Optional[str] = None  # "stopping" | "starting"
@@ -536,7 +537,7 @@ class MainWindow(QMainWindow):
         else:
             self.is_translating = bool(running)
             msg = 'Translation active' if running else 'Translation stopped'
-            self.status_manager.set_status(msg)
+            self.status_manager.set_status(self._translation_status_text())
             self.status_manager.log_info(msg)
         self.translate_button.setText(
             "Stop Translation" if self.is_translating else "Start Translation"
@@ -643,9 +644,20 @@ class MainWindow(QMainWindow):
         # Service status indicators
         self.service_status_panel.update_status(update_data)
 
+    def _translation_status_text(self) -> str:
+        if not self.is_translating:
+            return 'Translation stopped'
+        if self._warming:
+            return 'Translation active - прогрів…'
+        return 'Translation active'
+
     def _apply_pipeline_event(self, event: Dict):
         """Pipeline problems (rejected translations, service errors incl. a
         model not ready) in the log - GUI thread (marshalled by signal)."""
+        if event.get("status") == "warmup_state":
+            # «прогрів…» in the status line until every service is warm
+            self._warming = not event.get("ready")
+            self.status_manager.set_status(self._translation_status_text())
         line = self._event_log.lines(event)
         if line is None:
             return
