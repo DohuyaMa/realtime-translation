@@ -21,6 +21,18 @@ class ConcreteTranslatorController(TranslatorController):
         """Stop the entire translation pipeline."""
         return self._adapter.stop_pipeline()
 
+    def standby(self) -> List[str]:
+        """Kill switch: stop everything, unload this host's models; errors."""
+        return self._adapter.standby()
+
+    def resume(self) -> List[str]:
+        """Undo standby: load this host's models, resume; errors."""
+        return self._adapter.resume()
+
+    def in_standby(self) -> bool:
+        """True between standby() and resume()."""
+        return self._adapter.in_standby
+
     def refresh_services(self) -> Dict:
         """Force a health poll of the remote speech services."""
         return self._adapter.refresh_services()

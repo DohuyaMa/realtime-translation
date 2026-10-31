@@ -3,10 +3,13 @@ import threading
 from loguru import logger
 from typing import Optional, Dict, List, Tuple
 
-# Fixed device names for the static PipeWire configuration
+# Fixed device names of the PipeWire drop-in (lib.rtSpeech.virtualDevicesConf):
+# other apps play into VIRTUAL_INPUT_SINK; the translation is played into
+# VIRTUAL_OUTPUT_SINK and comes out of VIRTUAL_MIC_SOURCE, a real Audio/Source
+# other apps pick as a microphone.
 VIRTUAL_INPUT_SINK = "rt_virtual_input"
 VIRTUAL_OUTPUT_SINK = "rt_virtual_output"
-VIRTUAL_MIC_SOURCE = "rt_virtual_output.monitor"
+VIRTUAL_MIC_SOURCE = "rt_virtual_mic"
 
 
 class AudioRouter:

@@ -19,6 +19,12 @@ from .status_logger import StatusLogger, StatusManager
 from .service_status_panel import ServiceStatusPanel
 from ...core.runtime import EdgeSettings
 from .settings_dialog import SettingsButton
+from .tray_icon import AppState, app_state, make_icon
+from ...audio.routing import VIRTUAL_MIC_SOURCE, VIRTUAL_OUTPUT_SINK
+
+POWER_OFF_TEXT = "Зупинити все й звільнити пам'ять"
+POWER_ON_TEXT = "Запустити"
+DEFAULT_OUTPUT_TEXT = "Системний вихід (за замовчуванням)"
 
 
 class MainWindow(QMainWindow):
@@ -43,6 +49,10 @@ class MainWindow(QMainWindow):
         
         # UI state
         self.is_translating = False
+        # kill switch: standby after «Зупинити все…»; busy while it works
+        self._standby = False
+        self._power_busy: Optional[str] = None  # "stopping" | "starting"
+        self._power_errors: list = []
         self.update_timer: Optional[QTimer] = None
         
         # Connect UI controller callbacks
@@ -59,6 +69,7 @@ class MainWindow(QMainWindow):
         self.init_ui()
         self.setup_tray_icon()
         self.refresh_device_lists()
+        self._refresh_app_state()
         
         self.service_status_panel.refresh_requested.connect(
             self.on_refresh_requested
@@ -123,10 +134,18 @@ class MainWindow(QMainWindow):
         input_layout.addWidget(self.input_device_combo)
         audio_layout.addLayout(input_layout)
         
-        # Output device
+        # Output device: where the translation is played (the app's own
+        # stream only - the system default sink is not touched)
         output_layout = QHBoxLayout()
         output_layout.addWidget(QLabel("Output Device:"))
         self.output_device_combo = QComboBox()
+        self.output_device_combo.setToolTip(
+            f"Куди звучить переклад. «{VIRTUAL_OUTPUT_SINK}» → інші застосунки"
+            f" чують його як мікрофон «RT Переклад (мікрофон)» ({VIRTUAL_MIC_SOURCE})."
+        )
+        self.output_device_combo.currentIndexChanged.connect(
+            self.on_output_device_changed
+        )
         output_layout.addWidget(self.output_device_combo)
         audio_layout.addLayout(output_layout)
         
@@ -160,6 +179,15 @@ class MainWindow(QMainWindow):
         
         # Service status panel
         upper_layout.addWidget(self.service_status_panel)
+        # Kill switch: stop everything and free the memory / start again
+        power_layout = QHBoxLayout()
+        self.power_button = QPushButton(POWER_OFF_TEXT)
+        self.power_button.clicked.connect(self.toggle_power)
+        power_layout.addWidget(self.power_button)
+        self.power_label = QLabel()
+        self.power_label.setWordWrap(True)
+        power_layout.addWidget(self.power_label, 1)
+        upper_layout.addLayout(power_layout)
         # Status and controls
         status_layout = QHBoxLayout()
         
@@ -209,26 +237,110 @@ class MainWindow(QMainWindow):
     def setup_tray_icon(self):
         """Set up system tray icon and menu."""
         self.tray_icon = QSystemTrayIcon(self)
-        self.tray_icon.setIcon(QIcon.fromTheme("audio-input-microphone"))
-        
+        self.tray_icon.activated.connect(self._on_tray_activated)
+
         # Create tray menu
         tray_menu = QMenu()
-        
+
         show_action = QAction("Show", self)
         show_action.triggered.connect(self.show)
         tray_menu.addAction(show_action)
-        
-        toggle_action = QAction("Start Translation", self)
-        toggle_action.triggered.connect(self.toggle_translation)
-        tray_menu.addAction(toggle_action)
-        
+
+        self.tray_toggle_action = QAction("Start Translation", self)
+        self.tray_toggle_action.triggered.connect(self.toggle_translation)
+        tray_menu.addAction(self.tray_toggle_action)
+
+        self.tray_power_action = QAction(POWER_OFF_TEXT, self)
+        self.tray_power_action.triggered.connect(self.toggle_power)
+        tray_menu.addAction(self.tray_power_action)
+
         quit_action = QAction("Quit", self)
         quit_action.triggered.connect(self.quit_application)
         tray_menu.addAction(quit_action)
         
         self.tray_icon.setContextMenu(tray_menu)
         self.tray_icon.show()
-        
+
+    def _on_tray_activated(self, reason):
+        if reason == QSystemTrayIcon.ActivationReason.Trigger:
+            self.showNormal()
+            self.raise_()
+            self.activateWindow()
+
+    def app_state(self) -> AppState:
+        return app_state(
+            standby=self._standby,
+            busy=self._power_busy,
+            translating=self.is_translating,
+            errors=self._power_errors,
+        )
+
+    def _refresh_app_state(self) -> None:
+        """Tray icon/tooltip, state label, kill switch and translate
+        controls from the current state - GUI thread only."""
+        state = self.app_state()
+        self.tray_icon.setIcon(make_icon(state))
+        self.tray_icon.setToolTip(state.tooltip)
+        self.setWindowIcon(make_icon(state))
+        self.power_label.setText(f"Стан: {state.text}")
+        power_text = POWER_ON_TEXT if self._standby else POWER_OFF_TEXT
+        for widget in (self.power_button, self.tray_power_action):
+            widget.setText(power_text)
+            widget.setEnabled(self._power_busy is None)
+        toggle_text = (
+            "Stop Translation" if self.is_translating else "Start Translation"
+        )
+        self.tray_toggle_action.setText(toggle_text)
+        can_translate = not self._standby and self._power_busy is None
+        self.translate_button.setEnabled(can_translate)
+        self.tray_toggle_action.setEnabled(can_translate)
+        if self._standby:
+            self.translate_button.setToolTip(f"Спершу «{POWER_ON_TEXT}»")
+        else:
+            self.translate_button.setToolTip("")
+
+    def toggle_power(self):
+        """Kill switch: «Зупинити все й звільнити пам'ять» (stop pipeline ->
+        release the worker session -> unload this host's models) or
+        «Запустити» (the reverse) - off the GUI thread."""
+        if not self.ui_controller or self._power_busy is not None:
+            return
+        stopping = not self._standby
+        fn = self.ui_controller.standby if stopping else self.ui_controller.resume
+
+        def work():
+            errors = list(fn() or [])
+            return errors, bool(self.ui_controller.get_status().get("running", False))
+
+        if not self._run_async(work, self._on_power_done):
+            return
+        self._power_busy = "stopping" if stopping else "starting"
+        self._power_errors = []
+        self._refresh_app_state()
+        self.status_manager.log_info(self.app_state().text)
+
+    def _on_power_done(self, result):
+        stopping = self._power_busy == "stopping"
+        self._power_busy = None
+        if isinstance(result, Exception):
+            errors, running = [f"{type(result).__name__}: {result}"], False
+        else:
+            errors, running = result
+        self._standby = stopping
+        self._power_errors = errors
+        self.is_translating = running
+        self._refresh_app_state()
+        text = self.app_state().text
+        self.status_manager.set_status(text)
+        if errors:
+            self.status_manager.log_error(text)
+        else:
+            self.status_manager.log_info(text)
+            if stopping:
+                self.status_manager.log_info(
+                    "LLM llama-воркера не вивантажено: він обслуговує чергу Django"
+                )
+
     def refresh_device_lists(self):
         """Refresh the audio device lists from the controller."""
         try:
@@ -250,19 +362,22 @@ class MainWindow(QMainWindow):
             
             # Get output devices
             output_devices = self.ui_controller.get_output_devices()
-            
+
             # Store current selections to restore them if possible
             current_output = self.output_device_combo.currentText()
-            
+
+            self.output_device_combo.blockSignals(True)
             self.output_device_combo.clear()
+            self.output_device_combo.addItem(DEFAULT_OUTPUT_TEXT, "")
             for device in output_devices:
                 self.output_device_combo.addItem(device['description'], device['name'])
-            
+
             # Restore previous selection if it still exists
             if current_output:
                 index = self.output_device_combo.findText(current_output)
                 if index >= 0:
                     self.output_device_combo.setCurrentIndex(index)
+            self.output_device_combo.blockSignals(False)
             
             # Connect the input device selection to a handler
             self.input_device_combo.currentTextChanged.connect(self.on_input_device_changed)
@@ -316,7 +431,6 @@ class MainWindow(QMainWindow):
             )
 
     def _on_toggle_done(self, result):
-        self.translate_button.setEnabled(True)
         ok, running = (
             result if isinstance(result, tuple) else (False, self.is_translating)
         )
@@ -331,6 +445,7 @@ class MainWindow(QMainWindow):
         self.translate_button.setText(
             "Stop Translation" if self.is_translating else "Start Translation"
         )
+        self._refresh_app_state()
 
     def toggle_always_on_top(self, state):
         """Toggle always-on-top window state."""
@@ -384,6 +499,22 @@ class MainWindow(QMainWindow):
                 self.status_manager.set_status(f"Failed to change input device: {e}")
                 self.status_manager.log_error(f"Failed to change input device: {e}")
     
+    def on_output_device_changed(self, index):
+        """Sink the translation is played into (None = the default sink)."""
+        if not self.ui_controller or index < 0:
+            return
+        name = self.output_device_combo.itemData(index) or None
+        text = self.output_device_combo.itemText(index)
+        if not self.ui_controller.set_output_device(name):
+            self.status_manager.log_error(f"Не вдалося вибрати вихід: {text}")
+            return
+        self.status_manager.log_info(f"Переклад звучить у: {text}")
+        if name == VIRTUAL_OUTPUT_SINK:
+            self.status_manager.log_info(
+                "В інших застосунках (Zoom, Teams, браузер) оберіть мікрофон"
+                f" «RT Переклад (мікрофон)» ({VIRTUAL_MIC_SOURCE})"
+            )
+
     def update_ui(self):
         """Update UI elements with current status - called by timer."""
         # This is the fallback polling approach, but we also update from controller events

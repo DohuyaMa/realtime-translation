@@ -1,10 +1,11 @@
-# Edge only: UI + capture + VAD + playback + PipeWire virtual sinks.
+# Edge only: UI + capture + VAD + playback + PipeWire virtual devices.
 # Speech services run as NixOS system units (nixosModules.rt-speech), possibly on other hosts.
 { config, lib, pkgs, ... }:
 let
   inherit (lib) mkOption mkEnableOption types;
   cfg = config.rt-translator;
   rtPkgs = import ../packages { inherit pkgs lib; };
+  rtLib = import ../lib { inherit lib; };
   inStore = p: p != null && lib.hasPrefix builtins.storeDir p;
 
   csv = lib.concatStringsSep ",";
@@ -20,18 +21,6 @@ let
     // lib.optionalAttrs (cfg.allowedServices != null) { RT_EDGE_ALLOWED_SERVICES = csv cfg.allowedServices; };
 
   hasSource = kind: cfg.local.${kind} != null || cfg.django.urls != [ ];
-
-  sinkModule = name: description: ''
-    {
-      name = libpipewire-module-null-sink
-      args = {
-        node.name = "${name}"
-        node.description = "${description}"
-        media.class = "Audio/Sink"
-        stream.props = { audio.position = [ FL FR ]; }
-      }
-    }
-  '';
 in
 {
   options.rt-translator = {
@@ -74,7 +63,7 @@ in
     };
     llm.model = mkOption { type = types.nullOr types.str; default = null; description = "LLM model name; null = chosen in the UI (Переклад tab, default \"local\"). Set here it is read-only in the UI."; };
     autostart = mkOption { type = types.bool; default = true; description = "Start translator-ui with the graphical session."; };
-    virtualSinks.enable = mkOption { type = types.bool; default = true; description = "Create rt_virtual_input/rt_virtual_output PipeWire sinks."; };
+    virtualSinks.enable = mkOption { type = types.bool; default = true; description = "Create the PipeWire devices rt_virtual_input (sink), rt_virtual_output (sink) and rt_virtual_mic (microphone carrying rt_virtual_output, for other apps)."; };
   };
 
   config = lib.mkIf cfg.enable {
@@ -116,12 +105,11 @@ in
     };
 
     xdg.configFile."pipewire/pipewire.conf.d/30-rt-virtual-sinks.conf" = lib.mkIf cfg.virtualSinks.enable {
-      text = ''
-        context.modules = [
-        ${sinkModule "rt_virtual_input" "RT-Virtual-Input"}
-        ${sinkModule "rt_virtual_output" "RT-Virtual-Output"}
-        ]
-      '';
+      text = rtLib.virtualDevicesConf {
+        inputName = "rt_virtual_input";
+        outputName = "rt_virtual_output";
+        micName = "rt_virtual_mic";
+      };
     };
   };
 }

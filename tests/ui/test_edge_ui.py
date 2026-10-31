@@ -194,6 +194,82 @@ def test_main_window_constructs(app, cfg):
     ctl.reconfigure_services.assert_called_once()
 
 
+def _wait(app, cond):
+    import time
+
+    for _ in range(200):
+        app.processEvents()
+        if cond():
+            return
+        time.sleep(0.01)
+    raise AssertionError("condition not reached")
+
+
+def test_kill_switch_stops_and_starts(app, cfg):
+    from unittest.mock import MagicMock
+
+    from src.ui.widgets.main_window import POWER_OFF_TEXT, POWER_ON_TEXT
+
+    ctl = MagicMock()
+    ctl.get_input_devices.return_value = []
+    ctl.get_output_devices.return_value = []
+    ctl.get_status.return_value = {"running": False}
+    ctl.standby.return_value = []
+    ctl.resume.return_value = []
+    win = _window(ctl)
+    assert win.power_button.text() == POWER_OFF_TEXT
+    win.toggle_power()
+    assert not win.power_button.isEnabled()
+    _wait(app, lambda: win.power_button.isEnabled())
+    ctl.standby.assert_called_once()
+    assert win.power_button.text() == POWER_ON_TEXT
+    assert win.tray_power_action.text() == POWER_ON_TEXT
+    assert not win.translate_button.isEnabled()
+    assert "зупинено" in win.tray_icon.toolTip()
+    assert "зупинено" in win.power_label.text()
+    win.tray_power_action.trigger()
+    _wait(app, lambda: win.power_button.isEnabled())
+    ctl.resume.assert_called_once()
+    assert win.power_button.text() == POWER_OFF_TEXT
+    assert win.translate_button.isEnabled()
+
+
+def test_kill_switch_errors_are_shown(app, cfg):
+    from unittest.mock import MagicMock
+
+    ctl = MagicMock()
+    ctl.get_input_devices.return_value = []
+    ctl.get_output_devices.return_value = []
+    ctl.get_status.return_value = {"running": False}
+    ctl.standby.return_value = ["tts: model unload: unreachable"]
+    win = _window(ctl)
+    win.toggle_power()
+    _wait(app, lambda: win.power_button.isEnabled())
+    assert win.app_state().badge == "error"
+    assert "tts: model unload: unreachable" in win.tray_icon.toolTip()
+
+
+def test_output_device_choice_targets_the_sink(app, cfg):
+    from unittest.mock import MagicMock
+
+    from src.ui.widgets.main_window import DEFAULT_OUTPUT_TEXT
+
+    ctl = MagicMock()
+    ctl.get_input_devices.return_value = []
+    ctl.get_output_devices.return_value = [
+        {"name": "rt_virtual_output", "description": "RT Переклад → мікрофон"}
+    ]
+    ctl.set_output_device.return_value = True
+    win = _window(ctl)
+    combo = win.output_device_combo
+    assert combo.itemText(0) == DEFAULT_OUTPUT_TEXT
+    ctl.set_output_device.assert_not_called()  # populating does not select
+    combo.setCurrentIndex(1)
+    ctl.set_output_device.assert_called_with("rt_virtual_output")
+    combo.setCurrentIndex(0)
+    ctl.set_output_device.assert_called_with(None)
+
+
 def test_status_callback_from_worker_runs_on_gui_thread(app, cfg):
     import threading
     import time

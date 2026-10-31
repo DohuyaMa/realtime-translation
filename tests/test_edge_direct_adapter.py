@@ -250,3 +250,167 @@ def test_reconfigure_failed_restart_reports_error():
     assert a.reconfigure_services(VALID) is False
     assert a.last_error == "llm: no llm worker available"
     assert a._monitor.running is False
+
+
+# -- kill switch (standby / resume) -----------------------------------------
+
+
+class FakeModelClient:
+    def __init__(self, kind, log, states=("ready",)):
+        self.kind, self.log = kind, log
+        self.base_url = f"http://127.0.0.1/{kind}"
+        self.states = list(states)
+
+    def unload_model(self, timeout_s=None):
+        self.log.append(f"unload {self.kind}")
+
+    def load_model(self, timeout_s=None):
+        self.log.append(f"load {self.kind}")
+
+    def get_status(self):
+        state = self.states.pop(0) if len(self.states) > 1 else self.states[0]
+        return {"model": {"id": "m", "state": state}}
+
+    def close(self):
+        pass
+
+
+class PowerTS(FakeTS):
+    """FakeTS that records the kill-switch steps in one shared log."""
+
+    def __init__(self, settings, **kw):
+        super().__init__(settings, **kw)
+        self.log = []
+        self.model_states = {"asr": ("ready",), "tts": ("ready",)}
+
+    def start(self):
+        self.log.append("start pipeline")
+        return super().start()
+
+    def stop(self):
+        if self.is_running:
+            self.log.append("stop pipeline")
+        super().stop()
+
+    def release_session(self):
+        self.log.append("release session")
+
+    def pause_background(self):
+        self.log.append("pause discovery")
+
+    def resume_background(self):
+        self.log.append("resume discovery")
+
+    def local_model_clients(self):
+        return {
+            k: FakeModelClient(k, self.log, self.model_states[k])
+            for k in ("asr", "tts")
+        }
+
+
+def power_adapter():
+    a = DirectAdapter(
+        skip_preflight=True,
+        settings=VALID,
+        translation_system_factory=PowerTS,
+        health_factory=FakeMonitor,
+        audio_router_factory=FakeRouter,
+    )
+    a._sleep = lambda s: None
+    return a
+
+
+def test_standby_order_stop_release_unload():
+    a = power_adapter()
+    a.start_pipeline()
+    ts = a.translation_system
+    ts.log.clear()
+    assert a.standby() == []
+    assert ts.log == [
+        "stop pipeline",
+        "release session",
+        "pause discovery",
+        "unload asr",
+        "unload tts",
+    ]
+    assert a.in_standby is True and a._monitor.running is False
+
+
+def test_standby_blocks_start_until_resume():
+    a = power_adapter()
+    a.standby()
+    assert a.start_pipeline() is False
+    assert "Запустити" in a.last_error
+    assert a.translation_system.started is False
+
+
+def test_resume_is_standby_in_reverse_and_restarts_pipeline():
+    a = power_adapter()
+    a.start_pipeline()
+    ts = a.translation_system
+    a.standby()
+    ts.log.clear()
+    assert a.resume() == []
+    assert ts.log == ["load asr", "load tts", "resume discovery", "start pipeline"]
+    assert a.in_standby is False and ts.started is True
+
+
+def test_resume_does_not_start_pipeline_that_was_stopped():
+    a = power_adapter()
+    a.standby()
+    ts = a.translation_system
+    ts.log.clear()
+    assert a.resume() == []
+    assert "start pipeline" not in ts.log and ts.started is False
+
+
+def test_resume_waits_for_models_ready():
+    a = power_adapter()
+    ts = a.translation_system
+    ts.model_states = {"asr": ("loading", "loading", "ready"), "tts": ("ready",)}
+    a.standby()
+    sleeps = []
+    a._sleep = sleeps.append
+    assert a.resume() == []
+    assert len(sleeps) == 2
+
+
+def test_resume_reports_model_error_and_timeout():
+    a = power_adapter()
+    ts = a.translation_system
+    ts.model_states = {"asr": ("error",), "tts": ("loading",)}
+    a.standby()
+    now = [0.0]
+    a._clock = lambda: now[0]
+
+    def sleep(s):
+        now[0] += 1000.0
+
+    a._sleep = sleep
+    errors = a.resume()
+    assert any(e.startswith("asr: model error") for e in errors)
+    assert any(e.startswith("tts: model not ready") for e in errors)
+    assert a.in_standby is False and a.last_error
+
+
+def test_standby_failure_in_one_step_still_runs_the_rest():
+    a = power_adapter()
+    ts = a.translation_system
+
+    def boom():
+        raise RuntimeError("worker gone")
+
+    ts.release_session = boom
+    errors = a.standby()
+    assert errors == ["worker session: worker gone"]
+    assert ts.log[-2:] == ["unload asr", "unload tts"]
+    assert a.last_error == "worker session: worker gone"
+
+
+def test_output_device_never_changes_system_default_sink():
+    a = adapter(VALID)
+    ts = FakeTS.instances[-1]
+    assert a.set_output_device("rt_virtual_output")
+    assert ts.devices == (None, "rt_virtual_output")
+    assert not [c for c in a.audio_router.calls if c[0] == "sink"]
+    assert a.set_output_device("") and ts.devices == (None, None)

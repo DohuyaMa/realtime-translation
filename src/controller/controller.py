@@ -22,6 +22,18 @@ class TranslatorController(Protocol):
         """Stop the entire translation pipeline."""
         ...
 
+    def standby(self) -> List[str]:
+        """Kill switch: stop everything, unload this host's models; errors."""
+        ...
+
+    def resume(self) -> List[str]:
+        """Undo standby: load this host's models, resume; errors."""
+        ...
+
+    def in_standby(self) -> bool:
+        """True between standby() and resume()."""
+        ...
+
     def refresh_services(self) -> Dict:
         """Force a health poll of the remote speech services."""
         ...

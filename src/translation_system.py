@@ -25,6 +25,7 @@ rt-asr with batch priority and no worker session is opened.
 from __future__ import annotations
 
 import queue
+import subprocess
 import threading
 import time
 from collections import deque
@@ -43,6 +44,7 @@ from .clients import (
     SpeechPools,
     WorkerSessions,
     build_pools,
+    client_factories,
     discover,
     endpoints,
 )
@@ -156,6 +158,33 @@ class _SoundDeviceCapture:
         self._stream.close()
 
 
+def play_to_sink(audio: np.ndarray, sample_rate: int, sink: Optional[str]) -> None:
+    """Play mono float32 audio into the PipeWire/Pulse sink named ``sink``
+    (``pactl list sinks`` name, e.g. ``rt_virtual_output``; None = the
+    default sink); returns once it has been played. PortAudio cannot address
+    a PipeWire node by name, so this goes through ``pacat``."""
+    args = [
+        "pacat",
+        "--playback",
+        "--raw",
+        "--format=float32le",
+        "--channels=1",
+        f"--rate={int(sample_rate)}",
+        "--client-name=real-time-translator",
+        "--stream-name=Переклад",
+    ]
+    if sink:
+        args.append(f"--device={sink}")
+    data = np.ascontiguousarray(audio, dtype=np.float32).tobytes()
+    proc = subprocess.run(args, input=data, capture_output=True)
+    if proc.returncode != 0:
+        err = proc.stderr.decode(errors="replace").strip()
+        raise RuntimeError(
+            f"pacat to {sink or 'the default sink'} failed"
+            f" (exit {proc.returncode}): {err}"
+        )
+
+
 def _find_device(name: Optional[str], kind: str) -> Optional[int]:
     if not name:
         return None
@@ -226,6 +255,8 @@ class TranslationSystem:
         self._held_start_s = 0.0  # stream time where the held speech began
         self._llm_warmup: Optional[Dict[str, Any]] = None
         self._audio_q: queue.Queue = queue.Queue()
+        # periodic Django discovery runs unless the kill switch paused it
+        self._background = True
         self._capturing = False
         self._threads: Dict[str, threading.Thread] = {}
 
@@ -247,7 +278,8 @@ class TranslationSystem:
 
     def _build_backends(self) -> None:
         self._directory = self._directory_factory(self.settings)
-        self._directory.start_periodic()
+        if self._background:
+            self._directory.start_periodic()
         self._pools = self._pools_factory(self.settings, self._directory)
         self._llm_target = self._llm_target_factory(self.settings, self._directory)
         if isinstance(self._llm_target, WorkerSessions):
@@ -293,10 +325,7 @@ class TranslationSystem:
         )
 
     def _default_sink(self, audio: np.ndarray, sample_rate: int) -> None:
-        import sounddevice as sd
-
-        device = _find_device(self.output_device_name, "output")
-        sd.play(audio, samplerate=sample_rate, device=device, blocking=True)
+        play_to_sink(audio, sample_rate, self.output_device_name)
 
     # -- public controls ----------------------------------------------------
 
@@ -426,6 +455,38 @@ class TranslationSystem:
     def cleanup(self) -> None:
         self.stop()
         self._close_backends()
+
+    # -- kill switch (standby) ---------------------------------------------
+
+    def release_session(self) -> None:
+        """Close the worker app session (idempotent): the worker goes back
+        to its Django tasks."""
+        self._session_held = False
+        if isinstance(self._llm_target, WorkerSessions):
+            self._llm_target.stop()
+
+    def pause_background(self) -> None:
+        """Stop periodic Django discovery (also across backend rebuilds)."""
+        self._background = False
+        self._directory.stop_periodic()
+
+    def resume_background(self) -> None:
+        self._background = True
+        self._directory.start_periodic()
+
+    def local_model_clients(self) -> Dict[str, Any]:
+        """Clients of THIS host's rt-asr / rt-tts, whichever instance is
+        picked for the pipeline; cluster nodes are never included (they
+        serve others). The caller closes them."""
+        f = client_factories(self.settings)
+        out: Dict[str, Any] = {}
+        for kind, make in (("asr", f.asr), ("tts", f.tts)):
+            local = [
+                e for e in choices(kind, self.settings, self._directory) if e.local
+            ]
+            if local:
+                out[kind] = make(local[0])
+        return out
 
     def _new_chunk_queue(self) -> queue.Queue:
         # transcribe never drops chunks; translate keeps only the freshest

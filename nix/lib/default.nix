@@ -63,6 +63,46 @@ in
   mkEnvFile = { pkgs, service, cfg }:
     pkgs.writeTextDir "env" (lib.concatLines (envLines service cfg));
 
+  # PipeWire drop-in (pipewire.conf.d) with the edge's virtual devices - the one
+  # definition behind homeManagerModules.rt-translator and nixosModules.virtual-sinks.
+  # input: null sink other apps play into; the edge captures its monitor.
+  # output: loopback - its Audio/Sink side is where the edge plays the
+  # translation, its Audio/Source side is a real microphone other apps
+  # (browsers, Zoom, Teams hide *.monitor sources) can pick.
+  virtualDevicesConf = { inputName, outputName, micName }: ''
+    context.objects = [
+      { factory = adapter
+        args = {
+          factory.name = support.null-audio-sink
+          node.name = "${inputName}"
+          node.description = "RT-Virtual-Input"
+          media.class = "Audio/Sink"
+          audio.position = [ FL FR ]
+          monitor.channel-volumes = true
+          monitor.passthrough = true
+        }
+      }
+    ]
+    context.modules = [
+      { name = libpipewire-module-loopback
+        args = {
+          node.description = "RT Переклад"
+          audio.position = [ FL FR ]
+          capture.props = {
+            node.name = "${outputName}"
+            node.description = "RT Переклад → мікрофон"
+            media.class = "Audio/Sink"
+          }
+          playback.props = {
+            node.name = "${micName}"
+            node.description = "RT Переклад (мікрофон)"
+            media.class = "Audio/Source"
+          }
+        }
+      }
+    ]
+  '';
+
   # Probes the first listen address (IPv6 literals in brackets).
   healthCheckCommand = _service: cfg:
     let

@@ -221,7 +221,15 @@ services:
 
 HM-модуль edge: `homeManagerModules.rt-translator` (також `default`), опції `rt-translator.*`: `django.urls`, `django.tokenFile`, `local.{llm,asr,tts}` (default `http://127.0.0.1:{8080,8091,8093}`, `null` - сервісу на хості немає), `localTokenFile` (default `/run/llama/local-token`), `allowedServices` (`null` - усі; тоді вибір в UI), `llm.model` (`null` - вибір в UI), `mode` (`null` = auto), `autostart`, `virtualSinks.enable`. Вони перетворюються на `RT_EDGE_*` env. Assertions: `mode = "translate"` потребує `local.llm` і `local.tts` або `django.urls`; `django.urls` потребує `django.tokenFile`; токен-файли не можуть бути в `/nix/store`.
 
-Звук: потрібні PipeWire null-sink-и `rt_virtual_input` і `rt_virtual_output` (створює `nix develop`, `nixosModules.virtual-sinks` або HM `virtualSinks.enable`).
+Звук: потрібні віртуальні пристрої PipeWire (одне визначення - `lib.rtSpeech.virtualDevicesConf`; створює HM `virtualSinks.enable` або `nixosModules.virtual-sinks`, після деплою - `systemctl --user restart pipewire pipewire-pulse wireplumber` або перелогін; для розробки - `nix develop` через `pactl`):
+
+- `rt_virtual_input` - null-sink, у який інші застосунки віддають звук; застосунок слухає його монітор;
+- `rt_virtual_output` («RT Переклад → мікрофон») - вихід перекладу: виберіть його в «Output Device»;
+- `rt_virtual_mic` («RT Переклад (мікрофон)») - справжній мікрофон (`Audio/Source`, loopback від `rt_virtual_output`): його обирають Zoom/Teams/браузер, щоб чути переклад. Монітор `*.monitor` браузери часто ховають.
+
+«Output Device» змінює лише потік перекладу (через `pacat --device`), системний вихід за замовчуванням не чіпає.
+
+Рубильник «Зупинити все й звільнити пам'ять» (головне вікно і трей): зупиняє захоплення і конвеєр, закриває app-сесію (воркер повертається до задач Django), зупиняє періодичний discovery і health-опитування, вивантажує моделі ЛИШЕ локальних `rt-asr`/`rt-tts` цього хоста (`POST /model/unload`; вузли кластера обслуговують інших). LLM llama-воркера не вивантажується - він обслуговує чергу Django. «Запустити» - у зворотному порядку: `POST /model/load`, чекає `ready`, відновлює discovery і, якщо переклад ішов, перезапускає його (нова app-сесія + прогрів LLM). Іконка в треї - дві «бульбашки» A/Я: сіра - зупинено/готовий, кольорова - перекладає, жовта позначка - завантаження, червона - помилка (деталі в підказці).
 
 ## 6. Деплой
 
@@ -328,7 +336,7 @@ curl -s -F file=@/tmp/hello.wav http://127.0.0.1:8091/audio/transcriptions
 - `401` від rt-*/воркера - токен зі списку Django не збігається (оновіть список: перезапуск/налаштування) або застарів `local_token_file`;
 - `/status` `ready: false` - див. `model.state`/`model.error`: модель скачується, вантажиться, вивантажена (`POST /model/load`) або не завантажилась (`rt-models list`, `RT_MODEL_DOWNLOAD`);
 - `no llm worker available` - жоден дозволений воркер не відкрив сесію (див. лог WARNING по вузлах);
-- `PipeWire preflight` - немає `rt_virtual_output`/`rt_virtual_input` (`nix develop` або virtual-sinks);
+- `PipeWire preflight` - немає `rt_virtual_input`/`rt_virtual_output`/`rt_virtual_mic` (`nix develop` або virtual-sinks + рестарт PipeWire);
 - `422` на `/config` - BOOTSTRAP-поле або значення поза межами.
 
 ## 9. Що відкладено

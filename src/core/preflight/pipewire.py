@@ -3,7 +3,18 @@ import subprocess
 import sys
 import shutil
 from loguru import logger
-from typing import Optional
+from typing import Optional, Set
+
+from ...audio.routing import VIRTUAL_INPUT_SINK, VIRTUAL_MIC_SOURCE, VIRTUAL_OUTPUT_SINK
+
+
+def _names(pactl_short: str) -> Set[str]:
+    """Node names (2nd column) of ``pactl list sinks|sources short``."""
+    return {
+        line.split("\t")[1]
+        for line in pactl_short.splitlines()
+        if line.count("\t") >= 1
+    }
 
 
 class PipeWirePreflight:
@@ -28,30 +39,27 @@ class PipeWirePreflight:
                 text=True
             )
             logger.debug(f"Available sinks:\n{result}")
-            
-            if "rt_virtual_input" not in result or "rt_virtual_output" not in result:
-                logger.error("Virtual PipeWire sinks not found. Please set up PipeWire configuration first.")
-                logger.info("Run: python install_pipewire_config.py to set up virtual sinks")
-                # List available sinks for debugging
-                available_sinks = [line.split()[1] for line in result.split('\n') if line.strip()]
-                logger.debug(f"Available sinks: {available_sinks}")
-                return False
-            
-            # Check for sources (monitors)
+            sinks = _names(result)
+            missing = [n for n in (VIRTUAL_INPUT_SINK, VIRTUAL_OUTPUT_SINK) if n not in sinks]
+
+            # The virtual microphone other apps record the translation from
             result_sources = subprocess.check_output(
                 ["pactl", "list", "sources", "short"],
                 text=True
             )
             logger.debug(f"Available sources:\n{result_sources}")
-            
-            if "rt_virtual_output.monitor" not in result_sources:
-                logger.error("Virtual PipeWire source (monitor) not found. Please set up PipeWire configuration first.")
-                logger.info("Run: python install_pipewire_config.py to set up virtual sinks")
-                # List available sources for debugging
-                available_sources = [line.split()[1] for line in result_sources.split('\n') if line.strip()]
-                logger.debug(f"Available sources: {available_sources}")
+            if VIRTUAL_MIC_SOURCE not in _names(result_sources):
+                missing.append(VIRTUAL_MIC_SOURCE)
+
+            if missing:
+                logger.error(
+                    f"Virtual PipeWire devices missing: {', '.join(missing)}. Enable"
+                    " rt-translator.virtualSinks (Home Manager) or"
+                    " nixosModules.virtual-sinks and restart PipeWire, or run"
+                    " `nix develop`."
+                )
                 return False
-                
+
             logger.info("PipeWire nodes verified successfully")
             return True
             

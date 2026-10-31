@@ -1,5 +1,5 @@
 """UI Controller for managing UI-specific logic and connecting to the backend controller."""
-from typing import Callable, Dict, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 from loguru import logger
 import threading
 import time
@@ -124,7 +124,10 @@ class UIController:
             try:
                 current_status = self._controller.get_status()
                 now = time.monotonic()
-                if now - self._last_health_at >= HEALTH_INTERVAL_S:
+                # no periodic health probes while the kill switch is off:
+                # standby() leaves one final snapshot
+                standby = self._controller.in_standby()
+                if not standby and now - self._last_health_at >= HEALTH_INTERVAL_S:
                     self._last_health_at = now
                     self._last_health = self.refresh_services()
                 current_status = {**current_status, "health": self._last_health}
@@ -166,6 +169,24 @@ class UIController:
         else:
             return self.start_pipeline()
     
+    def standby(self) -> List[str]:
+        """Kill switch off: stop pipeline -> release the worker session ->
+        unload this host's models; then one health snapshot for the UI."""
+        errors = self._controller.standby()
+        self._last_health = self.refresh_services()
+        self._last_health_at = time.monotonic()
+        return errors
+
+    def resume(self) -> List[str]:
+        """Kill switch on: the reverse of standby()."""
+        errors = self._controller.resume()
+        self._last_health = self.refresh_services()
+        self._last_health_at = time.monotonic()
+        return errors
+
+    def in_standby(self) -> bool:
+        return bool(self._controller.in_standby())
+
     def refresh_services(self) -> Dict:
         """Force a health poll of the remote services."""
         try:

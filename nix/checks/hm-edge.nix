@@ -69,6 +69,19 @@ let
     testOnlyEdgeUnit = { expr = builtins.attrNames translate.config.systemd.user.services; expected = [ "rt-app" ]; };
     testNoSockets = { expr = translate.config.systemd.user.sockets; expected = { }; };
     testSinksDropIn = { expr = translate.config.xdg.configFile ? "pipewire/pipewire.conf.d/30-rt-virtual-sinks.conf"; expected = true; };
+    # output sink -> loopback -> a real Audio/Source other apps pick as a mic
+    testVirtualMic = {
+      expr =
+        let text = translate.config.xdg.configFile."pipewire/pipewire.conf.d/30-rt-virtual-sinks.conf".text; in
+        map (s: lib.hasInfix s text) [
+          "libpipewire-module-loopback"
+          ''node.name = "rt_virtual_output"''
+          ''node.name = "rt_virtual_mic"''
+          ''media.class = "Audio/Source"''
+          "factory.name = support.null-audio-sink"
+        ];
+      expected = [ true true true true true ];
+    };
     testTranscribeDefaults = {
       expr = {
         env = edgeEnv transcribe;

@@ -1,15 +1,25 @@
 """DirectAdapter: the edge app's backend, wrapping TranslationSystem."""
 
 import dataclasses
+import time
 from typing import Callable, Dict, List, Optional
 
 from loguru import logger
 
 from ..clients import ServiceHealthMonitor, WorkerSessions
+from ..clients.model_status import parse_status
 from ..controller.controller import Device
 from ..core.preflight.pipewire import PipeWirePreflight
 from ..core.runtime import EdgeSettings, get_runtime_config
 from ..translation_system import TranslationSystem
+
+# POST /model/load|unload only start the transition on the service
+MODEL_ACTION_TIMEOUT_S = 60.0
+# «Запустити» waits this long for the local models before restarting the
+# pipeline (a first load may download the model)
+MODEL_READY_TIMEOUT_S = 600.0
+MODEL_POLL_S = 0.5
+STANDBY_ERROR = "система зупинена рубильником: спершу «Запустити»"
 
 
 def _default_router():
@@ -37,7 +47,8 @@ class DirectAdapter:
             if not PipeWirePreflight.check():
                 raise RuntimeError(
                     "PipeWire preflight check failed: rt_virtual_input/"
-                    "rt_virtual_output sinks not found. Enable "
+                    "rt_virtual_output sinks or the rt_virtual_mic source not"
+                    " found. Enable "
                     "rt-translator.virtualSinks (Home Manager), "
                     "nixosModules.virtual-sinks, or run `nix develop`."
                 )
@@ -52,6 +63,11 @@ class DirectAdapter:
         self._monitor_running = False
         self._input_device: Optional[str] = None
         self._output_device: Optional[str] = None
+        # kill switch: True after standby() until resume()
+        self.in_standby = False
+        self._resume_pipeline = False
+        self._sleep = time.sleep
+        self._clock = time.monotonic
         self.translation_system = translation_system_factory(self.settings)
         try:
             self.audio_router = audio_router_factory()
@@ -94,6 +110,10 @@ class DirectAdapter:
 
     # -- pipeline ---------------------------------------------------------
     def start_pipeline(self) -> bool:
+        if self.in_standby:
+            self.last_error = STANDBY_ERROR
+            logger.error("Cannot start pipeline: {}", self.last_error)
+            return False
         errors = self.settings.validate()
         if errors:
             self.last_error = "; ".join(errors)
@@ -121,6 +141,109 @@ class DirectAdapter:
             return False
         finally:
             self._stop_health()
+
+    # -- kill switch ------------------------------------------------------
+    def standby(self) -> List[str]:
+        """«Зупинити все й звільнити пам'ять», in this order: stop capture and
+        the pipeline, release the worker app session (the worker goes back to
+        Django tasks), stop periodic discovery, unload THIS host's rt-asr /
+        rt-tts models (cluster nodes serve others). The llama worker's LLM
+        stays loaded - it serves the Django queue. Every step runs; the
+        failed ones are returned and logged, never swallowed."""
+        ts = self.translation_system
+        self._resume_pipeline = bool(ts.is_running)
+        self.in_standby = True
+        errors: List[str] = []
+        if not self.stop_pipeline():
+            errors.append("pipeline: stop failed (see log)")
+        for name, step in (
+            ("worker session", ts.release_session),
+            ("discovery", ts.pause_background),
+        ):
+            try:
+                step()
+            except Exception as e:
+                logger.exception("standby: {} failed: {}", name, e)
+                errors.append(f"{name}: {e}")
+        errors += self._model_action("unload")
+        self.last_error = "; ".join(errors) or None
+        logger.info(
+            "standby: done{}", f" with errors: {self.last_error}" if errors else ""
+        )
+        return errors
+
+    def resume(self) -> List[str]:
+        """«Запустити» - standby in reverse: load this host's models (waits
+        until they are ready), resume periodic discovery, and restart the
+        pipeline if it was running at standby (that reopens the worker
+        session and warms the LLM up)."""
+        ts = self.translation_system
+        errors = self._model_action("load")
+        errors += self._wait_models_ready()
+        try:
+            ts.resume_background()
+        except Exception as e:
+            logger.exception("resume: discovery failed: {}", e)
+            errors.append(f"discovery: {e}")
+        self.in_standby = False
+        if self._resume_pipeline and not self.start_pipeline():
+            errors.append(f"pipeline: {self.last_error}")
+        self._resume_pipeline = False
+        self.last_error = "; ".join(errors) or None
+        logger.info(
+            "resume: done{}", f" with errors: {self.last_error}" if errors else ""
+        )
+        return errors
+
+    def _model_action(self, action: str) -> List[str]:
+        """POST /model/<action> on this host's rt-asr / rt-tts."""
+        errors: List[str] = []
+        for kind, client in self.translation_system.local_model_clients().items():
+            try:
+                call = client.load_model if action == "load" else client.unload_model
+                call(timeout_s=MODEL_ACTION_TIMEOUT_S)
+                logger.info(
+                    "{}: model {} requested on {}", kind, action, client.base_url
+                )
+            except Exception as e:
+                logger.error("{}: model {} failed: {}", kind, action, e)
+                errors.append(f"{kind}: model {action}: {e}")
+            finally:
+                client.close()
+        return errors
+
+    def _wait_models_ready(self) -> List[str]:
+        """Poll this host's models until each is ready (or error/timeout)."""
+        clients = self.translation_system.local_model_clients()
+        pending = set(clients)
+        errors: List[str] = []
+        deadline = self._clock() + MODEL_READY_TIMEOUT_S
+        try:
+            while pending:
+                for kind in sorted(pending):
+                    try:
+                        st = parse_status(clients[kind].get_status())
+                    except Exception as e:
+                        errors.append(f"{kind}: status: {e}")
+                        pending.discard(kind)
+                        continue
+                    if st.state == "ready":
+                        pending.discard(kind)
+                    elif st.state in ("error", "unloaded"):
+                        errors.append(f"{kind}: model {st.state}: {st.error or ''}")
+                        pending.discard(kind)
+                if pending and self._clock() >= deadline:
+                    errors += [
+                        f"{k}: model not ready after {MODEL_READY_TIMEOUT_S:.0f} s"
+                        for k in sorted(pending)
+                    ]
+                    break
+                if pending:
+                    self._sleep(MODEL_POLL_S)
+        finally:
+            for client in clients.values():
+                client.close()
+        return errors
 
     def reconfigure_services(self, settings: EdgeSettings) -> bool:
         errors = settings.validate()
@@ -194,13 +317,12 @@ class DirectAdapter:
             self.audio_router.set_default_source(device_id)
         return True
 
-    def set_output_device(self, device_id: str) -> bool:
-        if not device_id or device_id.lower() == "default":
-            return True
-        self._output_device = device_id
+    def set_output_device(self, device_id: Optional[str]) -> bool:
+        """Sink the translation is played into (``None``/"" = the default
+        sink). Only the app's own playback moves - the system default sink
+        stays, so other apps' audio never ends up in the virtual mic."""
+        self._output_device = device_id or None
         self.translation_system.set_devices(self._input_device, self._output_device)
-        if self.audio_router:
-            self.audio_router.set_default_sink(device_id)
         return True
 
     def get_audio_levels(self) -> Dict[str, float]:

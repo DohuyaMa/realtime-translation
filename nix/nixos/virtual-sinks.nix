@@ -4,10 +4,11 @@ with lib;
 
 let
   cfg = config.rt.audio.virtualSinks;
+  rtLib = import ../lib { inherit lib; };
 in
 {
   options.rt.audio.virtualSinks = {
-    enable = mkEnableOption "RT virtual PipeWire sinks";
+    enable = mkEnableOption "RT virtual PipeWire devices (input sink, output sink -> virtual microphone)";
 
     inputName = mkOption {
       type = types.str;
@@ -17,6 +18,12 @@ in
     outputName = mkOption {
       type = types.str;
       default = "rt_virtual_output";
+    };
+
+    micName = mkOption {
+      type = types.str;
+      default = "rt_virtual_mic";
+      description = "Audio/Source carrying what is played into outputName (the translation), for other apps.";
     };
   };
 
@@ -29,28 +36,7 @@ in
       configPackages = [
         (pkgs.writeTextDir
           "share/pipewire/pipewire.conf.d/30-rt-virtual-sinks.conf"
-          ''
-            context.modules = [
-              {
-                name = libpipewire-module-null-sink
-                args = {
-                  node.name = "${cfg.inputName}"
-                  node.description = "RT Virtual Input"
-                  media.class = "Audio/Sink"
-                  stream.props = { audio.position = [ FL FR ]; }
-                }
-              }
-              {
-                name = libpipewire-module-null-sink
-                args = {
-                  node.name = "${cfg.outputName}"
-                  node.description = "RT Virtual Output"
-                  media.class = "Audio/Sink"
-                  stream.props = { audio.position = [ FL FR ]; }
-                }
-              }
-            ]
-          '')
+          (rtLib.virtualDevicesConf { inherit (cfg) inputName outputName micName; }))
       ];
     };
   };
