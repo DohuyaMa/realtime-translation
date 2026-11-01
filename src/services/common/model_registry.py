@@ -2,9 +2,8 @@
 """Pinned model registry (spec §4.7).
 
 Every model a service may load is listed here with an immutable pin and the
-size + sha256 of each file: an HF repo + commit, or (Vosk models, published
-only as zip archives) the archive URL + the archive's sha256. RT_MODEL accepts
-only these aliases or an absolute directory path.
+size + sha256 of each file (an HF repo + commit). RT_MODEL accepts only
+these aliases or an absolute directory path.
 """
 
 from __future__ import annotations
@@ -21,24 +20,14 @@ class FileSpec:
 
 
 @dataclass(frozen=True)
-class ArchiveSource:
-    """The model is a zip at ``ModelSpec.repo_id`` (URL) whose sha256 is
-    ``ModelSpec.revision``; its files live under ``root/`` in the archive."""
-
-    root: str
-    size: int
-
-
-@dataclass(frozen=True)
 class ModelSpec:
     alias: str
-    service: str  # "asr" | "tts" | "vosk"
-    repo_id: str  # HF repo id, or the archive URL when ``archive`` is set
-    revision: str  # HF commit, or the archive sha256 when ``archive`` is set
+    service: str  # "asr" | "tts" | "phonetic"
+    repo_id: str  # HF repo id
+    revision: str  # HF commit
     license: str
     files: tuple[FileSpec, ...]
-    archive: Optional[ArchiveSource] = None
-    # Language the model recognizes (single-language models: Vosk).
+    # Language the model recognizes (single-language models: phonetic CTC).
     language: Optional[str] = None
 
     @property
@@ -749,267 +738,37 @@ _SPECS: tuple[ModelSpec, ...] = (
             ),
         ),
     ),
-    # Vosk (Kaldi) models: zip archives from alphacephei.com, pinned 2026-10-31
+    # Phonetic cross-check (rt-phonetic): character-level wav2vec2 CTC,
+    # greedy, no LM - writes Ukrainian letters (+ stress marks, stripped)
+    # as heard. Fine-tuned on Common Voice uk; pinned 2026-11-01. Only the
+    # files the backend loads (no tokenizer: rt-phonetic decodes vocab.json).
     ModelSpec(
-        alias="vosk-small-uk-v3-nano",
-        service="vosk",
-        repo_id="https://alphacephei.com/vosk/models/vosk-model-small-uk-v3-nano.zip",
-        revision="d6b50be0a2d20f891720f3a83c98290bb2d396fd666142dbf716e8ad302f8233",
+        alias="uk-wav2vec2-stress",
+        service="phonetic",
+        repo_id="mouseyy/uk_wav2vec2_with_stress_mark",
+        revision="f3cb18b03acfeb9f8311961cd9f4af329d996158",
         license="Apache-2.0",
-        archive=ArchiveSource(root="vosk-model-small-uk-v3-nano", size=77622640),
         language="uk",
         files=(
             FileSpec(
-                "COPYING",
-                10173,
-                "bb618af833c817ab01c1564bd3ec75ba4b4f9cf30910a4a2168e30a674ee8cc6",
+                "config.json",
+                2090,
+                "9f60baf2ae37fc5d84a75e26380ee15fc7d77b693bc71dff62bc8412ea661cf4",
             ),
             FileSpec(
-                "am/final.mdl",
-                22163394,
-                "13300029ec57992bb0c0b25063e2103823329b0e00260e07b1a67f444c0ef6ba",
+                "model.safetensors",
+                1261971480,
+                "9bb5f2aa2112c6eab915d79bc92e87a6262fafb23f8e9d1822a8f63ee918c431",
             ),
             FileSpec(
-                "conf/mfcc.conf",
-                693,
-                "274d4d8ff33c5783a5ff208ba82e8b6216e95854fa881cc2579945e9fd25f24f",
+                "preprocessor_config.json",
+                254,
+                "f724fdad65341e79bd9741888fe4e8ce1bb2e7b44fc8216c28c591afb1e202f4",
             ),
             FileSpec(
-                "conf/model.conf",
-                289,
-                "facb8b258fea4707b755b4a314bd91e22615180c668c4d494415bf6930a18b0e",
-            ),
-            FileSpec(
-                "graph/Gr.fst",
-                57197025,
-                "4c49a19a41631437c236e2ff52e1195a08df3771b331fb2cd6e73dc446e1c251",
-            ),
-            FileSpec(
-                "graph/HCLr.fst",
-                28638330,
-                "3f4e05603f9015b80b70fc54e071795c89e55757c8f3e41393e774b27b89a60b",
-            ),
-            FileSpec(
-                "graph/disambig_tid.int",
-                36,
-                "4926dd4cac3f27c5cf6ef42eebd16f810a6974e1e129b42a57fba50fde06fd25",
-            ),
-            FileSpec(
-                "graph/phones/word_boundary.int",
-                4236,
-                "2620db276caf34cd951c71c98c2ae79b3b10264705ab80e83a987694e6f40cfb",
-            ),
-            FileSpec(
-                "graph/words.txt",
-                5506207,
-                "d13a86b3cd4ad14ef2851761a250ff25d9b9a002eaf84379ae68b4566bf298b2",
-            ),
-            FileSpec(
-                "ivector/final.dubm",
-                168048,
-                "dab6cddaf21611816343ce130bdd3060b1a461388e8f9dda47fbc3deff14e3a3",
-            ),
-            FileSpec(
-                "ivector/final.ie",
-                19757687,
-                "7dccf49ea02201593d2e52797a94555aef4456902c7d96ea2513fb079005fb7b",
-            ),
-            FileSpec(
-                "ivector/final.mat",
-                44975,
-                "92b3af4ae0e077041492a2f1bea51e20b5cb71e3d30d445af74fe050e301824b",
-            ),
-            FileSpec(
-                "ivector/global_cmvn.stats",
-                1079,
-                "bf866d4721dce0db6aaa028438c489255c423dcab468a3c5cf8060462a3676b7",
-            ),
-            FileSpec(
-                "ivector/online_cmvn.conf",
-                95,
-                "a2f3571754b64297cb7efb2e7ca3df61995c5a45fcbb97188f90613552bb2dfe",
-            ),
-            FileSpec(
-                "ivector/splice.conf",
-                35,
-                "9f0c5f7c82d18eaf25d8bce470efa9f7741f88411fe428774bc0a9bb69a24756",
-            ),
-            FileSpec(
-                "ivector/splice_opts",
-                35,
-                "0c7038d5c0dda2b307d27fc9f6aaef3eda2257bfdbce95f333e2077a5ff0a222",
-            ),
-        ),
-    ),
-    ModelSpec(
-        alias="vosk-small-uk-v3-small",
-        service="vosk",
-        repo_id="https://alphacephei.com/vosk/models/vosk-model-small-uk-v3-small.zip",
-        revision="ee05b6a8c796c53c61cd1c821d38e897e5bd67b4d691d8797ec8f9e5100d4247",
-        license="Apache-2.0",
-        archive=ArchiveSource(root="vosk-model-small-uk-v3-small", size=143914407),
-        language="uk",
-        files=(
-            FileSpec(
-                "COPYING",
-                10173,
-                "bb618af833c817ab01c1564bd3ec75ba4b4f9cf30910a4a2168e30a674ee8cc6",
-            ),
-            FileSpec(
-                "am/final.mdl",
-                22163394,
-                "13300029ec57992bb0c0b25063e2103823329b0e00260e07b1a67f444c0ef6ba",
-            ),
-            FileSpec(
-                "conf/mfcc.conf",
-                693,
-                "274d4d8ff33c5783a5ff208ba82e8b6216e95854fa881cc2579945e9fd25f24f",
-            ),
-            FileSpec(
-                "conf/model.conf",
-                289,
-                "facb8b258fea4707b755b4a314bd91e22615180c668c4d494415bf6930a18b0e",
-            ),
-            FileSpec(
-                "graph/Gr.fst",
-                83874673,
-                "6188412a28b164a543f0f287751738479987cdfc201c24dba05f2c8b3710f000",
-            ),
-            FileSpec(
-                "graph/HCLr.fst",
-                263833194,
-                "c44755aca6b54a5e97f9bb2e13f087b6cd18869a52c2e8ab033ce9d409b98be3",
-            ),
-            FileSpec(
-                "graph/disambig_tid.int",
-                72,
-                "9d8dc448fc4ee07dd763af28acf360a907448d66d65e646f5a929c71a74add90",
-            ),
-            FileSpec(
-                "graph/phones/word_boundary.int",
-                4281,
-                "448ad28cfbd8cf5329407c4ef34abbaeda5cc42904fdd1dcd84722d961501ba7",
-            ),
-            FileSpec(
-                "graph/words.txt",
-                46483931,
-                "9405808ebe3356d8179830e1ae66671cbcc18e6af19d90776ce01a5bf6eb8fff",
-            ),
-            FileSpec(
-                "ivector/final.dubm",
-                168048,
-                "dab6cddaf21611816343ce130bdd3060b1a461388e8f9dda47fbc3deff14e3a3",
-            ),
-            FileSpec(
-                "ivector/final.ie",
-                19757687,
-                "7dccf49ea02201593d2e52797a94555aef4456902c7d96ea2513fb079005fb7b",
-            ),
-            FileSpec(
-                "ivector/final.mat",
-                44975,
-                "92b3af4ae0e077041492a2f1bea51e20b5cb71e3d30d445af74fe050e301824b",
-            ),
-            FileSpec(
-                "ivector/global_cmvn.stats",
-                1079,
-                "bf866d4721dce0db6aaa028438c489255c423dcab468a3c5cf8060462a3676b7",
-            ),
-            FileSpec(
-                "ivector/online_cmvn.conf",
-                95,
-                "a2f3571754b64297cb7efb2e7ca3df61995c5a45fcbb97188f90613552bb2dfe",
-            ),
-            FileSpec(
-                "ivector/splice.conf",
-                35,
-                "9f0c5f7c82d18eaf25d8bce470efa9f7741f88411fe428774bc0a9bb69a24756",
-            ),
-            FileSpec(
-                "ivector/splice_opts",
-                35,
-                "0c7038d5c0dda2b307d27fc9f6aaef3eda2257bfdbce95f333e2077a5ff0a222",
-            ),
-        ),
-    ),
-    ModelSpec(
-        alias="vosk-small-pl-0.22",
-        service="vosk",
-        repo_id="https://alphacephei.com/vosk/models/vosk-model-small-pl-0.22.zip",
-        revision="c4cd16498ea544f446f9e9a55cbd602b71cfe5a2b6f2b0834d81e1b6fce15f0d",
-        license="Apache-2.0",
-        archive=ArchiveSource(root="vosk-model-small-pl-0.22", size=52979372),
-        language="pl",
-        files=(
-            FileSpec(
-                "README",
-                359,
-                "a36af4b53cb6cfae18cdd6f1fef56c2646f95fb8aa6ba3430d937f861aea10f3",
-            ),
-            FileSpec(
-                "am/final.mdl",
-                15996292,
-                "9c557024c480f259b88d6ec01da10082a135cbb6b54569fc057861f8e5c04a3b",
-            ),
-            FileSpec(
-                "conf/mfcc.conf",
-                153,
-                "6c326fea5741c2d78be12f76eb1b36ea2ace040da9e355e4cfe6bb80e5f7d5ab",
-            ),
-            FileSpec(
-                "conf/model.conf",
-                290,
-                "8f14cb1eeb07c762c371db648c6be688d347236155ca0f64fb13b6567a8ce81f",
-            ),
-            FileSpec(
-                "graph/Gr.fst",
-                39605143,
-                "1dcb8c013954ed9aab9070cb6c61bb79ce94cdfd5b084461bff2f79bc0e75f5c",
-            ),
-            FileSpec(
-                "graph/HCLr.fst",
-                29907218,
-                "db9cdb6e454d59a696101b077e549bf5b21927e3c3d1520fd143ff35ff0f8196",
-            ),
-            FileSpec(
-                "graph/disambig_tid.int",
-                42,
-                "8cc6cd795f79570efed3ba1a9235bd48b8be6e74f3e18a5b1c980ee4632b0e95",
-            ),
-            FileSpec(
-                "graph/phones/word_boundary.int",
-                1626,
-                "262452069835201f18fd4de64c4816a2333a54c80b4114084d75e1c4eb273836",
-            ),
-            FileSpec(
-                "ivector/final.dubm",
-                168048,
-                "22c8ab79f80f25d130a076f7b3003a4f4640c055ec682dacf51efa6471102abc",
-            ),
-            FileSpec(
-                "ivector/final.ie",
-                9927287,
-                "10584cc18a6e480beb8a342a2d4cb10d832dc4681bde1b3991cc61f695795ed2",
-            ),
-            FileSpec(
-                "ivector/final.mat",
-                44975,
-                "b667eab736b6c1cfa0210d42f472aa4002af6eb28b6e12b06d61b67f4f45f120",
-            ),
-            FileSpec(
-                "ivector/global_cmvn.stats",
-                1049,
-                "f1fbac6779ee8be5ce437b46558c198f3a98a47635309966caf9bc40f5e0165b",
-            ),
-            FileSpec(
-                "ivector/online_cmvn.conf",
-                0,
-                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            ),
-            FileSpec(
-                "ivector/splice.conf",
-                35,
-                "9f0c5f7c82d18eaf25d8bce470efa9f7741f88411fe428774bc0a9bb69a24756",
+                "vocab.json",
+                454,
+                "f78614ae0cf6d8573a80d3cd293ce17f6ce0dba988cfbe621689ed1885bb067a",
             ),
         ),
     ),

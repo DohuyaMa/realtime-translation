@@ -69,55 +69,6 @@ def hf_downloader(spec: ModelSpec, target_dir: Path, token: str | None) -> None:
     )
 
 
-# Read size of the archive download stream.
-ARCHIVE_CHUNK = 1024 * 1024
-
-
-def archive_downloader(spec: ModelSpec, target_dir: Path, token: str | None) -> None:
-    """Fetch the pinned zip (``spec.repo_id``), check its size + sha256
-    (``spec.revision``) and extract the spec's files from ``archive.root/``.
-
-    The archive is streamed into ``target_dir`` (the progress poll counts it)
-    and removed after extraction; only the listed files are extracted, so
-    archive paths never escape ``target_dir``."""
-    import urllib.request
-    import zipfile
-
-    archive = spec.archive
-    if archive is None:
-        raise ValueError(f"{spec.alias} is not an archive model")
-    zip_path = target_dir / ".archive.zip"
-    digest = hashlib.sha256()
-    size = 0
-    with urllib.request.urlopen(spec.repo_id, timeout=60) as resp, open(
-        zip_path, "wb"
-    ) as out:
-        while chunk := resp.read(ARCHIVE_CHUNK):
-            out.write(chunk)
-            digest.update(chunk)
-            size += len(chunk)
-    if size != archive.size or digest.hexdigest() != spec.revision:
-        raise ModelIntegrityError(
-            f"{spec.alias}: archive size/sha256 mismatch "
-            f"(got {size}, {digest.hexdigest()})"
-        )
-    with zipfile.ZipFile(zip_path) as zf:
-        for f in spec.files:
-            dest = target_dir / f.path
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            with zf.open(f"{archive.root}/{f.path}") as src, open(dest, "wb") as dst:
-                shutil.copyfileobj(src, dst, ARCHIVE_CHUNK)
-    zip_path.unlink()
-
-
-def download_model(spec: ModelSpec, target_dir: Path, token: str | None) -> None:
-    """Default downloader: the archive when the spec has one, else HF."""
-    if spec.archive is not None:
-        archive_downloader(spec, target_dir, token)
-    else:
-        hf_downloader(spec, target_dir, token)
-
-
 def _bytes_under(path: Path) -> int:
     """Bytes on disk below ``path`` (the HF ``*.incomplete`` files included)."""
     total = 0
@@ -154,7 +105,7 @@ def _reporting(path: Path, total: int, progress: Progress | None) -> Iterator[No
 
 
 class ModelStore:
-    def __init__(self, root: Path, downloader: Downloader = download_model):
+    def __init__(self, root: Path, downloader: Downloader = hf_downloader):
         self.root = Path(root)
         self._downloader = downloader
 
@@ -227,10 +178,7 @@ class ModelStore:
             shutil.rmtree(partial)
         partial.mkdir(parents=True)
         try:
-            # an archive is on disk next to its extracted files until the end
-            total = sum(f.size for f in spec.files) + (
-                spec.archive.size if spec.archive else 0
-            )
+            total = sum(f.size for f in spec.files)
             with _reporting(partial, total, progress):
                 self._downloader(spec, partial, token)
         except Exception as exc:

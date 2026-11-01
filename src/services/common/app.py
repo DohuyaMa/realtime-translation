@@ -1,4 +1,4 @@
-"""FastAPI app skeleton shared by the speech services (rt-asr, rt-vosk, rt-tts)."""
+"""FastAPI app skeleton shared by the speech services (rt-asr, rt-phonetic, rt-tts)."""
 
 from __future__ import annotations
 

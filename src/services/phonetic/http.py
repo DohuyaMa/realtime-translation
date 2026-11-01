@@ -1,5 +1,9 @@
 """POST /v1/audio/transcriptions: the rt-asr request shape (multipart file +
-language), answered with Vosk's words and their per-word confidence. The
+language), answered with the letter-level CTC transcript of the audio.
+
+``{"text", "language", "words": [{"word", "start", "end"}], "duration"}``:
+lowercase letters as heard (stress marks stripped), word times in seconds
+from the start of the uploaded audio; no speech -> ``"text": ""``. The
 language must be the one of the single loaded model (else 409)."""
 
 from __future__ import annotations
@@ -10,20 +14,21 @@ from typing import Optional
 
 from fastapi import APIRouter, File, Form, UploadFile
 
-from ..common.audio import AudioDecodeError, decode_audio_file
+from ..common.audio import TARGET_RATE, AudioDecodeError, decode_audio_file
 from ..common.errors import ApiError
 from ..common.runtime import ServiceRuntime
 from ..common.runtime_config import RuntimeConfig
 from ..common.worker import Priority
-from .settings import VoskSettings
+from .settings import PhoneticSettings
 
 
 def pick_language(requested: Optional[str], model_id: str, loaded: str) -> str:
     """The request's language; must be the loaded model's language.
 
-    Vosk cannot detect the language, so omitted / "auto" means the model's.
-    Another language is refused (409): the service never switches its model
-    by itself - that is an explicit ``POST /config``."""
+    A CTC model writes one alphabet and cannot detect the language, so
+    omitted / "auto" means the model's. Another language is refused (409):
+    the service never switches its model by itself - that is an explicit
+    ``POST /config``."""
     code = (requested or "").strip().lower()
     if code in ("", "auto"):
         return loaded
@@ -31,14 +36,14 @@ def pick_language(requested: Optional[str], model_id: str, loaded: str) -> str:
         raise ApiError(
             409,
             "model_language_mismatch",
-            f"loaded Vosk model {model_id} is {loaded!r}, not {code!r};"
+            f"loaded phonetic model {model_id} is {loaded!r}, not {code!r};"
             " switch the model via POST /config",
         )
     return code
 
 
 def build_http_router(
-    config: RuntimeConfig[VoskSettings], runtime: ServiceRuntime
+    config: RuntimeConfig[PhoneticSettings], runtime: ServiceRuntime
 ) -> APIRouter:
     router = APIRouter()
 
@@ -68,6 +73,7 @@ def build_http_router(
             "text": result.text,
             "language": lang,
             "words": [asdict(w) for w in result.words],
+            "duration": round(len(audio) / TARGET_RATE, 3),
         }
 
     return router

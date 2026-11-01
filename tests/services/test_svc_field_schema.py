@@ -6,12 +6,12 @@ from src.services.asr.settings import AsrSettings
 from src.services.common.env import SettingsError
 from src.services.common.settings import render_env_value
 from src.services.tts.settings import TtsSettings
-from src.services.vosk.settings import VoskSettings
+from src.services.phonetic.settings import PhoneticSettings
 
 CLASSES = [
     (AsrSettings, {"RT_ASR_BACKEND": "fake"}),
     (TtsSettings, {"RT_TTS_BACKEND": "fake"}),
-    (VoskSettings, {"RT_VOSK_BACKEND": "fake"}),
+    (PhoneticSettings, {"RT_PHONETIC_BACKEND": "fake"}),
 ]
 
 

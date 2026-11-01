@@ -1,4 +1,4 @@
-"""``WS /v1/audio/stream`` plumbing shared by rt-asr and rt-vosk.
+"""``WS /v1/audio/stream`` plumbing of rt-asr.
 
 Protocol (spec 2026-10-31 §3, 2026-10-06 §6.2): the client sends
 ``start{language, sample_rate: 16000, prompt?, t0?}``, binary PCM16LE mono
@@ -64,7 +64,7 @@ class StreamError(Exception):
 class StreamStart:
     language: Optional[str]
     prompt: Optional[str]
-    t0: float  # client timeline of the first sample, s (shared by asr+vosk)
+    t0: float  # client timeline of the first sample, s (the edge timeline)
 
     @classmethod
     def parse(cls, msg: Dict[str, Any]) -> "StreamStart":

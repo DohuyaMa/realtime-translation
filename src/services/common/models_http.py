@@ -18,6 +18,9 @@ from .runtime_config import RuntimeConfig
 
 # Above this size a model is too slow for realtime use on a CPU node.
 CPU_HEAVY_BYTES = 1_000_000_000
+# Generative/autoregressive models only: the phonetic CTC model is 1.26 GB
+# yet runs ~7x realtime on 4 CPU threads (one forward pass, no decoding loop).
+CPU_HEAVY_KINDS = ("asr", "tts")
 
 
 def list_models(
@@ -30,7 +33,7 @@ def list_models(
         entry = {"id": spec.alias, "cached": not store.verify(spec), "size": size}
         if spec.language:
             entry["language"] = spec.language
-        if device == "cpu" and size > CPU_HEAVY_BYTES:
+        if device == "cpu" and kind in CPU_HEAVY_KINDS and size > CPU_HEAVY_BYTES:
             entry["warning"] = "large model on a CPU node: slow, not realtime"
         models.append(entry)
     return {"models": models, "current": current, "download": settings.download}

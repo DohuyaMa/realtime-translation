@@ -109,8 +109,7 @@ def test_apply_model_dir_sets_hf_home_only_when_unset():
 
 
 def test_default_ports():
-    # rt-vosk reuses 8092 of the removed rt-mt
-    assert DEFAULT_PORTS == {"rt-asr": 8091, "rt-vosk": 8092, "rt-tts": 8093}
+    assert DEFAULT_PORTS == {"rt-asr": 8091, "rt-phonetic": 8092, "rt-tts": 8093}
 
 
 def test_render_env_value():

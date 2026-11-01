@@ -17,7 +17,7 @@ from typing import (
 
 from .env import SettingsError, env_choice, env_int, env_str
 
-DEFAULT_PORTS = {"rt-asr": 8091, "rt-vosk": 8092, "rt-tts": 8093}
+DEFAULT_PORTS = {"rt-asr": 8091, "rt-phonetic": 8092, "rt-tts": 8093}
 DEFAULT_LISTEN_ADDRESSES = ("127.0.0.1",)
 DEVICES = ("cpu", "cuda", "rocm")
 LOG_LEVELS = ("trace", "debug", "info", "warning", "error", "critical")

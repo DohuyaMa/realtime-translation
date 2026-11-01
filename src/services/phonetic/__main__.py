@@ -1,4 +1,4 @@
-"""python -m src.services.vosk (entry point rt-vosk)."""
+"""python -m src.services.phonetic (entry point rt-phonetic)."""
 
 import os
 import sys
@@ -6,14 +6,14 @@ from typing import cast
 
 from ..common.serve import run_service
 from .app import create_app
-from .settings import VoskSettings
+from .settings import PhoneticSettings
 
 
 def main() -> int:
     return run_service(
-        VoskSettings.from_env,
+        PhoneticSettings.from_env,
         lambda settings: create_app(
-            cast(VoskSettings, settings), bootstrap_env=os.environ
+            cast(PhoneticSettings, settings), bootstrap_env=os.environ
         ),
     )
 
