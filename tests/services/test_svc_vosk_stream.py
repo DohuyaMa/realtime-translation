@@ -12,6 +12,7 @@ from src.services.vosk.stream import VoskStreamSession
 from svc_testutil import SR, pcm, running, tone
 
 URL = "/v1/audio/stream"
+FEED = SR * 2 // 10  # 100 ms of PCM
 
 
 def speech(seconds):
@@ -39,7 +40,7 @@ def test_session_partials_throttled_finals_with_words_and_endpoint():
     assert final["words"][-1] == {"word": "w2", "start": 3.0, "end": 3.5, "conf": 0.9}
     assert (final["start"], final["end"]) == (2.0, 3.5)
     assert endpoint == {"type": "endpoint", "at": 3.5}
-    assert idle == {"type": "idle", "at": pytest.approx(4.1)}
+    assert idle == {"type": "idle", "at": pytest.approx(4.1), "silent_from": 3.5}
     assert s.audio_end == pytest.approx(2.0 + 1.5 + 0.6)
 
 
@@ -74,6 +75,57 @@ def test_idle_while_kaldi_has_no_word_at_the_partial_pace():
         out += s.step()
     assert [m["type"] for m in out] == ["idle"] * 4  # 0.1, 0.4, 0.7, 1.0 s
     assert [m["at"] for m in out] == pytest.approx([1.1, 1.4, 1.7, 2.0])
+    assert {m["silent_from"] for m in out} == {1.0}
+
+
+class DeafRec:
+    """Kaldi that decodes everything as silence (the small uk model on
+    «повільніше», live §16): never a word, never a partial."""
+
+    def AcceptWaveform(self, data):
+        return False
+
+    def PartialResult(self):
+        return json.dumps({"partial": ""})
+
+    def FinalResult(self):
+        return json.dumps({"text": ""})
+
+
+def feed_steps(s, audio):
+    out = []
+    for i in range(0, len(audio), FEED):
+        s.feed(audio[i : i + FEED])
+        out += s.step()
+    return [m for m in out if m["type"] == "idle"]
+
+
+def test_idle_never_claims_voiced_audio_kaldi_heard_no_word_in():
+    """§16: «повільніше» (voiced 166.5-167.3, Kaldi empty), then a pause -
+    the idle's silence starts after the voiced audio, never before it."""
+    backend = FakeVoskBackend("uk")
+    backend.recognizer = DeafRec
+    s = VoskStreamSession(backend, language="uk", t0=166.0)
+    before = feed_steps(s, silence(0.5))
+    voiced = feed_steps(s, speech(0.8))
+    pause = feed_steps(s, silence(1.5))
+    assert {m["silent_from"] for m in before} == {166.0}
+    assert all(m["silent_from"] == pytest.approx(m["at"]) for m in voiced)
+    assert pause and {m["silent_from"] for m in pause} == {167.3}
+
+
+def test_steady_room_noise_is_learned_as_the_floor_not_voice():
+    """Amplified room noise (edge gain, -43 dBFS) counts as voice only until
+    the NOISE_WINDOW_S window knows it; speech above it is voice again."""
+    backend = FakeVoskBackend("uk")
+    backend.recognizer = DeafRec
+    s = VoskStreamSession(backend, language="uk")
+    noise = pcm(tone(int(7.0 * SR), amp=0.01))
+    idles = feed_steps(s, noise)
+    assert idles[-1]["silent_from"] == pytest.approx(5.0, abs=0.11)
+    feed_steps(s, speech(0.5))  # 7.0-7.5 s
+    idles = feed_steps(s, noise[: 5 * FEED])
+    assert {m["silent_from"] for m in idles} == {7.5}
 
 
 def test_finish_flushes_the_open_utterance():

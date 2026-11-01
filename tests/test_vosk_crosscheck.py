@@ -683,8 +683,9 @@ def test_partial_hint_short_of_the_unit_end_is_no_veto():
     assert gate_reason(text, "", "uk", covered=False) == GATE_UNCOVERED
 
 
-def idle(at):
-    return {"type": "idle", "at": at, "audio_end": at}
+def idle(at, silent_from):
+    """rt-vosk: Kaldi has no word, no voice energy in [silent_from, at]."""
+    return {"type": "idle", "at": at, "silent_from": silent_from, "audio_end": at}
 
 
 def test_whisper_in_a_pause_vosk_idle_past_it_is_dropped():
@@ -696,9 +697,9 @@ def test_whisper_in_a_pause_vosk_idle_past_it_is_dropped():
         speak(streams, "Або повільніше.", "або повільніше", 43.2)
         assert wait_for(lambda: len(llm.calls) == 1)
         for at in (50.0, 58.0, 61.5, 62.0):
-            streams["vosk"].emit(idle(at))
+            streams["vosk"].emit(idle(at, 43.8))
         streams["asr"].emit(final("Дякую.", 59.67, step=1.12))
-        streams["vosk"].emit(idle(73.0))
+        streams["vosk"].emit(idle(73.0, 43.8))
         streams["asr"].emit(final("знову.", 70.49, step=1.26))
         speak(streams, "Це дуже добре.", "це дуже добре", 80.0)
         assert wait_for(lambda: len(llm.calls) == 2)
@@ -720,7 +721,7 @@ def test_without_idle_a_pause_is_still_vosk_late():
     assert ts.start()
     try:
         streams["vosk"].emit(vosk_final("або", 44.8, 45.21))
-        streams["vosk"].emit(idle(60.0))  # idle, but not 1 s past the end
+        streams["vosk"].emit(idle(60.0, 45.21))  # idle, but not 1 s past the end
         streams["asr"].emit(final("Дякую.", 59.67, step=1.12))
         assert wait_for(lambda: llm.calls)
         stats = ts.get_stats()
@@ -730,13 +731,47 @@ def test_without_idle_a_pause_is_still_vosk_late():
     assert stats["vosk_late"] == 1 and stats["vosk_gate_dropped"] == 0
 
 
+def test_real_word_kaldi_decoded_as_silence_passes_whisper_only():
+    """§16, live 14:35:05: «…буде замість» then «повільніше.» - Kaldi heard
+    no word in it (endpoint after «замість», then idle), but the audio was
+    voiced, so rt-vosk's silence starts after it: whisper-only, not
+    ``no_word``. A hallucination in the real pause after it is dropped."""
+    ts, streams, llm, events = system()
+    assert ts.start()
+    try:
+        first = "Одне випадкове слово воск як от буде замість"
+        t = speak(streams, first, "одне випадку слово воски яку буде замість", 160.0)
+        assert wait_for(lambda: len(llm.calls) == 1)  # 160.0-162.4
+        for at in (162.7, 163.0, 163.3):  # voiced «повільніше», Kaldi empty
+            streams["vosk"].emit(idle(at, at))
+        for at in (163.6, 164.0, 164.6):
+            streams["vosk"].emit(idle(at, 163.3))
+        streams["asr"].emit(final("повільніше.", t - 0.4, step=0.8))
+        assert wait_for(lambda: len(llm.calls) == 2)
+        for at in (166.0, 168.0, 169.0):
+            streams["vosk"].emit(idle(at, 163.3))
+        streams["asr"].emit(final("Дякую.", 166.2, step=0.6))
+        speak(streams, "Це дуже добре.", "це дуже добре", 175.0)
+        assert wait_for(lambda: len(llm.calls) == 3)
+        stats = ts.get_stats()
+    finally:
+        ts.stop()
+    assert llm.calls == [first, "повільніше.", "Це дуже добре."]
+    assert llm.checks[1] is None  # whisper-only
+    drops = [e for e in events if e.get("status") == "vosk_gate"]
+    assert [(e["original_text"], e["reason"]) for e in drops] == [
+        ("Дякую.", GATE_NO_WORD)
+    ]
+    assert stats["vosk_late"] == 1
+
+
 def test_idle_vosk_with_real_speech_still_turns_deaf():
     """Laptop mic: Kaldi idle all along while whisper hears whole phrases -
     the first is gated, then Vosk is deaf and units go whisper-only."""
     ts, streams, llm, _ = system()
     assert ts.start()
     try:
-        streams["vosk"].emit(idle(30.0))
+        streams["vosk"].emit(idle(30.0, 0.0))
         t = speak(streams, "Давай спробуємо щось перевести.", None)
         t = speak(streams, "Знову нічого не чути вслух.", None, t)
         speak(streams, "І ще одна фраза тут.", None, t)

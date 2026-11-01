@@ -33,8 +33,12 @@ dropped as ``no_word`` (bench 2026-10-31: «Перший — промпт.»). I
 Vosk has no word to cover with, so ``covered`` stuck before the pause and a
 whisper hallucination in it («Дякую.», «знову.», live 2026-11-01 §14)
 passed as "Vosk late". rt-vosk's ``idle`` message (Kaldi has no word in its
-current utterance at the processed time ``at``) covers up to
-``at - VOSK_IDLE_LAG_S`` (the same Kaldi lag) as heard silence.
+current utterance at the processed time ``at`` and the audio since
+``silent_from`` had no voice energy) makes ``[silent_from, at -
+VOSK_IDLE_LAG_S]`` (the same Kaldi lag) heard silence. Not a watermark: the
+small model decodes some real words as silence («повільніше» after «буде
+замість», live §16), so a span of voiced audio without a Vosk word is never
+covered by a later idle - its unit stays "Vosk late" (whisper-only).
 
 Also used by transcribe mode: each unit is one recognized line.
 """
@@ -42,7 +46,9 @@ Also used by transcribe mode: each unit is one recognized line.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Iterable, List, Optional, Sequence
+from typing import Any, Iterable, List, Optional, Sequence, Tuple
+
+from loguru import logger
 
 CLAUSE_WORDS = 12
 HARD_WORDS = 20
@@ -249,8 +255,10 @@ class VoskTrack:
         self.finals: List[Word] = []
         self.partial: List[Word] = []
         self.covered = 0.0  # end of Vosk's latest word, stream seconds
-        self.silent_to = 0.0  # Kaldi idle: heard silence up to here
+        # heard silence (Kaldi idle, no voice energy): merged (lo, hi) spans
+        self.silences: List[Tuple[float, float]] = []
         self.language: Optional[str] = None
+        self._old_idle_warned = False
 
     def on_message(self, msg: dict) -> None:
         kind = msg.get("type")
@@ -265,14 +273,36 @@ class VoskTrack:
             words = self.partial = parse_words(msg.get("words"))
         elif kind == "idle":
             self.partial = []
-            at = float(msg.get("at") or 0.0)
-            self.silent_to = max(self.silent_to, at - VOSK_IDLE_LAG_S)
+            self._idle(msg)
         if words:
             self.covered = max(self.covered, max(w.end for w in words))
 
-    def covers(self, t: float) -> bool:
-        """Vosk's words reach t, or Kaldi was idle (heard silence) past t."""
-        return self.covered >= t - COVER_SLACK_S or self.silent_to >= t
+    def _idle(self, msg: dict) -> None:
+        if msg.get("silent_from") is None:
+            if not self._old_idle_warned:
+                self._old_idle_warned = True
+                logger.warning(
+                    "rt-vosk idle without silent_from (rt-vosk older than"
+                    " live test §16): no heard silence - redeploy rt-vosk"
+                )
+            return
+        lo = float(msg["silent_from"])
+        hi = float(msg.get("at") or 0.0) - VOSK_IDLE_LAG_S
+        if hi <= lo:
+            return
+        if self.silences and lo <= self.silences[-1][1]:
+            last = self.silences[-1]
+            self.silences[-1] = (min(last[0], lo), max(last[1], hi))
+        else:
+            self.silences.append((lo, hi))
+
+    def covers(self, t0: float, t1: float) -> bool:
+        """Vosk's words reach t1, or the unit [t0, t1] after Vosk's latest
+        word lies in one span of heard silence."""
+        if self.covered >= t1 - COVER_SLACK_S:
+            return True
+        start = max(t0, self.covered) + COVER_SLACK_S
+        return any(lo <= start and hi >= t1 for lo, hi in self.silences)
 
     def hint(self, t0: float, t1: float) -> List[Word]:
         lo, hi = t0 - HINT_MARGIN_S, t1 + HINT_MARGIN_S
@@ -283,6 +313,7 @@ class VoskTrack:
         keep = t - 2 * HINT_MARGIN_S
         if self.finals and self.finals[0].mid < keep:
             self.finals = [w for w in self.finals if w.mid >= keep]
+        self.silences = [s for s in self.silences if s[1] >= keep]
 
 
 def words_text(words: Sequence[Any]) -> str:

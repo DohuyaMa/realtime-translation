@@ -1067,7 +1067,7 @@ class TranslationSystem:
             if (
                 vosk
                 and not self._draining
-                and not self._vosk.covers(unit.source.t1)
+                and not self._vosk.covers(unit.source.t0, unit.source.t1)
                 and self._clock() - unit.t_cut < VOSK_WAIT_S
             ):
                 return
@@ -1105,7 +1105,7 @@ class TranslationSystem:
             return
         hint: Optional[List[Word]] = None
         partial = self._vosk.hint(unit.source.t0, unit.source.t1) if vosk else []
-        covered = vosk and self._vosk.covers(unit.source.t1)
+        covered = vosk and self._vosk.covers(unit.source.t0, unit.source.t1)
         if vosk and (covered or partial):
             # Kaldi's partial lags ~1 s: Vosk words already in the span are
             # used as the HINT even when its end is not covered yet (then

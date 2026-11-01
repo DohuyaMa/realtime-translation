@@ -3,11 +3,16 @@ session. Kaldi's own endpointing ends an utterance: ``final`` (words with
 conf/start/end, ``eos``) + ``endpoint``; between finals ``partial`` (the
 current utterance, with partial words) at most every ``PARTIAL_INTERVAL_S``
 of audio and only when it changed; with no word in the current utterance,
-``idle{at}`` at the same pace instead (``at`` = processed audio time): Kaldi
-heard silence there, so the edge can tell a whisper hallucination in a
-pause (no Vosk word, Vosk idle past it) from Vosk being late (live
-2026-11-01 §14). Times are ``t0`` + samples / 16 kHz, the
-same scale as rt-asr, so the edge can match words of both.
+``idle{at, silent_from}`` at the same pace instead (``at`` = processed audio
+time): Kaldi has no word AND the audio in ``[silent_from, at]`` had no voice
+energy (``VoiceTracker``), so the edge can tell a whisper hallucination in a
+pause (no Vosk word, silence past it) from Vosk being late (live 2026-11-01
+§14). An empty partial alone is no proof of silence: the small uk model
+decodes speech it cannot match as silence («повільніше» after «буде
+замість» - Kaldi endpointed, then idle, and the real word was dropped as
+``no_word``, live §16); ``silent_from`` starts after the last voiced
+audio, so such a span is never claimed. Times are ``t0`` + samples / 16 kHz,
+the same scale as rt-asr, so the edge can match words of both.
 
 Pure class (no asyncio): ``feed`` only buffers; ``step``/``finish`` run the
 recognizer on the inference thread (``common/stream.py`` drives it).
@@ -16,8 +21,12 @@ recognizer on the inference thread (``common/stream.py`` drives it).
 from __future__ import annotations
 
 import json
+import math
 import threading
-from typing import Any, Dict, List, Optional
+from collections import deque
+from typing import Any, Deque, Dict, List, Optional, Tuple
+
+import numpy as np
 
 from ..common.stream import SAMPLE_RATE
 from .backend import VoskBackend
@@ -25,6 +34,49 @@ from .backend import VoskBackend
 PARTIAL_INTERVAL_S = 0.3
 TICK_S = 0.1  # vosk steps every 100 ms: the recognizer is cheap, finals timely
 FEED_BYTES = SAMPLE_RATE * 2 // 10  # 100 ms per AcceptWaveform
+# voice energy of a 100 ms chunk: above VOICE_GATE_DBFS and VOICE_MARGIN_DB
+# above the noise floor = the quietest chunk of the last NOISE_WINDOW_S
+# (minimum statistics: speech has quieter gaps between words, steady noise
+# sets the floor to itself; the edge normalizes speech to ~-20 dBFS and adds
+# <= 24 dB of gain, so amplified room noise sits >= 10 dB below speech)
+VOICE_GATE_DBFS = -50.0
+VOICE_MARGIN_DB = 10.0
+NOISE_WINDOW_S = 5.0
+_FLOOR_DB = -100.0
+
+
+def chunk_dbfs(chunk: bytes) -> float:
+    """RMS of 16-bit PCM in dBFS."""
+    x = np.frombuffer(chunk, dtype="<i2").astype(np.float64) / 32768.0
+    r = float(np.sqrt(np.mean(np.square(x)))) if x.size else 0.0
+    return max(_FLOOR_DB, 20.0 * math.log10(r)) if r > 0 else _FLOOR_DB
+
+
+class VoiceTracker:
+    """Energy voice detector over the session's chunks: ``voiced_to`` = end
+    of the latest chunk with voice energy (the edge must not take audio
+    before it as heard silence, whatever Kaldi decoded). Until the first
+    NOISE_WINDOW_S of audio has passed, the floor is at most
+    VOICE_GATE_DBFS - VOICE_MARGIN_DB: speech from the first chunk on counts
+    as voice (steady louder noise counts too, until the window learns it -
+    a missed silence only lets a unit pass)."""
+
+    def __init__(self, t0: float) -> None:
+        self.voiced_to = t0
+        self._levels: Deque[Tuple[float, float]] = deque(
+            [(t0, VOICE_GATE_DBFS - VOICE_MARGIN_DB)]
+        )  # (chunk end, dBFS)
+
+    def add(self, chunk: bytes, end: float) -> bool:
+        level = chunk_dbfs(chunk)
+        self._levels.append((end, level))
+        while self._levels[0][0] < end - NOISE_WINDOW_S:
+            self._levels.popleft()
+        floor = min(lv for _, lv in self._levels)
+        voiced = level > max(VOICE_GATE_DBFS, floor + VOICE_MARGIN_DB)
+        if voiced:
+            self.voiced_to = end
+        return voiced
 
 
 class VoskStreamSession:
@@ -42,6 +94,7 @@ class VoskStreamSession:
         self._partial_at: Optional[float] = None
         self._last_end = t0
         self._partials = 0
+        self._voice = VoiceTracker(t0)
 
     @property
     def audio_end(self) -> float:
@@ -81,6 +134,7 @@ class VoskStreamSession:
             chunk = data[i : i + FEED_BYTES]
             ended = self._rec.AcceptWaveform(chunk)
             self._processed += len(chunk)
+            self._voice.add(chunk, self._t(self._processed))
             if ended:
                 out += self._final(json.loads(self._rec.Result()), endpoint=True)
         out += self._partial_msg()
@@ -141,7 +195,14 @@ class VoskStreamSession:
             if text:
                 return []
             self._partial_at = now
-            return [{"type": "idle", "at": round(now, 3)}]
+            silent_from = max(self._voice.voiced_to, self._last_end)
+            return [
+                {
+                    "type": "idle",
+                    "at": round(now, 3),
+                    "silent_from": round(min(silent_from, now), 3),
+                }
+            ]
         words = self._words(result.get("partial_result"))
         self._partial, self._partial_at = text, now
         self._partials += 1
