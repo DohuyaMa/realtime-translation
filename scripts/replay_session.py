@@ -14,8 +14,9 @@ translation; recordings of any date - only those fields are read). Per unit,
 in order, exactly as the edge does it (``translation_system._gate`` /
 ``_translate``): the wav -> rt-phonetic (one request, ``--timeout`` budget)
 -> ``gate_reason`` -> the LLM with SOUND + TEXT + NEXT and the previous
-pairs as context -> ``reject_reason`` -> one whisper-only retry of a
-rejected sound-mode reply. Printed per unit: gate + similarity, mode,
+pairs as context -> ``reject_reason`` (``complete=True``) -> one
+whisper-only retry of a rejected sound-mode reply or of a ``too_short`` one
+(with ``COMPLETE_RETRY_NOTE``). Printed per unit: gate + similarity, mode,
 phonetic latency, the new translation next to the live one; then a summary
 (gate drops by reason, modes, retries, latency p50/p90/max, over budget).
 ``--out`` keeps one JSON line per unit for later comparison. Tokens are read
@@ -106,13 +107,28 @@ def read_wav(path: Path) -> np.ndarray:
         return np.frombuffer(w.readframes(w.getnframes()), dtype="<i2").copy()
 
 
-def _translate(llm: Any, seg: Segment, src: str, ctx: deque, sound: Any) -> tuple:
+def _translate(
+    llm: Any, seg: Segment, src: str, ctx: deque, sound: Any, insist: bool = False
+) -> tuple:
     out = " ".join(
         llm.translate_stream(
-            seg.whisper, src, context=list(ctx), sound=sound, next_text=seg.next_text
+            seg.whisper,
+            src,
+            context=list(ctx),
+            sound=sound,
+            next_text=seg.next_text,
+            insist_complete=insist,
         )
     )
-    return out, reject_reason(seg.whisper, out, seg.next_text)
+    why = reject_reason(
+        seg.whisper,
+        out,
+        seg.next_text,
+        complete=True,
+        sound="" if sound is None else sound.sound_text,
+        terms=LlmSettings().terms,  # the replay tunes only the prompts
+    )
+    return out, why
 
 
 def replay(
@@ -156,10 +172,10 @@ def replay(
         if llm is None:
             continue
         out, why = _translate(llm, seg, src, ctx, sound)
-        if why and sound is not None:
+        if why == "too_short" or (why and sound is not None):
             r.rejected.append(why)
             r.mode, sound = MODE_RETRY, None
-            out, why = _translate(llm, seg, src, ctx, None)
+            out, why = _translate(llm, seg, src, ctx, None, why == "too_short")
         if why:
             r.rejected.append(why)
             continue

@@ -57,7 +57,15 @@ class SlowLlm:
         self.gate = gate
         self.calls = []
 
-    def translate_stream(self, text, source_lang, context=(), sound=None, next_text=""):
+    def translate_stream(
+        self,
+        text,
+        source_lang,
+        context=(),
+        sound=None,
+        next_text="",
+        insist_complete=False,
+    ):
         self.calls.append(text)
         if self.clock is not None:
             self.clock.t += self.delay
@@ -271,6 +279,33 @@ def test_llm_client_streams_sse_sentences():
     assert seen == [True]
 
 
+def test_llm_client_retry_request_ends_with_the_complete_note():
+    from src.core.prompt import COMPLETE_RETRY_NOTE
+
+    body = 'data: {"choices":[{"delta":{"content":"Hi."}}]}\n\ndata: [DONE]\n\n'
+    last = []
+
+    def handle(req):
+        import json
+
+        last.append(json.loads(req.content)["messages"][-1]["content"])
+        return httpx.Response(
+            200, headers={"content-type": "text/event-stream"}, content=body
+        )
+
+    class Target:
+        def current(self):
+            return "http://w", "t"
+
+        def invalidate(self, kind):
+            pass
+
+    c = LlmClient(Target(), LlmSettings(), transport=httpx.MockTransport(handle))
+    list(c.translate_stream("cześć", "pl"))
+    list(c.translate_stream("cześć", "pl", insist_complete=True))
+    assert last == ["TEXT: cześć", f"TEXT: cześć\n{COMPLETE_RETRY_NOTE}"]
+
+
 class MetaLlm(SlowLlm):
     """Streams a chat reply instead of a translation; records stream close."""
 
@@ -278,7 +313,15 @@ class MetaLlm(SlowLlm):
         super().__init__(0, sentences=sentences)
         self.closed = False
 
-    def translate_stream(self, text, source_lang, context=(), sound=None, next_text=""):
+    def translate_stream(
+        self,
+        text,
+        source_lang,
+        context=(),
+        sound=None,
+        next_text="",
+        insist_complete=False,
+    ):
         try:
             yield from super().translate_stream(text, source_lang, context)
         finally:

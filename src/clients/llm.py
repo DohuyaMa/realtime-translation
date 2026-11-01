@@ -147,6 +147,7 @@ class LlmClient:
         context: Sequence[tuple] = (),
         sound: Optional[Aligned] = None,
         next_text: str = "",
+        insist_complete: bool = False,
     ) -> Iterator[str]:
         """Translated TTS pieces (``_pieces``) as soon as each one is complete.
 
@@ -163,6 +164,9 @@ class LlmClient:
         ``next_text``: speech recognized after ``text`` (the NEXT line, for
         understanding only); a later chunk of the same text is part of an
         earlier chunk's NEXT.
+
+        ``insist_complete``: the retry of a ``too_short`` reply - every
+        chunk's request ends with ``COMPLETE_RETRY_NOTE``.
         """
         if source_lang == "en":
             yield text
@@ -192,6 +196,7 @@ class LlmClient:
                 sound=chunk_sound,
                 terms=s.terms,
                 next_text=" ".join(chunks[i + 1 :] + [next_text]).strip(),
+                insist_complete=insist_complete,
             )
             parts = []
             for sentence in self._complete_stream(messages, chunk):

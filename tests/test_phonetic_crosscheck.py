@@ -74,12 +74,22 @@ class SoundLlm(SlowLlm):
         super().__init__(0)
         self.sounds = []
         self.nexts = []
+        self.insists = []
         self.replies = list(replies)
 
-    def translate_stream(self, text, source_lang, context=(), sound=None, next_text=""):
+    def translate_stream(
+        self,
+        text,
+        source_lang,
+        context=(),
+        sound=None,
+        next_text="",
+        insist_complete=False,
+    ):
         self.calls.append(text)
         self.sounds.append(None if sound is None else sound.sound_text)
         self.nexts.append(next_text)
+        self.insists.append(insist_complete)
         reply = self.replies.pop(0) if self.replies else f"EN{len(self.calls)}."
         yield from reply.split("|")
 
@@ -524,7 +534,9 @@ def test_phonetic_budget_grows_with_the_unit_audio(audio_s, budget):
 
 def test_phonetic_request_gets_the_budget_of_its_unit_audio():
     long = " ".join(["слово"] * 19) + "."  # 19 words * 0.3 s
-    ts, streams, llm, _ = system(phonetic=["раз", "слово " * 19])
+    # a whole translation: a one-word reply to 19 words is too_short
+    llm = SoundLlm(replies=["One.", " ".join(["word"] * 19) + "."])
+    ts, streams, llm, _ = system(llm=llm, phonetic=["раз", "слово " * 19])
     run(ts, streams, ["Раз.", long], lambda: len(llm.calls) == 2)
     (short_s, _, short_budget), (long_s, _, long_budget) = ts.phonetic.calls
     assert short_budget == 1.5
@@ -600,6 +612,70 @@ def test_rejected_after_tts_got_sentences_is_not_retried():
     stats = run(ts, streams, [long], lambda: ts.get_stats()["llm_rejected"])
     assert len(llm.calls) == 1
     assert stats["rejected_after_tts"] == 1 and stats["retry_whisper_only"] == 0
+
+
+# live 2026-11-01 unit 26: 15 words -> 6, the second half of a list dropped
+EIGHT = "Раз два три чотири п'ять шість сім вісім."
+EIGHT_EN = "One two three four five six seven eight."
+
+
+def test_too_short_sound_reply_is_retried_whisper_only_with_the_note():
+    llm = SoundLlm(replies=["One two.", EIGHT_EN])
+    ts, streams, llm, events = system(
+        llm=llm, phonetic=["раз два три чотири пять шість сім вісім"]
+    )
+    stats = run(ts, streams, [EIGHT], lambda: ts._pools.tts.client.calls)
+    assert llm.sounds[1] is None and llm.insists == [False, True]
+    assert stats["retry_incomplete"] == 1 and stats["retry_whisper_only"] == 0
+    assert ts._pools.tts.client.calls == [EIGHT_EN]  # the short reply never spoke
+    assert any(
+        e.get("status") == "translation_retry" and e["reason"] == "too_short"
+        for e in events
+    )
+
+
+def test_too_short_retry_too_short_speaks_the_longer_reply():
+    """Owner 2026-11-01: a partial translation beats losing the phrase."""
+    llm = SoundLlm(replies=["One two.", "One two three."])
+    ts, streams, llm, _ = system(llm=llm, phonetic=None)
+    stats = run(ts, streams, [EIGHT], lambda: ts._pools.tts.client.calls)
+    assert llm.insists == [False, True] and len(llm.calls) == 2
+    assert stats["retry_incomplete"] == 1 and stats["spoken_incomplete"] == 1
+    assert stats["llm_rejected"] == 0
+    assert ts._pools.tts.client.calls == ["One two three."]
+    assert ts._translation_context[-1] == (EIGHT, "One two three.")
+
+
+def test_too_short_first_reply_spoken_when_the_retry_is_meta():
+    llm = SoundLlm(replies=["One two three.", "Please provide the transcript."])
+    ts, streams, llm, _ = system(llm=llm, phonetic=None)
+    stats = run(ts, streams, [EIGHT], lambda: ts._pools.tts.client.calls)
+    assert stats["spoken_incomplete"] == 1 and stats["llm_rejected"] == 0
+    assert ts._pools.tts.client.calls == ["One two three."]
+
+
+def test_sentences_wait_for_the_floor_then_go_to_tts_in_order():
+    llm = SoundLlm(replies=["One.|Two three four.|Five six seven eight."])
+    ts, streams, llm, _ = system(llm=llm, phonetic=None)
+    tts = ts._pools.tts.client
+    stats = run(ts, streams, [EIGHT], lambda: len(tts.calls) == 3)
+    assert tts.calls == ["One.", "Two three four.", "Five six seven eight."]
+    assert stats["retry_incomplete"] == 0 and llm.insists == [False]
+
+
+def test_transliterated_sound_reply_is_retried_whisper_only():
+    """Live 2026-11-01 18:09: «Раз, два, три.» -> "Raz dva tri." (context
+    poisoning); SOUND is what the reply copied."""
+    llm = SoundLlm(replies=["Raz dva tri.", "One, two, three."])
+    ts, streams, llm, events = system(llm=llm, phonetic=["раз два три"])
+    stats = run(ts, streams, ["Раз, два, три."], lambda: ts._pools.tts.client.calls)
+    assert llm.sounds == ["раз два три", None]
+    assert stats["retry_whisper_only"] == 1
+    assert ts._pools.tts.client.calls == ["One, two, three."]
+    assert any(
+        e.get("status") == "translation_retry" and e["reason"] == "transliterated"
+        for e in events
+    )
 
 
 def test_recognized_unit_carries_the_sound_for_the_ui():

@@ -168,6 +168,8 @@ def main() -> None:
         "phonetic_timeout",
         "retry_whisper_only",
         "rejected_after_tts",
+        "retry_incomplete",
+        "spoken_incomplete",
         "asr_no_words",
         "pipeline_errors",
         "backpressure",

@@ -184,7 +184,15 @@ class FakeLlm:
                 raise err
         return f"EN({text})"
 
-    def translate_stream(self, text, source_lang, context=(), sound=None, next_text=""):
+    def translate_stream(
+        self,
+        text,
+        source_lang,
+        context=(),
+        sound=None,
+        next_text="",
+        insist_complete=False,
+    ):
         yield self.translate(text, source_lang, context, sound, next_text)
 
     base_url = "http://llm"

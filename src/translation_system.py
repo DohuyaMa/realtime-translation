@@ -35,7 +35,12 @@ not translate):`` the committed words after it + whisper's partial, for
 understanding only (``core.output_guard`` rejects NEXT leakage and meta
 replies). A rejected sound-mode reply of which nothing reached TTS yet is
 re-translated once whisper-only (``retry_whisper_only``); once sentences
-were queued it is only rejected (``rejected_after_tts``).
+were queued it is only rejected (``rejected_after_tts``). A whole reply
+much shorter than the unit (``too_short``, any mode; its sentences are held
+until ``min_output_words`` is reached, so none reached TTS) is
+re-translated once whisper-only with ``COMPLETE_RETRY_NOTE``
+(``retry_incomplete``); if that fails too, the longer incomplete reply is
+spoken (WARNING, ``spoken_incomplete``) - never lost.
 
 Staged pipeline (owner 2026-10-31): the unit stage, LLM, TTS and playback
 are worker threads with bounded FIFO queues - the LLM translates unit n+1
@@ -105,7 +110,7 @@ from .core.crosscheck import (
     gate_reason,
     similarity,
 )
-from .core.output_guard import reject_reason
+from .core.output_guard import min_output_words, reject_reason, word_count
 from .core.prompt import render_asr_prompt
 from .core.runtime import KINDS, OFF, EdgeSettings, LlmSettings
 from .core.session_record import SessionRecorder
@@ -150,7 +155,7 @@ LATENCY_KEEP = 500
 # LLM input mode of a unit (log, session recording)
 MODE_SOUND = "sound"  # condition F: SOUND primary + TEXT
 MODE_WHISPER = "whisper-only"
-MODE_RETRY = "retry"  # sound-mode reply rejected -> whisper-only once
+MODE_RETRY = "retry"  # rejected (sound) / too short (any) -> whisper-only once
 # _phonetic_state modes besides on/off/unavailable: no model of the language
 NO_LANGUAGE = "no_language"
 # «фонетика недоступна для <мови>»
@@ -474,6 +479,8 @@ class TranslationSystem:
         self._phonetic_timeout = 0  # of those: no answer within the budget
         self._retry_whisper_only = 0  # sound reply rejected, re-translated
         self._rejected_after_tts = 0  # sound reply rejected after TTS got some
+        self._retry_incomplete = 0  # too_short reply re-translated (any mode)
+        self._spoken_incomplete = 0  # retry failed too: longer reply spoken
         # pipeline-start warm-up: kind -> {url, ms, error, loaded}; kinds
         # still warming; time.monotonic() of start()
         self._warmup: Dict[str, Dict[str, Any]] = {}
@@ -1616,22 +1623,31 @@ class TranslationSystem:
         the fragments small models answer instead of translating, and
         buffering them costs almost no latency. A rejected sound-mode reply
         of which nothing went to TTS is re-translated once whisper-only
-        (``retry_whisper_only``); otherwise it is rejected.
+        (``retry_whisper_only``); otherwise it is rejected. A ``too_short``
+        whole reply (any mode but a retry) is re-translated once whisper-only
+        with ``COMPLETE_RETRY_NOTE`` (``retry_incomplete``).
         """
         t0 = self._clock()
         done = self._llm_pass(unit, t0)
         if done is None:
             return
-        output, reason = done
-        if reason and unit.mode == MODE_SOUND:
+        output, reason, held = done
+        first: Optional[tuple] = None  # (output, held) of a too_short reply
+        incomplete = reason == "too_short" and unit.mode != MODE_RETRY
+        if incomplete or (reason and unit.mode == MODE_SOUND):
             if unit.pieces == 0:
-                self._retry_whisper_only += 1
+                if incomplete:
+                    self._retry_incomplete += 1
+                else:
+                    self._retry_whisper_only += 1
                 self._log_unit(unit, output, reason)
                 logger.warning(
-                    "unit #{}: sound-mode reply rejected ({}) - re-translating"
-                    " whisper-only once",
+                    "unit #{}: {} reply rejected ({}) - re-translating"
+                    " whisper-only once{}",
                     unit.seq,
+                    unit.mode,
                     reason,
+                    " with the complete-translation note" if incomplete else "",
                 )
                 self._emit(
                     {
@@ -1641,11 +1657,17 @@ class TranslationSystem:
                         "output": output[:200],
                     }
                 )
+                if incomplete:
+                    first = (output, held)
                 unit.mode, unit.sound = MODE_RETRY, None
-                done = self._llm_pass(unit, t0)
+                done = self._llm_pass(unit, t0, insist_complete=incomplete)
                 if done is None:
                     return
-                output, reason = done
+                output, reason, held = done
+                if first is not None and reason:
+                    output, reason = self._speak_incomplete(
+                        unit, first, output, reason, held
+                    )
             else:
                 self._rejected_after_tts += 1
         if reason:
@@ -1668,15 +1690,53 @@ class TranslationSystem:
             }
         )
 
-    def _llm_pass(self, unit: _Unit, t0: float) -> Optional[tuple]:
+    def _speak_incomplete(
+        self,
+        unit: _Unit,
+        first: tuple,
+        output: str,
+        reason: str,
+        held: List["_Sentence"],
+    ) -> tuple:
+        """The first reply was too short and its retry failed too: a partial
+        translation beats losing the phrase (owner 2026-11-01) - the longer
+        of the two too_short replies (the first one if the retry was
+        rejected for another reason) is spoken, WARNING + ``spoken_incomplete``.
+        Returns (output, None)."""
+        first_output, first_held = first
+        if reason == "too_short" and word_count(output) > word_count(first_output):
+            chosen, items = output, held
+        else:
+            chosen, items = first_output, first_held
+        self._spoken_incomplete += 1
+        logger.warning(
+            "unit #{}: retry also rejected ({}) - speaking the longer incomplete"
+            " reply {!r:.200} (source {} words)",
+            unit.seq,
+            reason,
+            chosen,
+            len(unit.text.split()),
+        )
+        for item in items:
+            self._queue_sentence(item)
+        return chosen, None
+
+    def _llm_pass(
+        self, unit: _Unit, t0: float, insist_complete: bool = False
+    ) -> Optional[tuple]:
         """One streamed LLM request of the unit in its ``mode``: sentences
         go to TTS as they pass the guard (short sources only once the whole
-        reply passed). (output, reject reason or None); None = the request
-        failed (counted, reported)."""
+        reply passed; others once the reply has ``min_output_words`` - until
+        then a ``too_short`` verdict on the whole reply is still possible).
+        (output, reject reason or None, sentences held back from TTS - all of
+        a rejected reply); None = the request failed (counted, reported)."""
         self._llm_requests += 1
         sentences: List[str] = []
         held: List[_Sentence] = []
         buffer_all = len(unit.text.split()) <= SHORT_SOURCE_WORDS
+        sound = "" if unit.sound is None else unit.sound.sound_text
+        terms = self.settings.llm.terms
+        floor = min_output_words(unit.text)
         reason: Optional[str] = None
         started = self._clock()
         stream = self._llm.translate_stream(
@@ -1685,6 +1745,7 @@ class TranslationSystem:
             context=list(self._translation_context),
             sound=unit.sound,
             next_text=unit.next_text,
+            insist_complete=insist_complete,
         )
         try:
             for sentence in stream:
@@ -1692,14 +1753,21 @@ class TranslationSystem:
                 if unit.llm_first_ms is None:
                     unit.llm_first_ms = _ms(now - t0)
                 sentences.append(sentence)
-                reason = reject_reason(unit.text, " ".join(sentences), unit.next_text)
+                reason = reject_reason(
+                    unit.text,
+                    " ".join(sentences),
+                    unit.next_text,
+                    sound=sound,
+                    terms=terms,
+                )
                 if reason:
                     break
                 item = _Sentence(unit, sentence, now)
-                if buffer_all:
-                    held.append(item)
-                else:
-                    self._queue_sentence(item)
+                held.append(item)
+                if not buffer_all and word_count(" ".join(sentences)) >= floor:
+                    for waiting in held:
+                        self._queue_sentence(waiting)
+                    held.clear()
         except ServiceError as e:
             self._llm_errors += 1
             self._service_error(e)
@@ -1715,10 +1783,21 @@ class TranslationSystem:
             if close:  # release the HTTP stream when we stopped early
                 close()
             self._llm_time += self._clock() - started
+        output = " ".join(sentences)
+        if not reason:
+            reason = reject_reason(
+                unit.text,
+                output,
+                unit.next_text,
+                complete=True,
+                sound=sound,
+                terms=terms,
+            )
         if not reason:
             for item in held:
                 self._queue_sentence(item)
-        return " ".join(sentences), reason
+            held = []
+        return output, reason, held
 
     def _queue_sentence(self, item: _Sentence) -> None:
         item.unit.pieces += 1
@@ -1815,6 +1894,8 @@ class TranslationSystem:
             "phonetic_timeout": self._phonetic_timeout,
             "retry_whisper_only": self._retry_whisper_only,
             "rejected_after_tts": self._rejected_after_tts,
+            "retry_incomplete": self._retry_incomplete,
+            "spoken_incomplete": self._spoken_incomplete,
             "session": self._session_snapshot(),
             "timing": dict(self._timing),
             "latency": {
