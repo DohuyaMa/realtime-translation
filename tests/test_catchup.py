@@ -46,6 +46,14 @@ def test_speeds_up_one_step_per_piece_and_back_below_two_seconds():
     assert MAX_FACTOR == 1.25
 
 
+def test_settle_turns_off_after_playback_drained():
+    c = CatchUp()
+    c.update(9.0)
+    assert c.settle(2.5) is None and c.active
+    assert "off" in c.settle(1.0)
+    assert not c.active and c.factor == 1.0 and c.settle(0.0) is None
+
+
 class LongTts(FakeTts):
     """Each sentence is 3 s of (non-silent) audio; records the speed."""
 
@@ -82,6 +90,8 @@ def test_tts_speaks_faster_only_while_playback_lags():
         assert stats["active"] and stats["episodes"] == 1
         release.set()
         assert wait_for(lambda: len(played) == n, timeout=5)
+        # played out: off already, not only at the next request
+        assert wait_for(lambda: not ts.get_stats()["tts_catchup"]["active"])
         speak_after = AsrResult("p9.", "uk")
         asr.results.append(speak_after)
         speak(1)

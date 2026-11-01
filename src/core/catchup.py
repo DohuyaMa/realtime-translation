@@ -7,7 +7,8 @@ p90 9.9 s, max 14 s). While the unplayed audio (queued + playing) exceeds
 ``ON_S`` the TTS stage asks for a higher speed - one ``STEP`` per synthesized
 piece up to the backlog's target (``target``: linear from ``OFF_S`` to
 ``FULL_S``, at most ``MAX_FACTOR``); below ``OFF_S`` it is back to the
-configured speed at once. Hysteresis 4 s / 2 s so the voice does not flicker.
+configured speed at once (checked before each request and after each played
+piece, ``settle``). Hysteresis 4 s / 2 s so the voice does not flicker.
 Each change is returned as a log line; counters go to ``get_stats``.
 """
 
@@ -63,6 +64,15 @@ class CatchUp:
             f"tts catch-up {state}: playback backlog {backlog_s:.1f} s ->"
             f" speed x{self.factor:.2f}"
         )
+
+    def settle(self, backlog_s: float) -> Optional[str]:
+        """After a piece played: off once the backlog is below ``OFF_S``
+        (the state is right before the next request and in the stats)."""
+        if not self.active or backlog_s >= OFF_S:
+            return None
+        self.active = False
+        self.factor = 1.0
+        return f"tts catch-up off: playback backlog {backlog_s:.1f} s -> base speed"
 
     def speed(self, base: Optional[float]) -> Optional[float]:
         """Speed of the next request: ``base`` (None = the service default)

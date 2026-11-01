@@ -1535,6 +1535,9 @@ class TranslationSystem:
             finally:
                 with self._backlog_lock:
                     self._backlog_s = max(0.0, self._backlog_s - len(audio) / sr)
+                    change = self._catchup.settle(self._backlog_s)
+                if change:
+                    logger.info(change)
 
     def _play(self, unit: Optional[_Unit], audio: np.ndarray, sr: int) -> None:
         """Play one piece; each piece is logged with its length, and a sink
@@ -1745,8 +1748,7 @@ class TranslationSystem:
         on to playback."""
         tts = self.settings.tts
         with self._backlog_lock:
-            backlog = self._backlog_s
-        change = self._catchup.update(backlog)
+            change = self._catchup.update(self._backlog_s)
         if change:
             logger.info("{} (base {})", change, tts.speed or "rt-tts default 1.0")
         speed = self._catchup.speed(tts.speed)
