@@ -25,6 +25,7 @@ from src.core.crosscheck import (
     GATE_MIN_SIMILARITY,
     GATE_NO_WORD,
     GATE_SHORT_WORDS,
+    GATE_SPARSE_SOUND,
     Aligned,
     gate_reason,
     letters,
@@ -162,6 +163,34 @@ def run(ts, streams, utterances, until, language="uk"):
 
 
 # -- the letter gate ----------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "whisper, sound, reason",
+    [
+        # live meeting test 2026-11-01: real speech the gate dropped
+        # «least privilege»: SOUND also spells the left-out Latin words
+        ("Лист List Privilege.", "ліст привіледж", GATE_AGREE),
+        # «Щодо інфраструктури...»: rt-phonetic heard 3 letters of a long unit
+        ("Сіду до infrastruktурної вирішення.", "сер", GATE_SPARSE_SOUND),
+        # ... while the hallucinations of the same day still drop
+        ("Дякую.", "", GATE_NO_WORD),
+        ("Дякую.", "дебоб", GATE_DISAGREE),
+        ("Наступного!", "двечна", GATE_DISAGREE),
+        ("Цікавий чек!", "сину за", GATE_DISAGREE),
+        ("Все, випадається.", "цро фолукугей", GATE_DISAGREE),
+        # a swapped Cyrillic phrase next to a Latin term is still a swap
+        ("Привіт світ, Docker працює", "добрий ранок докер стоїть", GATE_DISAGREE),
+        # a long swapped phrase with a full SOUND is not sparse
+        (
+            "Сьогодні ми обговоримо нову архітектуру",
+            "вчора вони купили старий будинок",
+            GATE_DISAGREE,
+        ),
+    ],
+)
+def test_gate_live_2026_11_01_meeting(whisper, sound, reason):
+    assert gate_reason(whisper, sound, "uk") == reason
 
 
 def test_letters_drop_case_spaces_punctuation_digits_apostrophes():

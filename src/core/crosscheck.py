@@ -22,6 +22,16 @@ or confidently put a wrong word in. Two pieces of logic live here, both pure:
   2026-11-01.md): on the owner's 39 recorded units the gate wrongly dropped
   0, it was empty on 5/5 silence/noise clips and dropped 66/66 swapped
   phrases (FLEURS).
+  Two live misses of 2026-11-01 (meeting test, real speech dropped):
+  whisper «Лист List Privilege.» vs SOUND «ліст привіледж» - SOUND also
+  spells the left-out Latin words, which pulled the ratio down; with Latin
+  words in the unit the score is how much of whisper's countable letters
+  SOUND contains (``contained``), not the symmetric ratio. And whisper
+  «Сіду до infrastruktурної вирішення.» vs SOUND «сер»: rt-phonetic heard
+  almost nothing of a long unit - no evidence, the unit passes
+  (``sparse_sound``) when whisper has ``GATE_SPARSE_MIN_LETTERS``+ letters
+  and SOUND fewer than ``GATE_SPARSE_SHARE`` of them; the hallucinations
+  the gate drops are short stock phrases («Дякую.», «Наступного!»).
 - ``Aligned``: whisper word times + the phonetic words of the unit on the
   stream timeline, so a unit split into several LLM requests
   (``words_per_request``) cuts the transcript at the same moment.
@@ -40,6 +50,11 @@ from typing import Optional, Sequence
 GATE_MIN_SIMILARITY = 0.4
 # fewer countable whisper letters than this: no ratio, the unit passes
 GATE_MIN_LETTERS = 4
+# SOUND with fewer letters than this share of whisper's countable letters,
+# for a whisper unit of at least GATE_SPARSE_MIN_LETTERS letters: the
+# phonetic model missed the audio - the unit passes (sparse_sound)
+GATE_SPARSE_MIN_LETTERS = 15
+GATE_SPARSE_SHARE = 0.25
 # gate_reason values: the unit is dropped ...
 GATE_NO_WORD = "no_word"
 GATE_DISAGREE = "disagree"
@@ -49,6 +64,7 @@ GATE_DROPS = (GATE_NO_WORD, GATE_DISAGREE)
 GATE_AGREE = "agree"
 GATE_FOREIGN_TERMS = "foreign_terms"
 GATE_SHORT_WORDS = "short_words"
+GATE_SPARSE_SOUND = "sparse_sound"
 
 # alphabet of a phonetic model per language; a language missing here has no
 # script rule (every whisper word counts)
@@ -83,12 +99,26 @@ def countable_words(whisper: str, language: Optional[str]) -> list[str]:
 
 def similarity(whisper: str, sound: str, language: Optional[str]) -> Optional[float]:
     """difflib ratio of whisper's countable letters and the transcript's
-    letters; None = whisper has fewer than GATE_MIN_LETTERS such letters
-    (no evidence either way)."""
-    w = letters(" ".join(countable_words(whisper, language)))
+    letters - or, when whisper has left-out words (another script, which
+    SOUND spells by sound too), the share of whisper's countable letters
+    SOUND contains; None = whisper has fewer than GATE_MIN_LETTERS such
+    letters (no evidence either way)."""
+    countable = countable_words(whisper, language)
+    w = letters(" ".join(countable))
     if len(w) < GATE_MIN_LETTERS:
         return None
-    return SequenceMatcher(None, w, letters(sound), autojunk=False).ratio()
+    matcher = SequenceMatcher(None, w, letters(sound), autojunk=False)
+    if len(countable) < len(words(whisper)):
+        return sum(b.size for b in matcher.get_matching_blocks()) / len(w)
+    return matcher.ratio()
+
+
+def sparse_sound(whisper: str, sound: str, language: Optional[str]) -> bool:
+    """SOUND has too few letters for a long whisper unit to be evidence."""
+    w = letters(" ".join(countable_words(whisper, language)))
+    return len(w) >= GATE_SPARSE_MIN_LETTERS and len(
+        letters(sound)
+    ) < GATE_SPARSE_SHARE * len(w)
 
 
 def gate_reason(whisper: str, sound: str, language: Optional[str]) -> str:
@@ -97,12 +127,19 @@ def gate_reason(whisper: str, sound: str, language: Optional[str]) -> str:
     GATE_NO_WORD: the transcript has no letter (heard silence/noise).
     GATE_DISAGREE: similarity < GATE_MIN_SIMILARITY. Passed: GATE_AGREE,
     GATE_FOREIGN_TERMS (only words the ``language`` model cannot write),
-    GATE_SHORT_WORDS (too few whisper letters to compare)."""
+    GATE_SHORT_WORDS (too few whisper letters to compare), GATE_SPARSE_SOUND
+    (SOUND heard too little of a long unit to disagree)."""
     if not letters(sound):
         return GATE_NO_WORD
     share = similarity(whisper, sound, language)
     if share is not None:
-        return GATE_AGREE if share >= GATE_MIN_SIMILARITY else GATE_DISAGREE
+        if share >= GATE_MIN_SIMILARITY:
+            return GATE_AGREE
+        return (
+            GATE_SPARSE_SOUND
+            if sparse_sound(whisper, sound, language)
+            else (GATE_DISAGREE)
+        )
     if words(whisper) and not countable_words(whisper, language):
         return GATE_FOREIGN_TERMS
     return GATE_SHORT_WORDS
