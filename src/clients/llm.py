@@ -119,7 +119,6 @@ class LlmClient:
         errors are raised to the caller."""
         s = self._settings
         body = {
-            "model": s.model,
             "messages": [{"role": "user", "content": "Hi"}],
             "max_tokens": 1,
             "temperature": 0,
@@ -240,8 +239,8 @@ class LlmClient:
 
     def _complete_stream(self, messages: list, chunk: str) -> Iterator[str]:
         s = self._settings
+        # no "model": the worker translates with its loaded model (llm_worker.py)
         body = {
-            "model": s.model,
             "messages": messages,
             "temperature": s.temperature,
             "max_tokens": min(s.max_tokens_cap, 32 + 3 * len(chunk.split())),

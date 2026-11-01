@@ -92,7 +92,7 @@ def test_llm_request_body():
     assert b["chat_template_kwargs"] == {"enable_thinking": False}
     assert (
         b["max_tokens"] == 32 + 3 * 2
-        and b["model"] == "local"
+        and "model" not in b  # the worker ignores it: its loaded model translates
         and b["temperature"] == 0.1
     )
 
@@ -373,3 +373,98 @@ def test_llm_status_unreachable_never_invalidates():
 
 def test_llm_base_url_property():
     assert llm(lambda r: ok("x")).base_url == "http://llm1"
+
+
+def _worker(handler):
+    from src.clients.llm_worker import LlamaWorkerClient
+
+    return LlamaWorkerClient(
+        "http://w:8080",
+        credential=Credential("sha256:abc"),
+        transport=httpx.MockTransport(handler),
+    )
+
+
+def test_llm_worker_lists_model_files_and_status():
+    seen = []
+
+    def handler(req):
+        seen.append((req.method, req.url.path, req.headers["authorization"]))
+        if req.url.path == "/models":
+            return httpx.Response(
+                200, json={"models": [{"name": "a.gguf", "size_bytes": 1}]}
+            )
+        return httpx.Response(
+            200,
+            json={
+                "model": {
+                    "loaded": True,
+                    "path": "hf:IndexTeam/Index-Translate-2B-GGUF/x.Q8_0.gguf",
+                    "source_type": "huggingface",
+                    "load_error": None,
+                },
+                "app_sessions": 2,
+                "django_polling": "paused",
+            },
+        )
+
+    w = _worker(handler)
+    assert w.worker_models() == [{"name": "a.gguf", "size_bytes": 1}]
+    st = w.worker_status()
+    assert (st.loaded, st.name, st.source, st.app_sessions) == (
+        True,
+        "x.Q8_0.gguf",
+        "huggingface",
+        2,
+    )
+    assert seen == [
+        ("GET", "/models", "Token sha256:abc"),
+        ("GET", "/status", "Token sha256:abc"),
+    ]
+
+
+def test_llm_worker_load_local_or_hf_and_unload():
+    seen = []
+
+    def handler(req):
+        seen.append((req.method, req.url.path, dict(req.url.params)))
+        if req.method == "DELETE":
+            return httpx.Response(200, json={"status": "no_model_loaded"})
+        return httpx.Response(200, json={"status": "loaded", "model": "m"})
+
+    w = _worker(handler)
+    w.load_worker_model(model_name="a.gguf")
+    w.load_worker_model(repo_id="IndexTeam/Index-Translate-2B-GGUF", filename="f.gguf")
+    w.load_worker_model(repo_id="r/r")
+    assert w.unload_worker_model() == {"status": "no_model_loaded"}
+    assert seen == [
+        ("POST", "/models/load", {"model_name": "a.gguf"}),
+        (
+            "POST",
+            "/models/load",
+            {"repo_id": "IndexTeam/Index-Translate-2B-GGUF", "filename": "f.gguf"},
+        ),
+        ("POST", "/models/load", {"repo_id": "r/r"}),
+        ("DELETE", "/models/unload", {}),
+    ]
+    with pytest.raises(ValueError):
+        w.load_worker_model(model_name="a", repo_id="r/r")
+    with pytest.raises(ValueError):
+        w.load_worker_model()
+
+
+def test_llm_worker_load_error_is_explicit():
+    def handler(req):
+        return httpx.Response(500, json={"detail": "Failed to load model: OOM"})
+
+    with pytest.raises(ServiceError) as e:
+        _worker(handler).load_worker_model(model_name="a.gguf")
+    assert e.value.kind == "http" and "Failed to load model: OOM" in str(e.value)
+
+
+def test_llm_worker_status_without_model_is_an_error():
+    def handler(req):
+        return httpx.Response(200, json={"service": "healthy"})
+
+    with pytest.raises(ServiceError):
+        _worker(handler).worker_status()

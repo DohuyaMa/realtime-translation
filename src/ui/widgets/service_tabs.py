@@ -11,6 +11,7 @@ Two kinds of settings, two owners:
 from __future__ import annotations
 
 import threading
+import time
 from html import escape
 from typing import Any, Callable, Dict, List, Optional
 
@@ -48,9 +49,11 @@ from ...core.prompt import (
     system_prompt_errors,
     template_errors,
 )
+from ...clients.llm_worker import WorkerModel
 from ...clients.model_status import ModelStatus, parse_status
 from .model_state import (
     ERROR_STYLE,
+    WARN_STYLE,
     format_dropped,
     format_memory,
     format_model_html,
@@ -785,13 +788,313 @@ class TtsTab(QWidget):
         }
 
 
+# The worker answers POST /models/load only once the model is in memory (a
+# Hugging Face model is downloaded first, no progress is published).
+WORKER_LOAD_TIMEOUT_S = APPLY_TIMEOUT_S
+
+WORKER_SHARED_WARNING = (
+    "Воркер спільний: ця модель перекладає і задачі черги Django на цьому"
+    " вузлі. Поки app-сесія перекладача жива, воркер не бере задач черги;"
+    " після неї черга працює на моделі, завантаженій тут. Задачі з"
+    " закріпленою моделлю перемикають модель самі, а після простою воркер"
+    " вивантажує модель і повертається до своєї типової (Nix)."
+)
+
+
+def format_worker_model_html(m: WorkerModel) -> str:
+    """'завантажена: X (local)' / 'не завантажена (наступна: X)' + error."""
+    source = {"local": "локальний файл", "huggingface": "Hugging Face"}.get(
+        m.source, m.source
+    )
+    if m.loaded:
+        text = f"модель воркера: <b>{escape(m.name)}</b> ({escape(source)}) - готова"
+    else:
+        nxt = f" (при першому запиті завантажиться {m.name})" if m.name else ""
+        text = "модель воркера: не завантажена" + escape(nxt)
+    queue = {"paused": "на паузі (app-сесія)", "active": "бере задачі"}.get(
+        m.django_polling or "", m.django_polling or "-"
+    )
+    text += escape(f"; app-сесій: {m.app_sessions}; черга Django: {queue}")
+    if m.error:
+        text += (
+            "<br>"
+            + f'<span style="{ERROR_STYLE}">'
+            + escape(f"помилка завантаження: {m.error}")
+            + "</span>"
+        )
+    return text
+
+
+class WorkerModelPanel(QGroupBox):
+    """The model ACTUALLY in the chosen llama worker (``GET /status``), its
+    model files (``GET /models``) and explicit load (a local file or a
+    Hugging Face repo + file) / unload. The ``model`` of a chat request is
+    ignored by the worker: the model loaded here is what translates."""
+
+    def __init__(
+        self,
+        endpoint: Callable[[], Any],
+        client_factory: Optional[Callable[[Any], Any]],
+        bg: Background,
+        parent=None,
+    ):
+        super().__init__("Модель воркера (для всіх його клієнтів)", parent)
+        self._endpoint = endpoint
+        self._factory = client_factory
+        self._bg = bg
+        self.state: Optional[WorkerModel] = None
+        self._in_flight: Optional[str] = None  # load | unload | refresh
+        self._polling = False
+        self._started = 0.0
+        self._what = ""
+        outer = QVBoxLayout(self)
+        self.warning = QLabel(WORKER_SHARED_WARNING)
+        self.warning.setWordWrap(True)
+        self.warning.setStyleSheet(WARN_STYLE)
+        outer.addWidget(self.warning)
+        self.model_state = QLabel(
+            "модель воркера: стан невідомий (натисніть «Оновити»)"
+        )
+        self.model_state.setTextFormat(Qt.TextFormat.RichText)
+        self.model_state.setWordWrap(True)
+        outer.addWidget(self.model_state)
+        local = QHBoxLayout()
+        self.local_model = QComboBox()
+        self.local_model.setToolTip("Файли моделей у MODEL_DIR воркера (GET /models)")
+        local.addWidget(QLabel("Файл на воркері:"))
+        local.addWidget(self.local_model, 1)
+        self.refresh_button = QPushButton("Оновити")
+        self.refresh_button.setToolTip("Прочитати стан і список моделей воркера")
+        self.refresh_button.clicked.connect(self.refresh)
+        local.addWidget(self.refresh_button)
+        outer.addLayout(local)
+        hf = QHBoxLayout()
+        self.hf_repo = QLineEdit()
+        self.hf_repo.setPlaceholderText(
+            "Hugging Face repo, напр. IndexTeam/Index-Translate-2B-GGUF"
+        )
+        self.hf_file = QLineEdit()
+        self.hf_file.setPlaceholderText("файл .gguf (порожньо - перший .gguf)")
+        hf.addWidget(QLabel("або з HF:"))
+        hf.addWidget(self.hf_repo, 2)
+        hf.addWidget(self.hf_file, 1)
+        outer.addLayout(hf)
+        actions = QHBoxLayout()
+        self.load_model_button = QPushButton("Завантажити модель")
+        self.load_model_button.setToolTip(
+            "HF repo заповнено - завантажити з Hugging Face у MODEL_DIR і в"
+            " пам'ять; інакше - обраний файл воркера"
+        )
+        self.load_model_button.clicked.connect(self.load_model)
+        self.unload_model_button = QPushButton("Вивантажити модель")
+        self.unload_model_button.setToolTip("Звільнити RAM/VRAM, які тримає модель")
+        self.unload_model_button.clicked.connect(self.unload_model)
+        actions.addWidget(self.load_model_button)
+        actions.addWidget(self.unload_model_button)
+        actions.addStretch()
+        outer.addLayout(actions)
+        self.status = QLabel("" if endpoint() else "воркерів не знайдено")
+        self.status.setWordWrap(True)
+        outer.addWidget(self.status)
+        self.poll_timer = QTimer(self)
+        self.poll_timer.setInterval(STATE_POLL_MS)
+        self.poll_timer.timeout.connect(self._tick)
+        self.local_model.currentIndexChanged.connect(lambda _i: self._update_buttons())
+        self.hf_repo.textChanged.connect(lambda _t: self._update_buttons())
+        self._update_buttons()
+
+    def busy(self) -> bool:
+        return self._in_flight is not None
+
+    def clear(self) -> None:
+        """The chosen worker changed: forget the other worker's state."""
+        if self.busy():
+            return
+        self.state = None
+        self.local_model.clear()
+        self.model_state.setText("модель воркера: стан невідомий (натисніть «Оновити»)")
+        self.status.setText("")
+        self._update_buttons()
+
+    def _update_buttons(self) -> None:
+        usable = self._endpoint() is not None and self._factory is not None
+        idle = usable and not self.busy()
+        has_source = bool(self.hf_repo.text().strip()) or self.local_model.count() > 0
+        self.refresh_button.setEnabled(idle)
+        self.load_model_button.setEnabled(idle and has_source)
+        self.unload_model_button.setEnabled(
+            idle and bool(self.state and self.state.loaded)
+        )
+        if self._in_flight in ("load", "unload"):
+            self.poll_timer.start()
+        else:
+            self.poll_timer.stop()
+
+    def _client(self):
+        endpoint = self._endpoint()
+        if endpoint is None or self._factory is None:
+            self.status.setText("воркер недоступний")
+            return None, None
+        return endpoint, self._factory(endpoint)
+
+    # -- state / model files ------------------------------------------------
+
+    def refresh(self, note: Optional[str] = None) -> None:
+        """GET /status + GET /models of the chosen worker; ``note`` (the
+        result of a load/unload) stays in the status line."""
+        endpoint, client = self._client()
+        if client is None or self.busy():
+            return
+        self._in_flight = "refresh"
+        self.status.setText(f"читаю стан воркера {endpoint.node}…")
+        self._update_buttons()
+
+        def fetch():
+            try:
+                return client.worker_status(), client.worker_models()
+            finally:
+                client.close()
+
+        def done(ok: bool, result: Any) -> None:
+            self._in_flight = None
+            if endpoint is self._endpoint():
+                if ok:
+                    self._show(*result)
+                    self.status.setText(note or f"{endpoint.node}: стан прочитано")
+                else:
+                    self._error(result)
+                    head = f"{note}; " if note else ""
+                    self.status.setText(f"{head}{endpoint.node}: {result}")
+            self._update_buttons()
+
+        self._bg.run(fetch, done)
+
+    def _show(self, state: WorkerModel, models: list) -> None:
+        self._set_state(state)
+        current = self.local_model.currentData() or state.name
+        self.local_model.clear()
+        for m in models:
+            name = str(m.get("name") or "")
+            if name:
+                size = m.get("size_bytes")
+                label = f"{name} ({_size(size)})" if size else name
+                self.local_model.addItem(label, name)
+        idx = self.local_model.findData(current)
+        self.local_model.setCurrentIndex(max(idx, 0))
+
+    def _set_state(self, state: WorkerModel) -> None:
+        self.state = state
+        self.model_state.setText(format_worker_model_html(state))
+
+    def _error(self, error: Any) -> None:
+        self.state = None
+        self.model_state.setText(
+            f'<span style="{ERROR_STYLE}">'
+            + escape(f"стан воркера недоступний: {error}")
+            + "</span>"
+        )
+
+    def _tick(self) -> None:
+        """Poll /status while a load/unload is out (the worker publishes no
+        download progress: elapsed time + what is in memory now)."""
+        elapsed = int(time.monotonic() - self._started)
+        self.status.setText(f"{self._what}… {elapsed} с")
+        endpoint, client = self._client()
+        if client is None or self._polling:
+            if client is not None:
+                client.close()
+            return
+        self._polling = True
+
+        def fetch():
+            try:
+                return client.worker_status()
+            finally:
+                client.close()
+
+        def done(ok: bool, result: Any) -> None:
+            self._polling = False
+            if endpoint is not self._endpoint() or not self.busy():
+                return
+            if ok:
+                self._set_state(result)
+            else:
+                self._error(result)
+
+        self._bg.run(fetch, done)
+
+    # -- load / unload -----------------------------------------------------
+
+    def load_model(self) -> None:
+        """POST /models/load: the HF repo (+ file) if given, else the chosen
+        file of MODEL_DIR."""
+        repo = self.hf_repo.text().strip()
+        if repo:
+            kwargs = {"repo_id": repo, "filename": self.hf_file.text().strip() or None}
+            what = f"{repo}/{kwargs['filename'] or '(перший .gguf)'}"
+            self._what = f"завантаження {what} з Hugging Face і в пам'ять"
+        else:
+            name = self.local_model.currentData()
+            if not name:
+                self.status.setText("оберіть файл моделі або вкажіть HF repo")
+                return
+            kwargs, what = {"model_name": name}, name
+            self._what = f"завантаження {name} в пам'ять"
+        self._action(
+            "load",
+            lambda c: c.load_worker_model(timeout_s=WORKER_LOAD_TIMEOUT_S, **kwargs),
+            lambda r: f"завантажено: {r.get('model') or what}",
+        )
+
+    def unload_model(self) -> None:
+        """DELETE /models/unload."""
+        self._what = "вивантаження моделі"
+        self._action(
+            "unload",
+            lambda c: c.unload_worker_model(timeout_s=MODEL_ACTION_TIMEOUT_S),
+            lambda r: (
+                "модель вивантажено"
+                if r.get("status") == "unloaded"
+                else f"воркер: {r.get('message') or r.get('status')}"
+            ),
+        )
+
+    def _action(self, action: str, call, describe) -> None:
+        endpoint, client = self._client()
+        if client is None or self.busy():
+            return
+        self._in_flight = action
+        self._started = time.monotonic()
+        self.status.setText(f"{self._what}…")
+        self._update_buttons()
+
+        def post():
+            try:
+                return call(client)
+            finally:
+                client.close()
+
+        def done(ok: bool, result: Any) -> None:
+            self._in_flight = None
+            if ok:
+                note = f"{endpoint.node}: {describe(result)}"
+            else:
+                what = "завантажити" if action == "load" else "вивантажити"
+                note = f"{endpoint.node}: не вдалося {what} модель: {result}"
+            self.status.setText(note)
+            self._update_buttons()
+            if endpoint is self._endpoint():
+                self.refresh(note)
+
+        self._bg.run(post, done)
+
+
 class LlmTab(QWidget):
     """Translation prompt/template and request parameters (per user)."""
 
     def __init__(
         self,
         settings: EdgeSettings,
-        services=(),
         endpoints=(),
         client_factory: Optional[Callable[[Any], Any]] = None,
         bg: Optional[Background] = None,
@@ -815,19 +1118,10 @@ class LlmTab(QWidget):
             if self.use.findData(pinned) < 0:
                 self.use.addItem(f"{pinned} (недоступний)", pinned)
             self.use.setCurrentIndex(self.use.findData(pinned))
-        self.models_button = QPushButton("Моделі вузла")
-        self.models_button.setEnabled(
-            bool(self.endpoints) and client_factory is not None
+        self.worker_model = WorkerModelPanel(
+            self.model_endpoint, client_factory, self._bg
         )
-        self.models_button.clicked.connect(self.load_models)
-        self.models_status = QLabel("")
-        self.models_status.setWordWrap(True)
-        self.model = QComboBox()
-        self.model.setEditable(True)
-        names = [m for e in services if e.kind == "llm" for m in e.models]
-        for name in dict.fromkeys(["local", *names, llm.model]):
-            self.model.addItem(name)
-        self.model.setCurrentText(llm.model)
+        self.use.currentIndexChanged.connect(lambda _i: self.worker_model.clear())
         self.system_prompt = QPlainTextEdit(llm.system_prompt)
         self.system_prompt.setFixedHeight(110)
         self.user_template = QPlainTextEdit(llm.user_template)
@@ -877,11 +1171,7 @@ class LlmTab(QWidget):
         self.preview.setFixedHeight(150)
         form.addRow(self.notice)
         form.addRow("Воркер (вузол):", self.use)
-        model_row = QHBoxLayout()
-        model_row.addWidget(self.model, 1)
-        model_row.addWidget(self.models_button)
-        form.addRow("Модель:", model_row)
-        form.addRow("", self.models_status)
+        form.addRow(self.worker_model)
         form.addRow(QLabel(PROMPT_VARIABLES_HELP))
         plain = QGroupBox("Без Vosk (лише текст whisper)")
         plain_form = QFormLayout(plain)
@@ -914,47 +1204,14 @@ class LlmTab(QWidget):
             w.textChanged.connect(self.update_preview)
         self.words_per_request.valueChanged.connect(self.update_preview)
         self.update_preview()
-        if "llm.model" in settings.managed:
-            self.model.setEnabled(False)
-            self.model.setToolTip("Задано через RT_EDGE_* (лише читання)")
 
     def model_endpoint(self):
-        """Chosen worker, or the first one (auto order) for the model list."""
+        """Chosen worker, or the first one (auto order) for its model."""
         node = self.use.currentData()
         for e in self.endpoints:
             if node is None or e.node == node:
                 return e
         return None
-
-    def load_models(self) -> None:
-        """GET /v1/models of the chosen worker (its discovered token)."""
-        endpoint = self.model_endpoint()
-        if endpoint is None or self._factory is None:
-            self.models_status.setText("воркер недоступний")
-            return
-        client = self._factory(endpoint)
-        self.models_status.setText(f"запит моделей у {endpoint.node}…")
-
-        def fetch():
-            try:
-                return client.models()
-            finally:
-                client.close()
-
-        def done(ok: bool, result: Any) -> None:
-            if not ok:
-                self.models_status.setText(f"{endpoint.node}: {result}")
-                return
-            items = result.get("data") or result.get("models") or []
-            ids = [str(m.get("id")) for m in items if m.get("id")]
-            current = self.model.currentText()
-            self.model.clear()
-            for name in dict.fromkeys(["local", *ids, current]):
-                self.model.addItem(name)
-            self.model.setCurrentText(current)
-            self.models_status.setText(f"{endpoint.node}: {', '.join(ids) or '-'}")
-
-        self._bg.run(fetch, done)
 
     def update_preview(self) -> None:
         """Rendered requests for PREVIEW_SAMPLE (or the template errors)."""
@@ -1008,7 +1265,6 @@ class LlmTab(QWidget):
     def values(self) -> Dict[str, Any]:
         return {
             "services.use.llm": self.use.currentData(),
-            "services.llm.model": self.model.currentText().strip(),
             "services.llm.system_prompt": self.system_prompt.toPlainText().strip(),
             "services.llm.user_template": self.user_template.toPlainText().strip(),
             "services.llm.check_system_prompt": (

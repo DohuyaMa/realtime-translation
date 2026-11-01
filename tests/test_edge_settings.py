@@ -96,3 +96,21 @@ def test_record_session_flag_from_config_and_env():
     assert env.record_session is True and "record_session" in env.managed
     with pytest.raises(ValueError):
         resolve_edge_settings({"services": {"record_session": "maybe"}}, {})
+
+
+def test_llm_model_setting_is_ignored_visibly():
+    """The llama worker ignores a chat request's model: the edge has no
+    model setting any more; an old key / env is reported, not used."""
+    from loguru import logger
+
+    seen = []
+    sink = logger.add(lambda m: seen.append(str(m)), level="WARNING")
+    try:
+        s = resolve_edge_settings(
+            {"services": {"llm": {"model": "m"}}}, {"RT_EDGE_LLM_MODEL": "m"}
+        )
+    finally:
+        logger.remove(sink)
+    assert not hasattr(s.llm, "model")
+    assert "llm.model" not in s.managed
+    assert any("services.llm.model / RT_EDGE_LLM_MODEL ignored" in m for m in seen)

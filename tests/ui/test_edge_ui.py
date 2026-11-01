@@ -214,11 +214,11 @@ def test_managed_not_saved(app, cfg, monkeypatch):
 
     monkeypatch.setenv("RT_EDGE_LOCAL_ASR_URL", "http://env:1")
     dlg = SettingsDialog(current_settings(), services=[])
-    dlg.llm_tab.model.setCurrentText("m2")
+    dlg.llm_tab.context_pairs.setValue(7)
     dlg.accept()
     saved = _saved(cfg)["services"]
     assert "asr" not in (saved.get("local") or {})
-    assert saved["llm"]["model"] == "m2"
+    assert saved["llm"]["context_pairs"] == 7
 
 
 def test_main_window_constructs(app, cfg):
@@ -763,29 +763,54 @@ def test_llm_tab_shows_legacy_template_notice(app):
     assert "old {lang}/{text} syntax" in tab.notice.text()
 
 
-def test_llm_remote_worker_selectable_with_its_models(app, cfg):
-    """Owner bug 2026-10-31: the translation model/worker choice was greyed
-    out (HM always exported RT_EDGE_LLM_MODEL). Without env it is editable,
-    remote workers are listed and their models come from that worker."""
+class _FakeWorker:
+    """llama worker admin client double: GET /status, GET /models,
+    POST /models/load, DELETE /models/unload (llm_worker.LlamaWorkerClient)."""
+
+    def __init__(self, e, calls, state):
+        self.e, self.calls, self.state = e, calls, state
+
+    def worker_status(self):
+        from src.clients.llm_worker import parse_worker_status
+
+        self.calls.append(("status", self.e.node))
+        return parse_worker_status(
+            {
+                "model": dict(self.state),
+                "app_sessions": 1,
+                "django_polling": "paused",
+            }
+        )
+
+    def worker_models(self):
+        self.calls.append(("models", self.e.node, self.e.credential.value))
+        return [{"name": "Qwen3.5-4B.Q4_K_M.gguf", "size_bytes": 2_700_000_000}]
+
+    def load_worker_model(self, *, timeout_s=None, **kwargs):
+        self.calls.append(("load", self.e.node, kwargs))
+        if kwargs.get("repo_id") == "bad/repo":
+            from src.clients import ServiceError
+
+            raise ServiceError("llm", "http", "HTTP 500: Failed to load model: 404")
+        name = kwargs.get("model_name") or kwargs["filename"]
+        path = name if kwargs.get("model_name") else f"hf:{kwargs['repo_id']}/{name}"
+        source = "local" if kwargs.get("model_name") else "huggingface"
+        self.state.update(loaded=True, path=path, source_type=source, load_error=None)
+        return {"status": "loaded", "model": path}
+
+    def unload_worker_model(self, *, timeout_s=None):
+        self.calls.append(("unload", self.e.node))
+        self.state["loaded"] = False
+        return {"status": "unloaded", "model": self.state["path"]}
+
+    def close(self):
+        pass
+
+
+def _worker_tab(calls, state):
+    from src.clients import Credential, Endpoint
     from src.ui.widgets.service_tabs import Background, LlmTab
     from src.ui.widgets.settings_dialog import current_settings
-
-    s = current_settings()
-    assert "llm.model" not in s.managed
-    asked = []
-
-    class Worker:
-        def __init__(self, e):
-            self.e = e
-
-        def models(self):
-            asked.append((self.e.node, self.e.credential.value))
-            return {"data": [{"id": "Qwen3.5-4B.Q4_K_M.gguf"}]}
-
-        def close(self):
-            pass
-
-    from src.clients import Credential, Endpoint
 
     eps = [
         Endpoint(
@@ -795,29 +820,120 @@ def test_llm_remote_worker_selectable_with_its_models(app, cfg):
             "llm", "SKTOP-NOTE27-NIXOS", "http://100.87.250.83:8080", Credential("t-r")
         ),
     ]
-    tab = LlmTab(s, (), eps, Worker, Background(sync=True))
-    assert tab.model.isEnabled() and tab.use.isEnabled()
-    assert tab.models_button.isEnabled()
+    return LlmTab(
+        current_settings(),
+        eps,
+        lambda e: _FakeWorker(e, calls, state),
+        Background(sync=True),
+    )
+
+
+def test_llm_tab_worker_choice_and_its_model_files(app, cfg):
+    """Remote workers are listed; the model panel reads GET /status and
+    GET /models of the chosen worker with that worker's token."""
+    calls = []
+    state = {"loaded": True, "path": "Qwen3.5-4B.Q4_K_M.gguf", "source_type": "local"}
+    tab = _worker_tab(calls, state)
     assert [tab.use.itemData(i) for i in range(tab.use.count())] == [
         None,
         "cyborg",
         "SKTOP-NOTE27-NIXOS",
     ]
+    panel = tab.worker_model
+    assert "черги Django" in panel.warning.text()  # shared warning
+    assert not panel.load_model_button.isEnabled()  # nothing read yet
     tab.use.setCurrentIndex(2)
-    tab.load_models()
-    assert asked == [("SKTOP-NOTE27-NIXOS", "t-r")]
-    tab.model.setCurrentText("Qwen3.5-4B.Q4_K_M.gguf")
-    v = tab.values()
-    assert v["services.use.llm"] == "SKTOP-NOTE27-NIXOS"
-    assert v["services.llm.model"] == "Qwen3.5-4B.Q4_K_M.gguf"
+    panel.refresh()
+    assert ("models", "SKTOP-NOTE27-NIXOS", "t-r") in calls
+    assert panel.local_model.currentData() == "Qwen3.5-4B.Q4_K_M.gguf"
+    assert "2.7 GB" in panel.local_model.currentText()
+    text = panel.model_state.text()
+    assert "Qwen3.5-4B.Q4_K_M.gguf" in text and "готова" in text
+    assert "черга Django: на паузі" in text
+    assert panel.load_model_button.isEnabled()
+    assert panel.unload_model_button.isEnabled()
+    assert tab.values()["services.use.llm"] == "SKTOP-NOTE27-NIXOS"
+    assert not any(k == "services.llm.model" for k in tab.values())
+    tab.use.setCurrentIndex(1)  # another worker: its state is unknown
+    assert panel.local_model.count() == 0 and "невідомий" in panel.model_state.text()
 
 
-def test_llm_model_read_only_only_when_set_by_env(app):
-    from src.ui.widgets.service_tabs import LlmTab
+def test_llm_tab_loads_local_and_hf_models_and_unloads(app, cfg):
+    calls = []
+    state = {"loaded": False, "path": "Qwen3.5-4B.Q4_K_M.gguf", "source_type": "local"}
+    tab = _worker_tab(calls, state)
+    panel = tab.worker_model
+    panel.refresh()
+    assert "не завантажена" in panel.model_state.text()
+    assert not panel.unload_model_button.isEnabled()
+    panel.load_model()
+    assert ("load", "cyborg", {"model_name": "Qwen3.5-4B.Q4_K_M.gguf"}) in calls
+    assert "завантажено: Qwen3.5-4B.Q4_K_M.gguf" in panel.status.text()
+    panel.hf_repo.setText("IndexTeam/Index-Translate-2B-GGUF")
+    panel.hf_file.setText("Index-Translate-2B.Q8_0.gguf")
+    panel.load_model()
+    assert calls[-3][0] == "load" and calls[-3][2] == {
+        "repo_id": "IndexTeam/Index-Translate-2B-GGUF",
+        "filename": "Index-Translate-2B.Q8_0.gguf",
+    }
+    assert "Index-Translate-2B.Q8_0.gguf" in panel.model_state.text()
+    assert "Hugging Face" in panel.model_state.text()
+    assert not panel.busy() and not panel.poll_timer.isActive()
+    panel.unload_model()
+    assert "модель вивантажено" in panel.status.text()
+    assert "не завантажена" in panel.model_state.text()
 
-    s = resolve_edge_settings({}, {"RT_EDGE_LLM_MODEL": "m"})
-    tab = LlmTab(s)
-    assert not tab.model.isEnabled() and tab.use.isEnabled()
+
+def test_llm_tab_load_error_is_shown(app, cfg):
+    calls = []
+    state = {
+        "loaded": False,
+        "path": "Qwen3.5-4B.Q4_K_M.gguf",
+        "source_type": "local",
+        "load_error": "out of memory",
+    }
+    tab = _worker_tab(calls, state)
+    panel = tab.worker_model
+    panel.refresh()
+    assert "помилка завантаження: out of memory" in panel.model_state.text()
+    panel.hf_repo.setText("bad/repo")
+    panel.load_model()
+    assert "не вдалося завантажити модель" in panel.status.text()
+    assert "Failed to load model: 404" in panel.status.text()
+    assert panel.load_model_button.isEnabled()  # can retry
+
+
+def test_llm_tab_polls_status_while_loading(app, cfg):
+    """POST /models/load blocks until the model is in memory (no progress
+    from the worker): elapsed time + polled /status meanwhile."""
+    from src.ui.widgets.service_tabs import Background
+
+    calls = []
+    state = {"loaded": True, "path": "a.gguf", "source_type": "local"}
+    tab = _worker_tab(calls, state)
+    panel = tab.worker_model
+    panel.refresh()
+    pending = []
+
+    class Deferred(Background):
+        def run(self, fn, cb):
+            pending.append((fn, cb))
+
+    panel._bg = Deferred(sync=True)
+    panel.load_model()
+    assert panel.busy() and panel.poll_timer.isActive()
+    assert not panel.load_model_button.isEnabled()
+    assert "завантаження Qwen3.5-4B.Q4_K_M.gguf" in panel.status.text()
+    state["loaded"] = False  # the worker dropped the old model, loads the new
+    panel._tick()
+    fn, cb = pending.pop()
+    cb(True, fn())
+    assert "не завантажена" in panel.model_state.text()
+    fn, cb = pending.pop()  # the load answers
+    panel._bg = Background(sync=True)
+    cb(True, fn())
+    assert not panel.busy() and not panel.poll_timer.isActive()
+    assert "готова" in panel.model_state.text()
 
 
 def test_asr_tab_template_and_preview(app):
@@ -1103,12 +1219,12 @@ def test_save_values_persists_only_overrides(app, cfg):
         {
             "services.llm.temperature": default.llm.temperature,
             "services.llm.system_prompt": DEFAULT_SYSTEM_PROMPT,
-            "services.llm.model": "m2",
+            "services.llm.context_pairs": 7,
         }
     )
-    assert _saved(cfg) == {"services": {"llm": {"model": "m2"}}}
-    assert settings.llm.model == "m2"
-    save_values({"services.llm.model": default.llm.model})
+    assert _saved(cfg) == {"services": {"llm": {"context_pairs": 7}}}
+    assert settings.llm.context_pairs == 7
+    save_values({"services.llm.context_pairs": default.llm.context_pairs})
     assert _saved(cfg) == {}
 
 

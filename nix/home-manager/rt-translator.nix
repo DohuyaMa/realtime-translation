@@ -10,8 +10,7 @@ let
 
   csv = lib.concatStringsSep ",";
   edgeEnv =
-    lib.optionalAttrs (cfg.llm.model != null) { RT_EDGE_LLM_MODEL = cfg.llm.model; }
-    // lib.optionalAttrs (cfg.mode != null) { RT_EDGE_MODE = cfg.mode; }
+    lib.optionalAttrs (cfg.mode != null) { RT_EDGE_MODE = cfg.mode; }
     // lib.optionalAttrs (cfg.django.urls != [ ]) { RT_EDGE_DJANGO_URLS = csv cfg.django.urls; }
     // lib.optionalAttrs (cfg.django.tokenFile != null) { RT_EDGE_DJANGO_TOKEN_FILE = cfg.django.tokenFile; }
     // lib.optionalAttrs (cfg.local.llm != null) { RT_EDGE_LOCAL_LLM_URL = cfg.local.llm; }
@@ -23,6 +22,13 @@ let
   hasSource = kind: cfg.local.${kind} != null || cfg.django.urls != [ ];
 in
 {
+  # The llama worker ignores a chat request's `model`: it translates with the
+  # model loaded in it (chosen and loaded in the UI «Переклад» tab).
+  imports = [
+    (lib.mkRemovedOptionModule [ "rt-translator" "llm" "model" ]
+      "the worker translates with its loaded model; choose and load it in the «Переклад» tab")
+  ];
+
   options.rt-translator = {
     enable = mkEnableOption "real-time translator edge app";
     package = mkOption {
@@ -61,7 +67,6 @@ in
       example = [ "llm:cyborg" "asr:cyborg" "tts:sktop" ];
       description = "Discovered services the app may use, as <kind>:<node>; null = all (changeable in the UI unless set here).";
     };
-    llm.model = mkOption { type = types.nullOr types.str; default = null; description = "LLM model name; null = chosen in the UI (Переклад tab, default \"local\"). Set here it is read-only in the UI."; };
     autostart = mkOption { type = types.bool; default = true; description = "Start translator-ui with the graphical session."; };
     virtualSinks.enable = mkOption { type = types.bool; default = true; description = "Create the PipeWire devices rt_virtual_input (sink), rt_virtual_output (sink) and rt_virtual_mic (microphone carrying rt_virtual_output, for other apps)."; };
   };

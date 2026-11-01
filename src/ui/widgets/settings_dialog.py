@@ -270,11 +270,11 @@ def service_client_factory(kind: str, settings: EdgeSettings):
     """Endpoint -> client for the settings dialog (config, models, voices)."""
     from ...clients import client_factories
 
-    if kind == "llm":  # llama worker: GET /v1/models with its token
-        from ...clients import ServiceClient
+    if kind == "llm":  # llama worker: its model files, state, load/unload
+        from ...clients.llm_worker import LlamaWorkerClient
 
         t = settings.timeouts
-        return lambda e: ServiceClient(
+        return lambda e: LlamaWorkerClient(
             e.url,
             credential=e.credential,
             timeout_s=10.0,
@@ -337,7 +337,6 @@ class SettingsDialog(QDialog):
         )
         self.llm_tab = LlmTab(
             settings,
-            services,
             service_choices("llm", settings, services),
             service_client_factory("llm", settings),
             self.bg,

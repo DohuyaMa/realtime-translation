@@ -42,7 +42,6 @@ class ServiceEntry:
     url: str
     token: str
     tier: Optional[int] = None
-    models: tuple[str, ...] = ()
     healthy: bool = True
 
     @property
@@ -172,7 +171,6 @@ def parse(payload: Any) -> tuple[Optional[str], list[ServiceEntry]]:
                     url=str(d["url"]).rstrip("/"),
                     token=str(d.get("token") or ""),
                     tier=d.get("tier"),
-                    models=tuple(d.get("models") or ()),
                     healthy=bool(d.get("healthy", True)),
                 )
             )

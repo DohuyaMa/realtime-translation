@@ -40,7 +40,6 @@ services:
     speed: null                 # 0.25..4.0; null = service default
   llm:
     session_ttl_s: 30           # worker app-session ttl (heartbeat every ttl/3), 6..300
-    model: local
     max_tokens_cap: 512
     temperature: 0.1
     context_pairs: 3

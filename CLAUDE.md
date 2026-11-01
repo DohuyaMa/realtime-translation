@@ -40,7 +40,7 @@ Modes (`services.mode`): `transcribe` (stream units as text, ASR only), `transla
 | `src/core/runtime.py` | `EdgeSettings`: `RT_EDGE_*` env > `config.yml` > defaults |
 | `src/core/config.py` | `ConfigManager`: `~/.config/real-time-translator/config.yml` (keys: `config/default.yml`) |
 | `src/core/preflight/pipewire.py`, `src/audio/` | PipeWire virtual device check and routing (`pactl`); capture records the chosen source via `parec` (`PulseCapture`), playback goes to the chosen sink(s) via `pacat` (`play_to_sinks`); system defaults are never changed |
-| `src/ui/` | PySide6 widgets and Qt controller: settings dialog (`settings_dialog.py`: allow-list + per-kind instance choice `services.use`; `service_tabs.py`: ASR/Vosk/LLM/TTS tabs - per-user prompts/voice in config.yml, per-node tuning via `/config` + `/v1/models`), status panel with the instance chooser; kill switch (`DirectAdapter.standby/resume`) and the drawn tray icon (`widgets/tray_icon.py`) |
+| `src/ui/` | PySide6 widgets and Qt controller: settings dialog (`settings_dialog.py`: allow-list + per-kind instance choice `services.use`; `service_tabs.py`: ASR/Vosk/LLM/TTS tabs - per-user prompts/voice in config.yml, per-node tuning via `/config` + `/v1/models`; LLM tab: the llama worker's loaded model via `clients/llm_worker.py` - `GET /status`, `GET /models`, `POST /models/load`, `DELETE /models/unload`), status panel with the instance chooser; kill switch (`DirectAdapter.standby/resume`) and the drawn tray icon (`widgets/tray_icon.py`) |
 
 ### Ports
 
@@ -50,7 +50,7 @@ Modes (`services.mode`): `transcribe` (stream units as text, ASR only), `transla
 
 - `nix/packages/` - `rtSpeech.{asr,vosk,tts}.<variant>` bundles (variants cpu/gpu, ROCm for ASR, cpu only for vosk), exposed as `packages.rt-{asr,tts}-{cpu,gpu}`, `packages.rt-vosk-cpu` and `overlays.default`; `vosk.nix` packages the upstream libvosk wheel (not in nixpkgs);
 - `rt-edge` package (default, `nix run .`) - the edge UI;
-- `nix/home-manager/rt-translator.nix` - `homeManagerModules.rt-translator` (`rt-translator.*` options: django.{urls,tokenFile}, local.{llm,asr,tts}, localTokenFile, allowedServices, llm.model, mode, autostart, virtualSinks -> `RT_EDGE_*` env);
+- `nix/home-manager/rt-translator.nix` - `homeManagerModules.rt-translator` (`rt-translator.*` options: django.{urls,tokenFile}, local.{llm,asr,tts}, localTokenFile, allowedServices, mode, autostart, virtualSinks -> `RT_EDGE_*` env);
 - `nix/nixos/rt-speech.nix` - `services.rtSpeech.{asr,vosk,tts}` NixOS module; `nix/nixos/virtual-sinks.nix` - PipeWire devices (`lib.rtSpeech.virtualDevicesConf`, shared with the HM module): null sink `rt_virtual_input`, loopback `rt_virtual_output` (sink) -> `rt_virtual_mic` (source for other apps);
 - `nix/lib/` - `lib.rtSpeech` (env rendering, health-check command); `nix/checks/` - flake checks; `nix/devshell.nix` - devShell.
 

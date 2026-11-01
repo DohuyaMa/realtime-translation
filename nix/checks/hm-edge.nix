@@ -89,7 +89,6 @@ let
         sinks = transcribe.config.xdg.configFile ? "pipewire/pipewire.conf.d/30-rt-virtual-sinks.conf";
       };
       expected = {
-        # llm.model = null by default: no RT_EDGE_LLM_MODEL, model stays selectable in the UI
         env = [
           "RT_EDGE_LOCAL_ASR_URL=http://127.0.0.1:8091"
           "RT_EDGE_LOCAL_LLM_URL=http://127.0.0.1:8080"

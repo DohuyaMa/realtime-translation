@@ -70,7 +70,6 @@ class LocalUrls:
 @dataclass(frozen=True)
 class LlmSettings:
     session_ttl_s: int = 30
-    model: str = "local"
     max_tokens_cap: int = 512
     temperature: float = 0.1
     context_pairs: int = 3
@@ -294,6 +293,14 @@ def resolve_edge_settings(cfg: Mapping, environ: Mapping) -> EdgeSettings:
             " its prompt): {}",
             ", ".join(removed),
         )
+    if "model" in llm_cfg or _clean(environ.get("RT_EDGE_LLM_MODEL")):
+        from loguru import logger
+
+        logger.warning(
+            "config: services.llm.model / RT_EDGE_LLM_MODEL ignored - the llama"
+            " worker translates with the model loaded in it (choose and load it"
+            " in the «Переклад» tab)"
+        )
     ld = LlmSettings()
     notices: list[str] = []
 
@@ -315,8 +322,6 @@ def resolve_edge_settings(cfg: Mapping, environ: Mapping) -> EdgeSettings:
 
     llm = LlmSettings(
         session_ttl_s=int(llm_cfg.get("session_ttl_s", ld.session_ttl_s)),
-        model=_clean(pick("RT_EDGE_LLM_MODEL", "llm.model", llm_cfg.get("model")))
-        or ld.model,
         max_tokens_cap=int(llm_cfg.get("max_tokens_cap", ld.max_tokens_cap)),
         temperature=float(llm_cfg.get("temperature", ld.temperature)),
         context_pairs=int(llm_cfg.get("context_pairs", ld.context_pairs)),
