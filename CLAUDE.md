@@ -11,9 +11,9 @@ nix develop                          # devShell (nix/devshell.nix), PipeWire vir
 python -m src.main                   # edge UI
 python -m src.services.asr           # rt-asr (:8091); RT_ASR_BACKEND=faster-whisper|fake
 python -m src.services.tts           # rt-tts (:8093); RT_TTS_BACKEND=kokoro|fake
-python -m src.services.vosk          # rt-vosk (:8092); RT_VOSK_BACKEND=vosk|fake
+python -m src.services.phonetic      # rt-phonetic (:8092); RT_PHONETIC_BACKEND=wav2vec2|fake
 nix develop -c pytest tests/ -q      # tests
-nix build .#rt-asr-cpu               # also rt-asr-gpu, rt-vosk-cpu, rt-tts-cpu, rt-tts-gpu
+nix build .#rt-asr-cpu               # also rt-asr-gpu, rt-phonetic-cpu, rt-tts-cpu, rt-tts-gpu
 black src/ tests/ && flake8 src/ tests/ && mypy src/
 python -m scripts.gen_env_table      # (inside nix develop) regenerate env tables for docs/USAGE.md
 ```
@@ -33,25 +33,25 @@ Modes (`services.mode`): `transcribe` (stream units as text, ASR only), `transla
 | `src/main.py` | Entry point: Qt app, controllers, `MainWindow` |
 | `src/services/common/` | Shared service runtime: settings (`ENV_KEYS`, `TUNABLE_FIELDS`, `RELOAD_FIELDS`), `/config` (`runtime_config.py`), `/health`, `/status`, auth, model registry/store, `rt-models` CLI |
 | `src/services/asr/`, `src/services/tts/` | `rt-asr` (faster-whisper, `POST /audio/transcriptions`) and `rt-tts` (Kokoro ONNX, `POST /audio/speech`, `GET /audio/voices`; both `GET /v1/models`) FastAPI services |
-| `src/services/vosk/` | `rt-vosk` (Vosk/Kaldi, CPU only; rt-asr request shape, answer with per-word `conf`; `RT_MODEL` = ONE model of one language; other language -> 409 `model_language_mismatch`). Edge translate mode: whisper cross-check (TASK-SYS-12; `core/crosscheck.py` segment gate, whisper = primary LLM text / Vosk = hint; `services.use.vosk` = auto/node/off; opt-in recording `core/session_record.py`, `services.record_session`) |
-| `src/core/simul.py`, `src/clients/stream.py`, `src/audio/{resample,level,trim}.py` | Stream pipeline: WS stream client (rt-asr/rt-vosk), `SourceLedger` units (sentence/endpoint/clause/20 words), edge level normalization, TTS edge-silence trim |
-| `src/clients/` | HTTP clients: `asr`, `vosk`, `tts`, `llm`, `discovery` (Django service list + cache), endpoint `pool` (priority order, failover), `session` (worker app session, failover/return-to-local), `health` |
+| `src/services/phonetic/` | `rt-phonetic` (character-level wav2vec2 CTC, no dictionary, CPU only; rt-asr request shape, answer = lowercase letters as heard + word times; `RT_MODEL` = ONE model of one language, `uk-wav2vec2-stress`; other language -> 409 `model_language_mismatch`). Edge translate mode, per unit: `core/crosscheck.py` letter gate (drops whisper hallucinations) and "condition F" translation - SOUND (letters) primary, whisper TEXT only spelling/numbers; `services.use.phonetic` = auto/node/off; evidence `context/phonetic-bench-2026-11-01.md`; offline replay `scripts/replay_session.py`; opt-in recording `core/session_record.py`, `services.record_session` |
+| `src/core/simul.py`, `src/clients/stream.py`, `src/audio/{resample,level,trim}.py` | Stream pipeline: WS stream client (rt-asr), `SourceLedger` units (sentence/endpoint/clause/20 words), edge level normalization, TTS edge-silence trim |
+| `src/clients/` | HTTP clients: `asr`, `phonetic`, `tts`, `llm`, `discovery` (Django service list + cache), endpoint `pool` (priority order, failover), `session` (worker app session, failover/return-to-local), `health` |
 | `src/translation_system.py`, `src/adapters/`, `src/controller/` | Edge pipeline, adapter and controller on top of clients |
 | `src/core/runtime.py` | `EdgeSettings`: `RT_EDGE_*` env > `config.yml` > defaults |
 | `src/core/config.py` | `ConfigManager`: `~/.config/real-time-translator/config.yml` (keys: `config/default.yml`) |
 | `src/core/preflight/pipewire.py`, `src/audio/` | PipeWire virtual device check and routing (`pactl`); capture records the chosen source via `parec` (`PulseCapture`), playback goes to the chosen sink(s) via `pacat` (`play_to_sinks`); system defaults are never changed |
-| `src/ui/` | PySide6 widgets and Qt controller: settings dialog (`settings_dialog.py`: allow-list + per-kind instance choice `services.use`; `service_tabs.py`: ASR/Vosk/LLM/TTS tabs - per-user prompts/voice in config.yml, per-node tuning via `/config` + `/v1/models`; LLM tab: the llama worker's loaded model via `clients/llm_worker.py` - `GET /status`, `GET /models`, `POST /models/load`, `DELETE /models/unload`), status panel with the instance chooser; kill switch (`DirectAdapter.standby/resume`) and the drawn tray icon (`widgets/tray_icon.py`) |
+| `src/ui/` | PySide6 widgets and Qt controller: settings dialog (`settings_dialog.py`: allow-list + per-kind instance choice `services.use`; `service_tabs.py`: ASR/Фонетика/LLM/TTS tabs - per-user prompts/voice in config.yml, per-node tuning via `/config` + `/v1/models`; LLM tab: the llama worker's loaded model via `clients/llm_worker.py` - `GET /status`, `GET /models`, `POST /models/load`, `DELETE /models/unload`), status panel with the instance chooser; kill switch (`DirectAdapter.standby/resume`) and the drawn tray icon (`widgets/tray_icon.py`) |
 
 ### Ports
 
-`rt-asr` 8091, `rt-vosk` 8092, `rt-tts` 8093, dev `llama-server` 8080. Services listen on `RT_LISTEN_ADDRESSES` (comma list, one socket each; default `127.0.0.1`; NixOS `listenAddresses`); optional bearer token via `RT_API_TOKEN_FILE`.
+`rt-asr` 8091, `rt-phonetic` 8092, `rt-tts` 8093, dev `llama-server` 8080. Services listen on `RT_LISTEN_ADDRESSES` (comma list, one socket each; default `127.0.0.1`; NixOS `listenAddresses`); optional bearer token via `RT_API_TOKEN_FILE`.
 
 ### Nix (`nix/`, `flake.nix`)
 
-- `nix/packages/` - `rtSpeech.{asr,vosk,tts}.<variant>` bundles (variants cpu/gpu, ROCm for ASR, cpu only for vosk), exposed as `packages.rt-{asr,tts}-{cpu,gpu}`, `packages.rt-vosk-cpu` and `overlays.default`; `vosk.nix` packages the upstream libvosk wheel (not in nixpkgs);
+- `nix/packages/` - `rtSpeech.{asr,phonetic,tts}.<variant>` bundles (variants cpu/gpu, ROCm for ASR, cpu only for phonetic), exposed as `packages.rt-{asr,tts}-{cpu,gpu}`, `packages.rt-phonetic-cpu` and `overlays.default`;
 - `rt-edge` package (default, `nix run .`) - the edge UI;
 - `nix/home-manager/rt-translator.nix` - `homeManagerModules.rt-translator` (`rt-translator.*` options: django.{urls,tokenFile}, local.{llm,asr,tts}, localTokenFile, allowedServices, mode, autostart, virtualSinks -> `RT_EDGE_*` env);
-- `nix/nixos/rt-speech.nix` - `services.rtSpeech.{asr,vosk,tts}` NixOS module; `nix/nixos/virtual-sinks.nix` - PipeWire devices (`lib.rtSpeech.virtualDevicesConf`, shared with the HM module): null sink `rt_virtual_input`, loopback `rt_virtual_output` (sink) -> `rt_virtual_mic` (source for other apps);
+- `nix/nixos/rt-speech.nix` - `services.rtSpeech.{asr,phonetic,tts}` NixOS module; `nix/nixos/virtual-sinks.nix` - PipeWire devices (`lib.rtSpeech.virtualDevicesConf`, shared with the HM module): null sink `rt_virtual_input`, loopback `rt_virtual_output` (sink) -> `rt_virtual_mic` (source for other apps);
 - `nix/lib/` - `lib.rtSpeech` (env rendering, health-check command); `nix/checks/` - flake checks; `nix/devshell.nix` - devShell.
 
 Release is git-only: infra consumes this repo through a `github:` flake input (no `path:` inputs).

@@ -74,7 +74,9 @@ def test_latin_diacritics_and_dashes_pass():
 def test_next_leakage_is_rejected():
     text = "Не витрачайте час на пошук інформації."  # 6 words: too_long > 18
     nxt = "Картки постійного покупця отримуйте бонуси"
-    assert reject_reason(text, "Don't waste time searching for information.", nxt) is None
+    assert (
+        reject_reason(text, "Don't waste time searching for information.", nxt) is None
+    )
     # the NEXT part translated too: 17 words > 2 x 6 + 4
     leaked = (
         "Don't waste time searching for information. Loyalty cards from regular"
@@ -89,3 +91,149 @@ def test_next_leakage_is_rejected():
     # NEXT words copied (Latin source)
     out = "Don't waste time karty stałego klienta"
     assert reject_reason("Nie trać czasu.", out, "karty stałego klienta") == "next_leak"
+
+
+# the 39 live translations of session 20261101-154159 (owner's voice, IT
+# talk about this very pipeline: "translation", "model", "recording" are
+# normal words here) - the meta check must pass every one
+LIVE_2026_11_01 = [
+    ("Добре.", "Okay.", ""),
+    ("Прогрею, добре.", "I'll warm it up, okay.", ""),
+    ("Та, ти на да, збитим.", "Yes, you're on it.", ""),
+    ("Тверс.", "Tvers.", ""),
+    (
+        "Ціна на звичайних фразах без термінів перекладає.",
+        "The price of regular phrases without terms translates.",
+        "",
+    ),
+    (
+        "Преклад стоїть трохи гіршим, але й помітно.",
+        "The translation stands a bit worse, but noticeably so.",
+        "Приблизно 4 віта.",
+    ),
+    (
+        "Приблизно 4 відповідність та замість перекладу містять пояснення моделі.",
+        "Approximately 4 correspondences, and instead of the translation they contain explanations from the model.",  # noqa: E501
+        "І такі відповіді.",
+    ),
+    (
+        "І такі відповіді за стосунок має відкидати.",
+        "And such answers, regarding the application, must be rejected.",
+        "",
+    ),
+    (
+        "Перевірка висперстоянно тіювшою.",
+        "Checking the paper's resistance to curling.",
+        "Нова модель в бремі з виспі.",
+    ),
+    ("Нова модель в бремі з виспі.", "New model in the browser with cookies.", ""),
+    ("З схожість у букві.", "With similarity in the letter.", ""),
+    (
+        "А не цілих слів із 66 фраз можна хипно відкинути найбільше одну.",
+        "Not quite whole words; with 66 phrases, you can hypnagogically dismiss at most one.",  # noqa: E501
+        "А воск зараз...",
+    ),
+    ("А воск зараз відповідає дві.", "And wax now answers two.", ""),
+    (
+        "Мені не фраза, що і мету іки.",
+        'I don\'t have a phrase that is both "metu" and "iki".',
+        "",
+    ),
+    ("Вигодки.", "Bonuses.", ""),
+    ("Виспер.", "Visper.", "Голові тюсі."),
+    (
+        "Головне зникає випадок воск.",
+        "The main thing disappears by chance.",
+        "Не знаю.",
+    ),
+    ("Не знає слова.", "Doesn't know the word.", "А отже це"),
+    ("А отже це тиша.", "And so it is silence.", ""),
+    ("Швидкість.", "Speed.", ""),
+    (
+        "Модель працює на процесорі без видеокарти 0 .2 .28.",
+        "The model runs on a CPU without a graphics card 0.2.28.",
+        "",
+    ),
+    (
+        "Секунді на секунди мови і 2 гигабайта пам 'яки.",
+        "Seconds per second of speech and 2 gigabytes of memory.",
+        "Зараз ввозк займає приблизно 1 гигабайт.",
+    ),
+    (
+        "Зараз ввозк займає приблизно 1 гигабайт.",
+        "Currently, ingestion takes approximately 1 gigabyte.",
+        "",
+    ),
+    ("Застереження.", "Disclaimer.", "Тести шовна сентрична."),
+    (
+        "Тести шов на синтетичному голосі Пайпер.",
+        "Testing speech on the Piper synthetic voice.",
+        "",
+    ),
+    (
+        "А він значно чистіший за На твоєму голосі ще не міряле.",
+        "And it is significantly cleaner than on your voice; they haven't measured you yet.",  # noqa: E501
+        "",
+    ),
+    (
+        "Що пропонується писати твій голос в імплігі.",
+        "What is offered to write your voice in impligy.",
+        "",
+    ),
+    (
+        "Відти в застосунку записувати сесію для аналізу і скажи...",
+        "Log in to the application, record a session for analysis, and say...",
+        "",
+    ),
+    (
+        "15 -20 раз із айті -словами, як сьогодні.",
+        "15-20 times with IT words, like today.",
+        "Cyborg.",
+    ),
+    ("СК ТОП ВОЗК ВІСПР ДІПЛОЙ ПОВІЛЬНІЩЕ", "SK TOP VOZK VISPR DEPLOY SLOWLY", ""),
+    (
+        "Я прожену записи через нову модель і воск і покажу що краще.",
+        "I will record through the new model and voice, and show what is better.",
+        "",
+    ),
+    ("ЧУЄ саме ТЕБЕ.", "HEARS YOU.", "Дякую на саме ТЕБЕ. Дякую на ТВОЄМ ГОЛОСІЇ."),
+    (
+        "Дякую на Твоєму голосі результат підтвердиться вбудувати...",
+        "Thank you for your voice, the result will be confirmed embedded...",
+        "",
+    ),
+    ("Дану модель замість воск.", "This model instead of voice.", ""),
+    ("Вона переверятим виспер.", "She will verify the voice.", ""),
+    (
+        "А він отримуватиме її запис як головний текст для перекладу.",
+        "And he will receive her recording as the main text for translation.",
+        "Воск тоді приберемо...",
+    ),
+    (
+        "Воск тоді приберемо, а не триматимемо поряд.",
+        "Then we will remove the voice, and not keep it nearby.",
+        "",
+    ),
+    ("Коли запишеш фрази, скажи.", "When you write the phrases, say so.", ""),
+]
+
+
+@pytest.mark.parametrize("source, output, next_text", LIVE_2026_11_01)
+def test_meta_check_passes_the_live_translations(source, output, next_text):
+    assert reject_reason(source, output, next_text) is None
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        "I notice you provided two transcripts of the same audio.",
+        "Please provide the text you want translated.",
+        "The SOUND transcript seems garbled; TEXT says hello.",
+        "Here is the translation: okay.",
+        "Translation: okay.",
+        "Okay. (Note: the recognizer misheard the second word.)",
+        "It looks like a speech recognition error.",
+    ],
+)
+def test_meta_replies_are_rejected(output):
+    assert reject_reason("раз два три чотири пять шість сім", output) == "meta"

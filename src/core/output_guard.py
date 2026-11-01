@@ -46,7 +46,7 @@ _META = re.compile(
     r"|\bplease provide\b"
     r"|\b(?:me|you) to translate\b|\bno text to translate\b"
     r"|\btranscript(?:s|ion)?\b"
-    r"|\bspeech recogni[sz]\w*|\bmisrecogni[sz]\w*|\brecogni[sz]er\b"
+    r"|\bspeech[- ]recogni\w*|\bmisrecogni\w*|\brecogni[sz]er\b"
     r"|\bletter-by-letter\b"
     r"|\bhere(?:'s| is) the translation\b"
     r"|^\W*translation\s*:|\bnote\s*:",
