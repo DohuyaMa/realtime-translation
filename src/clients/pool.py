@@ -1,5 +1,5 @@
-"""Ordered endpoint lists for rt-asr / rt-tts / rt-vosk with failover and
-return-to-local.
+"""Ordered endpoint lists for rt-asr / rt-tts / rt-phonetic with failover
+and return-to-local.
 
 ``urls`` is a priority order (local first, then cluster nodes). Every call
 goes to the first endpoint that is not marked down and not reported unhealthy
@@ -23,7 +23,7 @@ from .asr import AsrClient
 from .base import ServiceError
 from .discovery import Directory, Endpoint, endpoints
 from .tts import TtsClient
-from .vosk import VoskClient
+from .phonetic import PhoneticClient
 
 C = TypeVar("C")
 T = TypeVar("T")
@@ -132,6 +132,22 @@ class EndpointPool(Generic[C]):
             self.mark_down(url)
         return fn(self.client(self.activate()))
 
+    def call_once(self, fn: Callable[[C], T]) -> T:
+        """One attempt on the serving endpoint, no failover within the call
+        (a per-unit request with a short budget, rt-phonetic): a retryable
+        failure marks the endpoint down - the NEXT call goes to the next
+        one - and is raised to the caller."""
+        url = self.activate()
+        try:
+            return fn(self.client(url))
+        except ServiceError as e:
+            if is_retryable(e) and self.has_alternative(url):
+                logger.warning(
+                    "{}: {} failed ({}), next call fails over", self.service, url, e
+                )
+                self.mark_down(url)
+            raise
+
     def clients(self) -> Dict[str, C]:
         return {u: self.client(u) for u in self.urls}
 
@@ -148,12 +164,12 @@ class EndpointPool(Generic[C]):
 class SpeechPools:
     asr: EndpointPool[AsrClient]
     tts: Optional[EndpointPool[TtsClient]] = None
-    # None: rt-vosk switched off (services.use.vosk = off) or none found
-    vosk: Optional[EndpointPool[VoskClient]] = None
+    # None: rt-phonetic switched off (services.use.phonetic = off) or none found
+    phonetic: Optional[EndpointPool[PhoneticClient]] = None
 
     def by_name(self) -> Dict[str, EndpointPool]:
         pools: Dict[str, EndpointPool] = {"asr": self.asr}
-        for name in ("vosk", "tts"):
+        for name in ("phonetic", "tts"):
             pool = getattr(self, name)
             if pool is not None:
                 pools[name] = pool
@@ -175,6 +191,6 @@ def build_pools(
     asr = EndpointPool("asr", endpoints("asr", settings, directory), f.asr)
     tts_eps = endpoints("tts", settings, directory)
     tts = EndpointPool("tts", tts_eps, f.tts) if tts_eps else None
-    vosk_eps = endpoints("vosk", settings, directory)
-    vosk = EndpointPool("vosk", vosk_eps, f.vosk) if vosk_eps else None
-    return SpeechPools(asr=asr, tts=tts, vosk=vosk)
+    ph_eps = endpoints("phonetic", settings, directory)
+    phonetic = EndpointPool("phonetic", ph_eps, f.phonetic) if ph_eps else None
+    return SpeechPools(asr=asr, tts=tts, phonetic=phonetic)

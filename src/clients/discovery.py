@@ -1,4 +1,4 @@
-"""Service discovery: which llm workers / rt-asr / rt-tts / rt-vosk the app
+"""Service discovery: which llm workers / rt-asr / rt-tts / rt-phonetic the app
 may use.
 
 Owner design (2026-10-31): the app asks Django for the list of services and

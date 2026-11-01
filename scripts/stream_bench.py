@@ -1,13 +1,13 @@
-"""Offline stand: replay a WAV through the real rt-asr / rt-vosk streams via
-the edge ``StreamClient`` (spec 2026-10-31 §5, step S3).
+"""Offline stand: replay a WAV through the real rt-asr stream via the edge
+``StreamClient`` (spec 2026-10-31 §5, step S3).
 
     python -m scripts.stream_bench session.wav \
-        --asr http://127.0.0.1:8091 --vosk http://127.0.0.1:8092 \
+        --asr http://127.0.0.1:8091 \
         --language uk   # token: --token-file or env RT_API_TOKEN
 
 The WAV (mono, any rate that is a multiple of 16 kHz, or 16 kHz) is fed in
 100 ms blocks at ``--speed`` x real time (1 = like a microphone). Printed:
-open -> ready per stream, every final with its commit lag (receipt - the
+open -> ready, every final with its commit lag (receipt - the
 moment its last word's audio was fed), and p50/p90 of the lag per stream.
 """
 
@@ -51,15 +51,13 @@ def pct(values: List[float], q: float):
 
 def make_pool(kind: str, url: str, token: str) -> EndpointPool:
     f = client_factories(EdgeSettings())
-    make = f.asr if kind == "asr" else f.vosk
-    return EndpointPool(kind, [Endpoint(kind, "bench", url, Credential(token))], make)
+    return EndpointPool(kind, [Endpoint(kind, "bench", url, Credential(token))], f.asr)
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("wav")
     ap.add_argument("--asr", default="http://127.0.0.1:8091")
-    ap.add_argument("--vosk", default="http://127.0.0.1:8092", help="'' = off")
     ap.add_argument("--token-file", default=None)
     ap.add_argument("--language", default="uk")
     ap.add_argument("--speed", type=float, default=1.0)
@@ -90,7 +88,7 @@ def main() -> None:
         elif msg["type"] in ("ready", "down", "failed"):
             print(f"{kind:4} {msg['type']}: {msg}")
 
-    streams = [("asr", args.asr)] + ([("vosk", args.vosk)] if args.vosk else [])
+    streams = [("asr", args.asr)]
     clients = [
         StreamClient(
             kind, make_pool(kind, url, token), language=args.language, on_event=on_event

@@ -1,20 +1,29 @@
-"""«Записувати сесію для аналізу»: opt-in per-session recording (TASK-SYS-12).
+"""«Записувати сесію для аналізу»: opt-in per-session recording.
 
 Explicit toggle (``services.record_session``, env ``RT_EDGE_RECORD_SESSION``,
-default off). While on, every translate-mode segment is written as
-``seg-<seq>.wav`` (the exact 16 kHz audio sent to whisper and Vosk) plus one
-JSON line in ``phrases.jsonl``; every translation adds a ``translation``
-line. One directory per pipeline start:
+default off). While on, every translate-mode unit is written as
+``seg-<seq>.wav`` (the exact 16 kHz audio sent to rt-phonetic, cut from the
+rt-asr stream) plus one JSON line in ``phrases.jsonl``; every LLM pass adds
+a ``translation`` line. One directory per pipeline start:
 ``$XDG_STATE_HOME/real-time-translator/sessions/<YYYYmmdd-HHMMSS>/``
 (default ``~/.local/state/...``), so real audio can be replayed offline
-against other Vosk models and prompts.
+(``scripts/replay_session.py``) against other models and prompts.
 
 Records (``type``):
-- ``segment``: seq, wav, start_s, end_s, language, whisper, vosk,
-  vosk_words [{word, conf, start, end}], vosk_conf, agreement, gate
-  (null = passed, else the drop reason or ``no_words`` / ``no_vosk``);
-- ``translation``: seq, mode (two-text | whisper-only), text, hint,
-  translation, rejected (reason or null).
+- ``segment``: seq, wav, start_s, end_s, reason, language, whisper,
+  whisper_words [{word, start, end, conf}], phonetic (transcript or null),
+  phonetic_words [{word, start, end}] (stream times), phonetic_ms,
+  similarity, gate (``agree`` / ``foreign_terms`` / ``short_words`` pass,
+  ``no_word`` / ``disagree`` dropped, ``no_phonetic`` = no transcript),
+  mode (``sound`` | ``whisper-only``);
+- ``translation``: seq, mode (``sound`` | ``whisper-only`` | ``retry``),
+  gate, text, sound, next, translation, rejected (reason or null). A
+  rejected sound-mode pass followed by its whisper-only retry gives two
+  lines of one seq.
+
+Recordings made before 2026-11-01 carry the removed Vosk fields (``vosk``,
+``vosk_words``, ``agreement``, mode ``two-text``); the replay script reads
+only whisper, the wav and the translation.
 
 A write error stops the recording - logged as an error, never silently.
 """

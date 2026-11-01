@@ -12,9 +12,9 @@ from loguru import logger
 class ServiceError(Exception):
     """A request failed. kind: unreachable | timeout | auth | http | busy |
     not_ready (HTTP 503 from rt-asr/rt-tts: the model is not loaded/ready) |
-    wrong_language (HTTP 409 from rt-vosk: its single model is of another
-    language; never retried on another node - the model is switched only
-    explicitly)."""
+    wrong_language (HTTP 409 from rt-phonetic: its single model is of
+    another language; never retried on another node - the model is switched
+    only explicitly)."""
 
     def __init__(
         self,
@@ -167,8 +167,11 @@ class ServiceClient:
         **kwargs: Any,
     ) -> httpx.Response:
         if timeout_s is not None:
+            # a short budget (rt-phonetic per unit) also caps the connect
+            connect = self._client.timeout.connect
             kwargs["timeout"] = httpx.Timeout(
-                timeout_s, connect=self._client.timeout.connect
+                timeout_s,
+                connect=timeout_s if connect is None else min(connect, timeout_s),
             )
         resp = self._send(method, path, **kwargs)
         if resp.status_code == 401 and self.credential.reload():

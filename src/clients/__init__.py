@@ -16,15 +16,15 @@ from .session import WorkerSessions
 from .health import ServiceHealthMonitor
 from .pool import EndpointPool, SpeechPools, build_pools
 from .tts import TtsClient
-from .vosk import VoskClient, VoskResult, VoskWord
+from .phonetic import PhoneticClient, PhoneticResult, PhoneticWord
 
 __all__ = [
     "AsrClient",
     "AsrResult",
     "TtsClient",
-    "VoskClient",
-    "VoskResult",
-    "VoskWord",
+    "PhoneticClient",
+    "PhoneticResult",
+    "PhoneticWord",
     "LlmClient",
     "LlmTarget",
     "WorkerSessions",
@@ -49,7 +49,7 @@ __all__ = [
 class ClientFactories:
     asr: Callable[[Endpoint], AsrClient]
     tts: Callable[[Endpoint], TtsClient]
-    vosk: Callable[[Endpoint], VoskClient]
+    phonetic: Callable[[Endpoint], PhoneticClient]
 
 
 def client_factories(
@@ -64,7 +64,7 @@ def client_factories(
         tts=lambda e: TtsClient(
             e.url, credential=e.credential, timeout_s=t.tts_s, **common
         ),
-        vosk=lambda e: VoskClient(
+        phonetic=lambda e: PhoneticClient(
             e.url, credential=e.credential, timeout_s=t.asr_s, **common
         ),
     )

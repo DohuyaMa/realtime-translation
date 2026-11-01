@@ -1,9 +1,9 @@
-"""Offline end-to-end stand: a WAV through the full edge pipeline (streams ->
-units -> LLM -> TTS -> playback) with the real services, without an audio
-device (spec 2026-10-31 §5).
+"""Offline end-to-end stand: a WAV through the full edge pipeline (stream
+-> units -> phonetic gate -> LLM -> TTS -> playback) with the real services,
+without an audio device (spec 2026-10-31 §5).
 
     RT_API_TOKEN=... RT_LLM_TOKEN=... python -m scripts.pipeline_bench talk.wav \
-        --language uk [--vosk ''] [--log units.log] [--gain-db -20]
+        --language uk [--phonetic ''] [--log units.log] [--gain-db -20]
 
 The WAV (mono 16-bit, 48 kHz or any multiple of 16 kHz) is "captured" in
 1024-sample blocks at real-time pace; playback is a sink that waits the
@@ -81,7 +81,7 @@ def main() -> None:
     ap.add_argument("wav")
     ap.add_argument("--language", default="uk")
     ap.add_argument("--asr", default="http://127.0.0.1:8091")
-    ap.add_argument("--vosk", default="http://127.0.0.1:8092", help="'' = off")
+    ap.add_argument("--phonetic", default="http://127.0.0.1:8092", help="'' = off")
     ap.add_argument("--tts", default="http://127.0.0.1:8093")
     ap.add_argument("--llm", default="http://127.0.0.1:8080")
     ap.add_argument("--log", default=None, help="INFO log file (units, timing)")
@@ -102,9 +102,12 @@ def main() -> None:
         mode="translate",
         source_language=args.language,
         local=LocalUrls(
-            llm=args.llm, asr=args.asr, tts=args.tts, vosk=args.vosk or None
+            llm=args.llm,
+            asr=args.asr,
+            tts=args.tts,
+            phonetic=args.phonetic or None,
         ),
-        use=ServiceUse(vosk=None if args.vosk else "off"),
+        use=ServiceUse(phonetic=None if args.phonetic else "off"),
         llm=LlmSettings(),
     )
     f = client_factories(settings)
@@ -118,7 +121,9 @@ def main() -> None:
         return SpeechPools(
             asr=pool("asr", args.asr, f.asr),
             tts=pool("tts", args.tts, f.tts),
-            vosk=pool("vosk", args.vosk, f.vosk) if args.vosk else None,
+            phonetic=(
+                pool("phonetic", args.phonetic, f.phonetic) if args.phonetic else None
+            ),
         )
 
     capture = WavCapture(args.wav, args.gain_db)
@@ -155,10 +160,14 @@ def main() -> None:
         "units_processed",
         "llm_requests",
         "llm_rejected",
-        "vosk_checked",
-        "vosk_gate_dropped",
-        "vosk_gate_foreign_terms",
-        "vosk_late",
+        "phonetic_checked",
+        "gate_dropped",
+        "gate_foreign_terms",
+        "whisper_only",
+        "phonetic_unavailable",
+        "phonetic_timeout",
+        "retry_whisper_only",
+        "rejected_after_tts",
         "asr_no_words",
         "pipeline_errors",
         "backpressure",

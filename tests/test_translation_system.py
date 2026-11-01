@@ -1,5 +1,5 @@
 """TranslationSystem on endpoint pools, worker-session LLM and the rt-asr /
-rt-vosk WS streams (spec 2026-10-31): stream finals -> units -> LLM -> TTS."""
+rt-asr WS stream (spec 2026-10-31): stream finals -> units -> LLM -> TTS."""
 
 import threading
 import time
@@ -23,7 +23,7 @@ from src.translation_system import (
 
 
 class FakeModelService:
-    """/status + /model/load of rt-asr / rt-vosk / rt-tts (warm-up)."""
+    """/status + /model/load of rt-asr / rt-phonetic / rt-tts (warm-up)."""
 
     state = "ready"
     loads = 0
@@ -148,15 +148,20 @@ class FakePool:
     def call(self, fn):
         return fn(self.client)
 
+    def call_once(self, fn):
+        return fn(self.client)
+
     def close(self):
         pass
 
 
 class FakePools:
-    def __init__(self, asr, tts=None, vosk=None):
+    def __init__(self, asr, tts=None, phonetic=None):
         self.asr = FakePool(asr, "http://asr")
         self.tts = FakePool(tts, "http://tts") if tts is not None else None
-        self.vosk = FakePool(vosk, "http://vosk") if vosk is not None else None
+        self.phonetic = (
+            FakePool(phonetic, "http://phonetic") if phonetic is not None else None
+        )
 
     def by_name(self):
         return {"asr": self.asr, "tts": self.tts}
@@ -170,7 +175,7 @@ class FakeLlm:
         self.errors = list(errors)
         self.calls = []
 
-    def translate(self, text, source_lang, context=(), check=None, next_text=""):
+    def translate(self, text, source_lang, context=(), sound=None, next_text=""):
         self.calls.append((text, source_lang, list(context)))
         self.nexts = getattr(self, "nexts", []) + [next_text]
         if self.errors:
@@ -179,8 +184,8 @@ class FakeLlm:
                 raise err
         return f"EN({text})"
 
-    def translate_stream(self, text, source_lang, context=(), check=None, next_text=""):
-        yield self.translate(text, source_lang, context, check, next_text)
+    def translate_stream(self, text, source_lang, context=(), sound=None, next_text=""):
+        yield self.translate(text, source_lang, context, sound, next_text)
 
     base_url = "http://llm"
 
@@ -351,7 +356,7 @@ def test_translate_flow_stream_units_llm_tts_and_playback():
         ts.stop()
     asr = streams["asr"]
     assert asr.language is None and asr.prompt == "NixOS" and asr.stopped
-    assert [s.kind for s in streams.opened] == ["asr"]  # no rt-vosk configured
+    assert [s.kind for s in streams.opened] == ["asr"]  # the only stream
     assert llm.calls == [("cześć", "pl", [])]
     assert pools.tts.client.calls == [("EN(cześć)", "am_adam", 1.1)]
     assert sink.played == [(240, 24000)]
@@ -365,11 +370,11 @@ def test_translate_flow_stream_units_llm_tts_and_playback():
     assert stats["units_processed"] == 1 and stats["detected_language"] == "pl"
     assert stats["active"] == {
         "asr": {"url": "http://asr"},
-        "vosk": None,
+        "phonetic": None,
         "tts": {"url": "http://tts"},
     }
     assert stats["discovery"] == "none"
-    assert stats["use"] == {"llm": None, "asr": None, "tts": None, "vosk": None}
+    assert stats["use"] == {"llm": None, "asr": None, "tts": None, "phonetic": None}
     assert {c["url"] for c in stats["choices"]["tts"]} == {"http://tts"}
     assert stats["latency"]["e2e_ms"]["n"] == 1
 

@@ -12,7 +12,7 @@ HEALTH_INTERVAL_S = 5.0
 # the same pipeline problem repeats per phrase: log it again only after this
 REPEAT_LOG_S = 10.0
 
-SERVICE_NAMES = {"asr": "ASR", "vosk": "Vosk", "tts": "TTS", "llm": "LLM"}
+SERVICE_NAMES = {"asr": "ASR", "phonetic": "Фонетика", "tts": "TTS", "llm": "LLM"}
 
 
 def describe_pipeline_event(event: Dict) -> Optional[Tuple[str, str]]:
@@ -30,16 +30,31 @@ def describe_pipeline_event(event: Dict) -> Optional[Tuple[str, str]]:
         if event.get("output"):
             msg += f" → «{event['output']}»"
         return "WARN", msg
-    if status == "vosk_gate":
+    if status == "translation_retry":
+        return "WARN", (
+            f"Переклад зі звуком відкинуто ({event.get('reason') or '?'}),"
+            f" перекладаю лише з whisper: «{event.get('original_text') or ''}»"
+        )
+    if status == "phonetic_gate":
         if event.get("reason") == "disagree":
             return "INFO", (
-                f"Whisper не збігся з Vosk («{event.get('check_text') or ''}») -"
+                f"Whisper не збігся зі звуком («{event.get('sound_text') or ''}») -"
                 f" імовірна галюцинація, не перекладено:"
                 f" «{event.get('original_text') or ''}»"
             )
         return "INFO", (
-            f"Vosk не чув слів ({event.get('check_text') or 'тиша'!r}) -"
-            f" не перекладено: «{event.get('original_text') or ''}»"
+            "Фонетика не чула мови (тиша) - не перекладено:"
+            f" «{event.get('original_text') or ''}»"
+        )
+    if status == "phonetic_whisper_only":
+        why = {
+            "timeout": "фонетика не встигла",
+            "no_language": "фонетика недоступна для цієї мови",
+            "unavailable": "фонетика недоступна",
+        }.get(event.get("reason"), event.get("reason") or "?")
+        return "WARN", (
+            f"{why} ({event.get('error') or '?'}): лише whisper -"
+            f" «{event.get('original_text') or ''}»"
         )
     if status == "session_record":
         if event.get("error"):
@@ -74,17 +89,14 @@ def describe_pipeline_event(event: Dict) -> Optional[Tuple[str, str]]:
                 f" {event.get('dbfs')} dBFS, підсилення +{event.get('gain_db')} дБ)"
             )
         return "INFO", f"Рівень мікрофона в нормі ({event.get('dbfs')} dBFS)"
-    if status == "vosk_state":
-        v = event.get("vosk") or {}
+    if status == "phonetic_state":
+        v = event.get("phonetic") or {}
         if v.get("mode") == "on":
-            return "INFO", "Звірка Vosk знову працює"
-        if v.get("mode") == "deaf":
-            return "WARN", (
-                f"Vosk не чує — звірка вимкнена до відновлення ({v.get('error')}):"
-                " переклад лише з whisper"
-            )
+            return "INFO", "Фонетика знову працює"
+        if v.get("mode") == "no_language":
+            return "WARN", f"{v.get('error')}: переклад лише з whisper"
         return "WARN", (
-            f"Vosk недоступний ({v.get('error') or '?'}): переклад лише з whisper"
+            f"Фонетика недоступна ({v.get('error') or '?'}): переклад лише з whisper"
         )
     if status == "error":
         service = SERVICE_NAMES.get(event.get("service"), event.get("service") or "?")

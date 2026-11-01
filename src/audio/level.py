@@ -1,8 +1,9 @@
-"""Input level normalization on the edge, once, before both speech streams.
+"""Input level normalization on the edge, once, before the speech stream
+(the unit audio sent to rt-phonetic is cut from the same normalized audio).
 
 Live 2026-10-31 §13: the microphone at 39.5% input volume - whisper still
-heard the speech, Vosk (Kaldi) returned no words at all, so the per-unit
-gate dropped every phrase as ``no_word``. ``LevelNormalizer`` brings the
+heard the speech, the then cross-check recognizer returned no words at all,
+so the per-unit gate dropped every phrase as ``no_word``. ``LevelNormalizer`` brings the
 speech level toward ``TARGET_DBFS``:
 
 * the speech level is an envelope of the block RMS of speech blocks only

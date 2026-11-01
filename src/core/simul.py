@@ -23,22 +23,8 @@ of, scanning word by word:
   with ``eos``) closed them.
 
 Units never overlap, so nothing is translated or spoken twice (owner
-decisions 2/3). ``VoskTrack`` keeps rt-vosk's words on the same timeline:
-the HINT of a unit [t0, t1] is the Vosk words whose middle lies in
-[t0 - HINT_MARGIN_S, t1 + HINT_MARGIN_S]; ``covered`` = the end of Vosk's
-latest word - the per-unit gate waits for it to reach t1 - COVER_SLACK_S.
-Not ``audio_end``: Kaldi's partial lags the audio it has received by ~1 s,
-so a unit "covered" by ``audio_end`` got an empty HINT and real speech was
-dropped as ``no_word`` (bench 2026-10-31: «Перший — промпт.»). In silence
-Vosk has no word to cover with, so ``covered`` stuck before the pause and a
-whisper hallucination in it («Дякую.», «знову.», live 2026-11-01 §14)
-passed as "Vosk late". rt-vosk's ``idle`` message (Kaldi has no word in its
-current utterance at the processed time ``at`` and the audio since
-``silent_from`` had no voice energy) makes ``[silent_from, at -
-VOSK_IDLE_LAG_S]`` (the same Kaldi lag) heard silence. Not a watermark: the
-small model decodes some real words as silence («повільніше» after «буде
-замість», live §16), so a span of voiced audio without a Vosk word is never
-covered by a later idle - its unit stays "Vosk late" (whisper-only).
+decisions 2/3). In translate mode each unit's audio is then recognized by
+rt-phonetic (``core.crosscheck``, translation_system ``_gate``).
 
 Also used by transcribe mode: each unit is one recognized line.
 """
@@ -46,19 +32,11 @@ Also used by transcribe mode: each unit is one recognized line.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Iterable, List, Optional, Sequence, Tuple
-
-from loguru import logger
+from typing import Any, Iterable, List, Optional, Sequence
 
 CLAUSE_WORDS = 12
 HARD_WORDS = 20
 CLAUSE_MARKS = ",;:"
-HINT_MARGIN_S = 0.25
-# Vosk and whisper place the same word's end up to ~0.2 s apart
-COVER_SLACK_S = 0.2
-# Kaldi's partial shows a word up to ~1 s after its audio was processed:
-# an idle Kaldi at ``at`` heard silence only up to ``at`` - this
-VOSK_IDLE_LAG_S = 1.0
 # sentence-end finality (``SourceLedger._sentence_cut``)
 CONTINUE_GAP_S = 0.05
 TINY_S = 0.25
@@ -101,7 +79,7 @@ def ends_clause(word: str) -> bool:
 @dataclass(frozen=True)
 class Word:
     text: str
-    start: float  # stream seconds (shared by rt-asr and rt-vosk)
+    start: float  # stream seconds
     end: float
     conf: float = 1.0
 
@@ -246,74 +224,6 @@ class SourceLedger:
         """Not yet in a unit: committed words after the cursor + partial
         (the grey text of the UI)."""
         return self.after(self.cursor)
-
-
-class VoskTrack:
-    """rt-vosk words on the stream timeline: finals + the current partial."""
-
-    def __init__(self) -> None:
-        self.finals: List[Word] = []
-        self.partial: List[Word] = []
-        self.covered = 0.0  # end of Vosk's latest word, stream seconds
-        # heard silence (Kaldi idle, no voice energy): merged (lo, hi) spans
-        self.silences: List[Tuple[float, float]] = []
-        self.language: Optional[str] = None
-        self._old_idle_warned = False
-
-    def on_message(self, msg: dict) -> None:
-        kind = msg.get("type")
-        words: List[Word] = []
-        if kind == "final":
-            words = parse_words(msg.get("words"))
-            self.finals.extend(words)
-            self.partial = []
-            if msg.get("language"):
-                self.language = str(msg["language"])
-        elif kind == "partial":
-            words = self.partial = parse_words(msg.get("words"))
-        elif kind == "idle":
-            self.partial = []
-            self._idle(msg)
-        if words:
-            self.covered = max(self.covered, max(w.end for w in words))
-
-    def _idle(self, msg: dict) -> None:
-        if msg.get("silent_from") is None:
-            if not self._old_idle_warned:
-                self._old_idle_warned = True
-                logger.warning(
-                    "rt-vosk idle without silent_from (rt-vosk older than"
-                    " live test §16): no heard silence - redeploy rt-vosk"
-                )
-            return
-        lo = float(msg["silent_from"])
-        hi = float(msg.get("at") or 0.0) - VOSK_IDLE_LAG_S
-        if hi <= lo:
-            return
-        if self.silences and lo <= self.silences[-1][1]:
-            last = self.silences[-1]
-            self.silences[-1] = (min(last[0], lo), max(last[1], hi))
-        else:
-            self.silences.append((lo, hi))
-
-    def covers(self, t0: float, t1: float) -> bool:
-        """Vosk's words reach t1, or the unit [t0, t1] after Vosk's latest
-        word lies in one span of heard silence."""
-        if self.covered >= t1 - COVER_SLACK_S:
-            return True
-        start = max(t0, self.covered) + COVER_SLACK_S
-        return any(lo <= start and hi >= t1 for lo, hi in self.silences)
-
-    def hint(self, t0: float, t1: float) -> List[Word]:
-        lo, hi = t0 - HINT_MARGIN_S, t1 + HINT_MARGIN_S
-        return [w for w in self.finals + self.partial if lo <= w.mid <= hi]
-
-    def forget_before(self, t: float) -> None:
-        """Drop final words that can no longer be in any hint."""
-        keep = t - 2 * HINT_MARGIN_S
-        if self.finals and self.finals[0].mid < keep:
-            self.finals = [w for w in self.finals if w.mid >= keep]
-        self.silences = [s for s in self.silences if s[1] >= keep]
 
 
 def words_text(words: Sequence[Any]) -> str:

@@ -47,7 +47,7 @@ def app():
 def test_services_labels():
     assert SERVICES == {
         "asr": "ASR (rt-asr)",
-        "vosk": "Звірка (rt-vosk)",
+        "phonetic": "Фонетика (rt-phonetic)",
         "llm": "Переклад (LLM)",
         "tts": "TTS (rt-tts)",
     }
@@ -85,7 +85,7 @@ def test_status_panel_shows_serving_nodes(app):
 
 
 @pytest.mark.parametrize(
-    "vosk, text, shown",
+    "phonetic, text, shown",
     [
         (
             {"mode": "off", "error": "вимкнено в налаштуваннях"},
@@ -93,54 +93,59 @@ def test_status_panel_shows_serving_nodes(app):
             "лише з whisper",
         ),
         (
-            {"mode": "unavailable", "error": "vosk: unreachable"},
+            {"mode": "unavailable", "error": "phonetic: unreachable"},
             "не налаштовано",
-            "vosk: unreachable",
+            "phonetic: unreachable",
         ),
-        ({"mode": "on", "error": None}, "1/1 готові", "звірка увімкнена"),
+        (
+            {"mode": "no_language", "error": "фонетика недоступна для польської мови"},
+            "не налаштовано",
+            "фонетика недоступна для польської мови: переклад лише з whisper",
+        ),
+        ({"mode": "on", "error": None}, "1/1 готові", "увімкнена"),
     ],
 )
-def test_status_panel_shows_vosk_mode(app, vosk, text, shown):
+def test_status_panel_shows_phonetic_mode(app, phonetic, text, shown):
     panel = ServiceStatusPanel()
-    entries = [{"ready": True}] if vosk["mode"] == "on" else []
+    entries = [{"ready": True}] if phonetic["mode"] == "on" else []
     panel.update_status(
         {
-            "vosk": vosk,
-            "use": {"vosk": "off" if vosk["mode"] == "off" else None},
-            "choices": {"vosk": []},
-            "health": {"vosk": entries},
-            "vosk_gate_dropped": 2,
+            "phonetic": phonetic,
+            "use": {"phonetic": "off" if phonetic["mode"] == "off" else None},
+            "choices": {"phonetic": []},
+            "health": {"phonetic": entries},
+            "gate_dropped": 2,
         }
     )
-    assert panel._texts["vosk"].text() == text
-    assert shown in panel._details["vosk"].text()
+    assert panel._texts["phonetic"].text() == text
+    assert shown in panel._details["phonetic"].text()
     assert "галюцинацію whisper" in panel._timing.text()
-    box = panel._use["vosk"]
+    box = panel._use["phonetic"]
     assert box.findData("off") >= 0
-    assert box.currentData() == ("off" if vosk["mode"] == "off" else None)
+    assert box.currentData() == ("off" if phonetic["mode"] == "off" else None)
 
 
-def test_settings_dialog_vosk_use_and_check_prompts_saved(app, cfg):
-    from src.core.prompt import DEFAULT_CHECK_USER_TEMPLATE
+def test_settings_dialog_phonetic_use_and_sound_prompts_saved(app, cfg):
+    from src.core.prompt import DEFAULT_SOUND_USER_TEMPLATE
     from src.ui.widgets.settings_dialog import current_settings
 
     dlg = SettingsDialog(current_settings(), services=[])
-    assert dlg.vosk_tab.service.kind == "vosk"
-    box = dlg.endpoints_tab.use["vosk"]
+    assert dlg.phonetic_tab.service.kind == "phonetic"
+    box = dlg.endpoints_tab.use["phonetic"]
     box.setCurrentIndex(box.findData("off"))
-    tpl = "FLUENT: {{text}}\nEXACT: {{vosk_text}}"
-    dlg.llm_tab.check_user_template.setPlainText(tpl)
-    assert "EXACT: dzień dobry" in dlg.llm_tab.preview.toPlainText()
+    tpl = "HEARD: {{sound_text}}\nWHISPER: {{text}}"
+    dlg.llm_tab.sound_user_template.setPlainText(tpl)
+    assert "HEARD: нова модель" in dlg.llm_tab.preview.toPlainText()
     dlg.accept()
     saved = _saved(cfg)["services"]
-    assert saved["use"]["vosk"] == "off"
-    assert saved["llm"]["check_user_template"] == tpl
-    assert "check_system_prompt" not in saved["llm"]  # default: not frozen
+    assert saved["use"]["phonetic"] == "off"
+    assert saved["llm"]["sound_user_template"] == tpl
+    assert "sound_system_prompt" not in saved["llm"]  # default: not frozen
     dlg = SettingsDialog(current_settings(), services=[])
-    dlg.llm_tab.check_user_template.setPlainText("{{text}}")  # no {{vosk_text}}
+    dlg.llm_tab.sound_user_template.setPlainText("{{text}}")  # no {{sound_text}}
     dlg.accept()
-    assert "vosk_text" in dlg.error_label.text()
-    assert DEFAULT_CHECK_USER_TEMPLATE != tpl
+    assert "sound_text" in dlg.error_label.text()
+    assert DEFAULT_SOUND_USER_TEMPLATE != tpl
 
 
 def test_endpoints_dialog_values(app):
@@ -230,7 +235,7 @@ def test_main_window_constructs(app, cfg):
     ctl.get_output_devices.return_value = []
     ctl.get_status.return_value = {"running": True}
     win = _window(ctl)
-    assert win.service_status_panel.get_service_names() == ["asr", "vosk", "llm", "tts"]
+    assert win.service_status_panel.get_service_names() == ["asr", "phonetic", "llm", "tts"]
     win._apply_ui_update({"input": 0.5, "health": {}})
     win.on_general_settings_changed(resolve_edge_settings({}, {}))
     for _ in range(100):
@@ -1022,7 +1027,7 @@ def test_status_panel_shows_stage_timing(app):
             },
             "queues": {"units": 0, "llm": 1, "tts": 2, "playback": 0},
             "backpressure": {"llm": 0, "tts": 3, "playback": 0},
-            "vosk_late": 2,
+            "phonetic_timeout": 2,
             "health": {},
         }
     )
@@ -1030,7 +1035,7 @@ def test_status_panel_shows_stage_timing(app):
     assert (
         "Одиниця #7: фіксація 1100 мс · LLM 400 мс (усього 900) · TTS 4700 мс" in text
     )
-    assert "без звірки Vosk (не встиг за 300 мс): 2" in text
+    assert "з них: фонетика не встигла: 2" in text
     assert "кінець мовлення → звук 8900 мс" in text
     assert "черги: llm 1, tts 2" in text and "не встигає: tts ×3" in text
 
@@ -1235,16 +1240,16 @@ def test_dialog_accept_writes_no_defaults(app, cfg):
     assert _saved(cfg) == {}
 
 
-class FakeVoskServiceClient(FakeServiceClient):
-    """rt-vosk admin API: one model of one language at a time."""
+class FakePhoneticServiceClient(FakeServiceClient):
+    """rt-phonetic admin API: one model of one language at a time."""
 
-    def __init__(self, model="vosk-small-uk-v3-nano"):
+    def __init__(self, model="uk-wav2vec2-stress"):
         super().__init__()
-        from src.services.vosk.settings import VoskSettings
+        from src.services.phonetic.settings import PhoneticSettings
 
         self.config = {
-            "schema": VoskSettings.field_schema(),
-            "values": {"model": model, "max_upload_mb": 100},
+            "schema": PhoneticSettings.field_schema(),
+            "values": {"model": model, "max_upload_mb": 20},
             "source": {},
             "version": 1,
         }
@@ -1254,21 +1259,15 @@ class FakeVoskServiceClient(FakeServiceClient):
         return {
             "models": [
                 {
-                    "id": "vosk-small-uk-v3-nano",
+                    "id": "uk-wav2vec2-stress",
                     "cached": True,
-                    "size": 133 * 10**6,
+                    "size": 1262 * 10**6,
                     "language": "uk",
                 },
                 {
-                    "id": "vosk-small-uk-v3-small",
+                    "id": "pl-wav2vec2",
                     "cached": False,
-                    "size": 436 * 10**6,
-                    "language": "uk",
-                },
-                {
-                    "id": "vosk-small-pl-0.22",
-                    "cached": False,
-                    "size": 96 * 10**6,
+                    "size": 1262 * 10**6,
                     "language": "pl",
                 },
             ],
@@ -1281,12 +1280,12 @@ class FakeVoskServiceClient(FakeServiceClient):
         return super().update_config(values, version, reset, timeout_s=timeout_s)
 
 
-def _vosk_tab(client, source_language):
-    from src.ui.widgets.service_tabs import Background, VoskTab
+def _phonetic_tab(client, source_language):
+    from src.ui.widgets.service_tabs import Background, PhoneticTab
 
-    tab = VoskTab(
+    tab = PhoneticTab(
         resolve_edge_settings({"services": {"source_language": source_language}}, {}),
-        [_ep("cyborg", "http://127.0.0.1:8092", True, "vosk")],
+        [_ep("cyborg", "http://127.0.0.1:8092", True, "phonetic")],
         lambda e: client,
         Background(sync=True),
     )
@@ -1294,43 +1293,33 @@ def _vosk_tab(client, source_language):
     return tab
 
 
-def test_vosk_tab_picks_one_model_from_the_list_with_language(app):
-    client = FakeVoskServiceClient()
-    tab = _vosk_tab(client, "uk")
+def test_phonetic_tab_shows_its_model_and_language(app):
+    client = FakePhoneticServiceClient()
+    tab = _phonetic_tab(client, "uk")
     tab.service.load()
     model = tab.service.editors["model"].widget
     labels = [model.itemText(i) for i in range(model.count())]
-    assert labels[0] == "vosk-small-uk-v3-nano [uk] (кеш)"
-    assert labels[2] == "vosk-small-pl-0.22 [pl] (завантажити ~96 MB)"
-    assert "vosk-small-uk-v3-nano (мова «uk»)" in tab.language_hint.text()
+    assert labels[0] == "uk-wav2vec2-stress [uk] (кеш)"
+    assert "uk-wav2vec2-stress (мова «uk»)" in tab.language_hint.text()
     assert not tab.switch_button.isVisible() and tab._target is None
-    model.setCurrentIndex(model.findData("vosk-small-uk-v3-small"))
-    tab.service.apply()
-    assert client.posted[0][0] == {"model": "vosk-small-uk-v3-small"}
 
 
-def test_vosk_tab_other_language_offers_explicit_switch(app):
-    client = FakeVoskServiceClient()
-    tab = _vosk_tab(client, "pl")
+def test_phonetic_tab_other_language_offers_explicit_switch(app):
+    client = FakePhoneticServiceClient()
+    tab = _phonetic_tab(client, "pl")
     tab.service.load()
     hint = tab.language_hint.text()
-    assert "«pl»: звірка Vosk недоступна" in hint
-    assert tab._target == "vosk-small-pl-0.22"
-    assert "Завантажити модель для «pl»" in tab.switch_button.text()
+    assert "«pl»: фонетика недоступна для цієї мови" in hint
+    assert tab._target == "pl-wav2vec2"
     assert client.posted == []  # nothing switched by itself
     tab.switch_model()
-    assert client.posted[0][0] == {"model": "vosk-small-pl-0.22"}
-    assert "мова «pl»" in tab.language_hint.text()  # re-read after apply
-    assert tab._target is None
-    # auto: no switch offered, the rule is explained
-    tab.set_source_language("auto")
-    assert "auto" in tab.language_hint.text() and tab._target is None
-    # a language without any Vosk model
+    assert client.posted[0][0] == {"model": "pl-wav2vec2"}
+    # a language without any phonetic model
     tab.set_source_language("en")
-    assert "Моделі Vosk для «en» немає" in tab.language_hint.text()
+    assert "Моделі фонетики для «en» немає" in tab.language_hint.text()
 
 
-def test_recognized_panel_shows_vosk_line_and_toggle(app):
+def test_recognized_panel_shows_sound_line_and_toggle(app):
     from src.ui.widgets.status_logger import StatusLogger
 
     log = StatusLogger()
@@ -1339,14 +1328,14 @@ def test_recognized_panel_shows_vosk_line_and_toggle(app):
     log.add_recognized("Раз.", None)
     log.add_recognized("Тиша.", "")
     text = log.recognized_view.toPlainText()
-    assert "Добрий день.\n    Vosk: добрий день" in text
-    assert "Раз.\n    Vosk: (без звірки)" in text
-    assert "Тиша.\n    Vosk: (нічого не почув)" in text
-    log.show_check.setChecked(False)
+    assert "Добрий день.\n    Звук: добрий день" in text
+    assert "Раз.\n    Звук: (без фонетики)" in text
+    assert "Тиша.\n    Звук: (нічого не почула)" in text
+    log.show_sound.setChecked(False)
     text = log.recognized_view.toPlainText()
-    assert "Vosk:" not in text and text.count("\n") == 2
-    log.show_check.setChecked(True)
-    assert log.recognized_view.toPlainText().count("Vosk:") == 3
+    assert "Звук:" not in text and text.count("\n") == 2
+    log.show_sound.setChecked(True)
+    assert log.recognized_view.toPlainText().count("Звук:") == 3
     # the not-yet-translated tail is grey under the text, replaced each time
     log.set_tail("картки без")
     assert log.tail_label.text() == "картки без"
@@ -1359,18 +1348,18 @@ def test_llm_tab_lists_variables_and_active_prompt_pair(app, cfg):
     from src.ui.widgets.service_tabs import PROMPT_VARIABLES_HELP
     from src.ui.widgets.settings_dialog import current_settings
 
-    for var in ("{{text}}", "{{vosk_text}}", "{{source_lang}}", "{{target_lang}}"):
+    for var in ("{{text}}", "{{sound_text}}", "{{source_lang}}", "{{target_lang}}"):
         assert var in PROMPT_VARIABLES_HELP
     dlg = SettingsDialog(current_settings(), services=[])
     active = dlg.llm_tab.active_prompts
-    assert "«Зі звіркою Vosk»" in active.text()
-    box = dlg.endpoints_tab.use["vosk"]
+    assert "«Зі звуком»" in active.text()
+    box = dlg.endpoints_tab.use["phonetic"]
     box.setCurrentIndex(box.findData("off"))
-    assert "«Без Vosk»" in active.text() and "вимкнено" in active.text()
-    # the dialog's «Мова» re-checks the Vosk tab's hint
+    assert "«Лише whisper»" in active.text() and "вимкнено" in active.text()
+    # the dialog's «Мова» re-checks the Фонетика tab's hint
     lang = dlg.endpoints_tab.source_language
     lang.setCurrentText("pl")
-    assert dlg.vosk_tab.source_language == "pl"
+    assert dlg.phonetic_tab.source_language == "pl"
 
 
 def test_record_session_toggle_saves_and_applies(app, cfg):

@@ -1,5 +1,5 @@
-"""Status panel for the remote services: ASR, Vosk cross-check, LLM worker
-and TTS (serving node)."""
+"""Status panel for the remote services: ASR, the phonetic cross-check,
+LLM worker and TTS (serving node)."""
 
 from html import escape
 from typing import Dict, List, Optional
@@ -26,7 +26,7 @@ from .model_state import (
 
 SERVICES = {
     "asr": "ASR (rt-asr)",
-    "vosk": "Звірка (rt-vosk)",
+    "phonetic": "Фонетика (rt-phonetic)",
     "llm": "Переклад (LLM)",
     "tts": "TTS (rt-tts)",
 }
@@ -34,12 +34,12 @@ SERVICES = {
 _DOT = "font-size: 16px; font-weight: bold; color: {};"
 AUTO = "auto (failover)"
 OFF_TEXT = "вимкнено"
-# get_stats()["vosk"]["mode"] -> label of the cross-check mode
-VOSK_MODES = {
-    "on": "звірка увімкнена",
+# get_stats()["phonetic"]["mode"] -> label of the cross-check mode
+PHONETIC_MODES = {
+    "on": "увімкнена: фільтр галюцинацій + звук як основа перекладу",
     "off": "вимкнено: переклад лише з whisper",
-    "unavailable": "недоступний: переклад лише з whisper",
-    "deaf": "Vosk не чує — звірка вимкнена до відновлення",
+    "unavailable": "недоступна: переклад лише з whisper",
+    "no_language": "переклад лише з whisper",
 }
 
 
@@ -128,21 +128,31 @@ PIPELINE_COUNTERS = {
     "asr_no_words": "ASR без слів",
     "pipeline_errors": "помилок сервісів",
     "playback_short": "відтворень, коротших за аудіо",
-    "vosk_gate_dropped": "відкинуто як галюцинацію whisper (звірка Vosk)",
-    "vosk_gate_disagree": "з них: whisper не збігся з Vosk",
-    "vosk_gate_foreign_terms": "пропущено звіркою: лише іноземні терміни",
-    "vosk_whisper_only": "без звірки Vosk (недоступний)",
-    "vosk_late": "без звірки Vosk (не встиг за 300 мс)",
+    "phonetic_checked": "перекладено зі звуком (фонетика)",
+    "gate_dropped": "відкинуто як галюцинацію whisper (фонетика)",
+    "gate_disagree": "з них: whisper не збігся зі звуком",
+    "gate_foreign_terms": "пропущено фільтром: лише іноземні терміни",
+    "whisper_only": "перекладено лише з whisper (без фонетики)",
+    "phonetic_unavailable": "з них: фонетика недоступна",
+    "phonetic_timeout": "з них: фонетика не встигла",
+    "retry_whisper_only": "переклад зі звуком відкинуто → повтор з whisper",
+    "rejected_after_tts": "переклад зі звуком відкинуто після озвучки",
 }
 
 
-def format_vosk_mode(vosk: Optional[Dict]) -> str:
-    """Cross-check mode line: on / off / unavailable plus the reason."""
-    if not vosk:
+def format_phonetic_mode(phonetic: Optional[Dict]) -> str:
+    """Cross-check mode line: on / off / unavailable / no_language plus the
+    reason («фонетика недоступна для польської мови»)."""
+    if not phonetic:
         return ""
-    text = VOSK_MODES.get(vosk.get("mode"), str(vosk.get("mode")))
-    if vosk.get("error") and vosk.get("mode") != "off":
-        text += f" ({vosk['error']})"
+    mode = phonetic.get("mode")
+    text = PHONETIC_MODES.get(mode, str(mode))
+    if phonetic.get("error") and mode != "off":
+        text = (
+            f"{phonetic['error']}: {text}"
+            if mode == "no_language"
+            else f"{text} ({phonetic['error']})"
+        )
     return text
 
 
@@ -287,15 +297,15 @@ class ServiceStatusPanel(QGroupBox):
             suffix = "; список сервісів: кеш (Django недоступний)"
         elif source == "none":
             suffix = "; список сервісів: лише локальні"
-        for key in ("asr", "vosk", "tts"):
+        for key in ("asr", "phonetic", "tts"):
             entries = health.get(key) or []
             ok = any(e.get("ready") for e in entries)
             nodes = {i["url"]: i["node"] for i in choices.get(key) or ()}
             detail = escape(format_node(active.get(key)) + suffix)
-            if key == "vosk":
-                mode = status.get("vosk") or {}
+            if key == "phonetic":
+                mode = status.get("phonetic") or {}
                 ok = ok and mode.get("mode") == "on"
-                line = escape(format_vosk_mode(mode))
+                line = escape(format_phonetic_mode(mode))
                 detail = f"{line}<br>{detail}" if detail and line else line or detail
                 if mode.get("mode") == "off":
                     self._set(key, False, OFF_TEXT, detail)

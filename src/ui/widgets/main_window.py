@@ -32,8 +32,8 @@ INPUT_KEY = "audio.input_device"
 OUTPUT_KEY = "audio.output_device"
 MONITOR_KEY = "audio.monitor_device"
 MONITOR_ON_KEY = "audio.monitor_enabled"
-# «Показувати текст Vosk» under each recognized phrase
-SHOW_CHECK_KEY = "ui.show_vosk_text"
+# «Показувати звук (фонетика)» under each recognized phrase
+SHOW_SOUND_KEY = "ui.show_phonetic_text"
 RECORD_KEY = "services.record_session"
 RECORD_TEXT = "Записувати сесію для аналізу"
 
@@ -63,7 +63,7 @@ class MainWindow(QMainWindow):
         # Status manager for separating status display from logging
         self.status_logger = StatusLogger()
         self.status_manager = StatusManager(self.status_logger)
-        self._restore_show_check()
+        self._restore_show_sound()
         
         # Service status panel
         self.service_status_panel = ServiceStatusPanel()
@@ -259,7 +259,7 @@ class MainWindow(QMainWindow):
         # «Записувати сесію для аналізу» (services.record_session)
         self.record_check = QCheckBox(RECORD_TEXT)
         self.record_check.setToolTip(
-            "Аудіо кожної фрази (WAV) + whisper, Vosk, рішення фільтра і переклад"
+            "Аудіо кожної фрази (WAV) + whisper, фонетика, рішення фільтра і переклад"
             " (JSONL) у ~/.local/state/real-time-translator/sessions/<час>/ -"
             " для офлайн-аналізу. Типово вимкнено."
         )
@@ -396,13 +396,14 @@ class MainWindow(QMainWindow):
                     "LLM llama-воркера не вивантажено: він обслуговує чергу Django"
                 )
 
-    def _restore_show_check(self) -> None:
-        """«Показувати текст Vosk»: saved in config.yml, saved on toggle."""
+    def _restore_show_sound(self) -> None:
+        """«Показувати звук (фонетика)»: saved in config.yml, saved on
+        toggle."""
         from ...core.config import get_config_manager
 
-        box = self.status_logger.show_check
-        box.setChecked(bool(get_config_manager().get(SHOW_CHECK_KEY)))
-        box.toggled.connect(lambda on: _save_choice(SHOW_CHECK_KEY, on))
+        box = self.status_logger.show_sound
+        box.setChecked(bool(get_config_manager().get(SHOW_SOUND_KEY)))
+        box.toggled.connect(lambda on: _save_choice(SHOW_SOUND_KEY, on))
 
     def _restore_record_check(self) -> None:
         """The record toggle mirrors the settings; RT_EDGE_RECORD_SESSION
@@ -638,7 +639,7 @@ class MainWindow(QMainWindow):
 
         # Recognized / translated text panels
         for phrase in update_data.get('pending_recognized', []):
-            self.status_manager.log_recognized(phrase["text"], phrase["check"])
+            self.status_manager.log_recognized(phrase["text"], phrase["sound"])
         for text in update_data.get('pending_translated', []):
             self.status_manager.log_translated(text)
         self.status_manager.set_tail(update_data.get('source_tail') or "")

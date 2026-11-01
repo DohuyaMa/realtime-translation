@@ -10,9 +10,14 @@ translation for the words it uses:
 * ``foreign_script``: Cyrillic letters in the (English) translation - an
   untranslated or misrecognized source word left in the output
   ("("Niшки")", live test 2026-10-31 §4);
+* ``meta``: the model talks about the request instead of translating it
+  ("I notice you provided ...", "please provide", "the transcript", an
+  explanation of TEXT / SOUND); ~4/35 sound-mode outputs in the 2026-11-01
+  bench (context/phonetic-bench-2026-11-01.md), 0 hits on the 39 live
+  translations of that day (tests/test_output_guard.py);
 * ``next_leak`` (simultaneous mode, spec 2026-10-31 §4): the request's
   ``NEXT (do not translate)`` words got into the output - the prompt labels
-  (``TEXT:`` / ``HINT:`` / ``NEXT``) are echoed, a run of
+  (``TEXT:`` / ``SOUND:`` / ``NEXT``) are echoed, a run of
   ``NEXT_COPY_WORDS`` NEXT words is copied, or with NEXT given the output is
   more than ``NEXT_RATIO`` x TEXT + ``NEXT_SLACK`` words (an English
   translation of uk/pl/ru runs ~1.2-1.5 x the source words).
@@ -32,7 +37,22 @@ _FOREIGN_SCRIPT = re.compile(r"[\u0400-\u052f]")
 NEXT_RATIO = 2.0
 NEXT_SLACK = 4
 NEXT_COPY_WORDS = 3
-_LABELS = re.compile(r"\b(TEXT|HINT)\s*:|\bNEXT\b")
+_LABELS = re.compile(r"\b(TEXT|SOUND)\s*:|\bNEXT\b")
+# talk about the request (case-insensitive) or the prompt's labels named as
+# words (upper case, as the prompt writes them)
+_META = re.compile(
+    r"\bI notice\b"
+    r"|\byou(?:'ve| have)? provided\b"
+    r"|\bplease provide\b"
+    r"|\b(?:me|you) to translate\b|\bno text to translate\b"
+    r"|\btranscript(?:s|ion)?\b"
+    r"|\bspeech recogni[sz]\w*|\bmisrecogni[sz]\w*|\brecogni[sz]er\b"
+    r"|\bletter-by-letter\b"
+    r"|\bhere(?:'s| is) the translation\b"
+    r"|^\W*translation\s*:|\bnote\s*:",
+    re.IGNORECASE,
+)
+_META_LABELS = re.compile(r"\b(?:TEXT|SOUND)\b")
 _WORD = re.compile(r"[^\W\d_]+")
 
 
@@ -52,13 +72,16 @@ def _copies(output: str, next_text: str) -> bool:
 def reject_reason(source_text: str, output: str, next_text: str = "") -> Optional[str]:
     """Why ``output`` (or the output so far) is not a translation of
     ``source_text`` (the request's TEXT; ``next_text`` = its NEXT):
-    ``"too_long"`` / ``"foreign_script"`` / ``"next_leak"``, else None."""
+    ``"too_long"`` / ``"foreign_script"`` / ``"meta"`` / ``"next_leak"``,
+    else None."""
     if len(output.split()) > max_output_words(source_text):
         return "too_long"
     if _FOREIGN_SCRIPT.search(output):
         return "foreign_script"
     if _LABELS.search(output):
         return "next_leak"
+    if _META.search(output) or _META_LABELS.search(output):
+        return "meta"
     if next_text.strip():
         if len(output.split()) > NEXT_RATIO * len(source_text.split()) + NEXT_SLACK:
             return "next_leak"

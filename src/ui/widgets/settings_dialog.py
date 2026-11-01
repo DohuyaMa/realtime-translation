@@ -1,5 +1,5 @@
 """Settings dialog of the edge: services (allow-list, which instance to use),
-per-service tabs (ASR / Vosk / LLM / TTS, see service_tabs.py)."""
+per-service tabs (ASR / Фонетика / LLM / TTS, see service_tabs.py)."""
 
 import os
 from typing import Any, Dict, Optional
@@ -105,7 +105,7 @@ class EndpointsTab(QWidget):
         self.local_token_file = QLineEdit(settings.local_token_file or "")
         self.local = {
             kind: QLineEdit(getattr(settings.local, kind) or "")
-            for kind in ("llm", "asr", "vosk", "tts")
+            for kind in ("llm", "asr", "phonetic", "tts")
         }
         self.local_node = QLineEdit(settings.local.node or "")
         self.local_node.setPlaceholderText("hostname")
@@ -135,20 +135,20 @@ class EndpointsTab(QWidget):
         # llm: chosen in the Переклад tab (with the worker's model list)
         self.use = {
             kind: use_combo(kind, settings, service_choices(kind, settings, services))
-            for kind in ("asr", "vosk", "tts")
+            for kind in ("asr", "phonetic", "tts")
         }
         form.addRow("Django URL (свій хост першим):", self.django_urls)
         form.addRow("DRF token file:", self.django_token_file)
         form.addRow("Цей вузол у discovery:", self.local_node)
         form.addRow("Локальний LLM-воркер:", self.local["llm"])
         form.addRow("Локальний rt-asr:", self.local["asr"])
-        form.addRow("Локальний rt-vosk:", self.local["vosk"])
+        form.addRow("Локальний rt-phonetic:", self.local["phonetic"])
         form.addRow("Локальний rt-tts:", self.local["tts"])
         form.addRow("Локальний токен воркера:", self.local_token_file)
         form.addRow("Дозволені сервіси:", self.allow_all)
         form.addRow("", self.allowed)
         form.addRow("Використовувати ASR:", self.use["asr"])
-        form.addRow("Звірка Vosk:", self.use["vosk"])
+        form.addRow("Фонетика:", self.use["phonetic"])
         form.addRow("Використовувати TTS:", self.use["tts"])
         form.addRow("Режим:", self.mode)
         form.addRow("Мова:", self.source_language)
@@ -158,7 +158,7 @@ class EndpointsTab(QWidget):
             "local_token_file": self.local_token_file,
             "local.llm": self.local["llm"],
             "local.asr": self.local["asr"],
-            "local.vosk": self.local["vosk"],
+            "local.phonetic": self.local["phonetic"],
             "local.tts": self.local["tts"],
             "local.node": self.local_node,
             "allowed_services": self.allowed,
@@ -305,7 +305,7 @@ class SettingsDialog(QDialog):
             Background,
             LlmTab,
             TtsTab,
-            VoskTab,
+            PhoneticTab,
             active_prompts_text,
         )
 
@@ -323,10 +323,10 @@ class SettingsDialog(QDialog):
             service_client_factory("asr", settings),
             self.bg,
         )
-        self.vosk_tab = VoskTab(
+        self.phonetic_tab = PhoneticTab(
             settings,
-            service_choices("vosk", settings, services),
-            service_client_factory("vosk", settings),
+            service_choices("phonetic", settings, services),
+            service_client_factory("phonetic", settings),
             self.bg,
         )
         self.tts_tab = TtsTab(
@@ -342,16 +342,16 @@ class SettingsDialog(QDialog):
             self.bg,
         )
         source = self.endpoints_tab.source_language
-        source.currentTextChanged.connect(self.vosk_tab.set_source_language)
-        vosk_use = self.endpoints_tab.use["vosk"]
-        vosk_use.currentIndexChanged.connect(
+        source.currentTextChanged.connect(self.phonetic_tab.set_source_language)
+        phonetic_use = self.endpoints_tab.use["phonetic"]
+        phonetic_use.currentIndexChanged.connect(
             lambda _i: self.llm_tab.active_prompts.setText(
-                active_prompts_text(vosk_use.currentData())
+                active_prompts_text(phonetic_use.currentData())
             )
         )
         tabs.addTab(self.endpoints_tab, "Сервіси")
         tabs.addTab(self.asr_tab, "Розпізнавання (ASR)")
-        tabs.addTab(self.vosk_tab, "Звірка (Vosk)")
+        tabs.addTab(self.phonetic_tab, "Фонетика")
         tabs.addTab(self.llm_tab, "Переклад (LLM)")
         tabs.addTab(self.tts_tab, "Озвучка (TTS)")
         layout.addWidget(tabs)

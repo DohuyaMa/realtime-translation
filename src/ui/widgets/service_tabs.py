@@ -1,4 +1,4 @@
-"""Per-service settings tabs: ASR, Vosk, TTS, LLM.
+"""Per-service settings tabs: ASR, Фонетика (rt-phonetic), TTS, LLM.
 
 Two kinds of settings, two owners:
 - per service node (model incl. download, beam size, VAD, default voice, ...):
@@ -35,15 +35,15 @@ from PySide6.QtWidgets import (
 )
 
 from ...core.prompt import (
-    DEFAULT_CHECK_SYSTEM_PROMPT,
-    DEFAULT_CHECK_USER_TEMPLATE,
+    DEFAULT_SOUND_SYSTEM_PROMPT,
+    DEFAULT_SOUND_USER_TEMPLATE,
     DEFAULT_SYSTEM_PROMPT,
     DEFAULT_TERMS,
     DEFAULT_USER_TEMPLATE,
     asr_prompt_errors,
     build_messages,
-    check_template_errors,
     render_asr_prompt,
+    sound_template_errors,
     parse_terms,
     split_words,
     system_prompt_errors,
@@ -64,19 +64,18 @@ PREVIEW_SAMPLE = (
     "Dzień dobry wszystkim. Dzisiaj omówimy wdrożenie klastra NixOS i"
     " konfigurację usług rozpoznawania mowy na każdym węźle."
 )
-# the same audio as Vosk would hear it (no punctuation, misspellings)
-PREVIEW_CHECK = (
-    "dzień dobry wszystkim dzisiaj omówimy wdrożenie klastra nix os i"
-    " konfiguracje usług rozpoznawania mowy na każdym węźle"
-)
+# sound mode preview: a uk unit as whisper and rt-phonetic wrote it (live
+# 2026-11-01: whisper «виспер», the letters «віспер»)
+PREVIEW_SOUND_TEXT = "Нова модель перевірятиме виспер на сайборгу."
+PREVIEW_SOUND = "нова модель перевірятиме віспер на сайборгу"
 
 
-# LLM prompt variables (core/prompt.py PLACEHOLDERS / CHECK_PLACEHOLDERS)
+# LLM prompt variables (core/prompt.py PLACEHOLDERS / SOUND_PLACEHOLDERS)
 PROMPT_VARIABLES_HELP = (
     "Змінні prompt і шаблону:\n"
     "  {{text}} - текст whisper (обов'язкова в шаблоні запиту)\n"
-    "  {{vosk_text}} - текст Vosk того ж аудіо (лише зі звіркою; обов'язкова"
-    " в її шаблоні)\n"
+    "  {{sound_text}} - що почула фонетика (буква за буквою) у тому ж аудіо"
+    " (лише в режимі «зі звуком»; обов'язкова в його шаблоні)\n"
     "  {{source_lang}} - мова мовлення (Polish, Ukrainian, ...)\n"
     "  {{target_lang}} - мова перекладу (English)\n"
     "  {{terms}} - речення зі «Словника термінів» (лише в system prompt;"
@@ -84,15 +83,16 @@ PROMPT_VARIABLES_HELP = (
 )
 
 
-def active_prompts_text(vosk_use: Optional[str]) -> str:
-    """Which prompt pair translates now (services.use.vosk; the runtime
-    Vosk state is in the status panel row «Звірка (rt-vosk)»)."""
-    if vosk_use == OFF:
-        return "Зараз активні: «Без Vosk» (звірку Vosk вимкнено в «Сервіси»)."
+def active_prompts_text(phonetic_use: Optional[str]) -> str:
+    """Which prompt pair translates now (services.use.phonetic; the runtime
+    state is in the status panel row «Фонетика (rt-phonetic)»)."""
+    if phonetic_use == OFF:
+        return "Зараз активні: «Лише whisper» (фонетику вимкнено в «Сервіси»)."
     return (
-        "Зараз активні: «Зі звіркою Vosk» - для кожної фрази, яку Vosk"
-        " розпізнав; коли Vosk недоступний (див. «Звірка (rt-vosk)» на"
-        " головному вікні) - «Без Vosk»."
+        "Зараз активні: «Зі звуком» - для кожної фрази, яку почула фонетика;"
+        " коли фонетика недоступна, не встигла або не знає мови (див."
+        " «Фонетика (rt-phonetic)» на головному вікні), і для одного повтору"
+        " після відкинутої відповіді - «Лише whisper»."
     )
 
 
@@ -608,10 +608,10 @@ class AsrTab(QWidget):
         }
 
 
-class VoskTab(QWidget):
-    """rt-vosk node: its ONE model (language), load/unload, runtime config
-    and, when the session language differs from the model's, an explicit
-    one-click switch. Which instance cross-checks whisper (or none):
+class PhoneticTab(QWidget):
+    """rt-phonetic node: its ONE model (language), load/unload, runtime
+    config and, when the session language differs from the model's, an
+    explicit one-click switch. Which instance checks whisper (or none):
     «Сервіси» / status panel."""
 
     def __init__(
@@ -621,16 +621,17 @@ class VoskTab(QWidget):
         self.source_language = settings.source_language
         layout = QVBoxLayout(self)
         note = QLabel(
-            "Vosk розпізнає той самий звук, що й whisper, і не вигадує слів:"
-            " LLM перекладає лише те, що чув Vosk (промпт звірки - вкладка"
-            " «Переклад (LLM)»); сегмент без жодного слова у Vosk не"
-            " перекладається. На вузлі одночасно одна модель Vosk однієї мови;"
-            " фраза іншою мовою - без звірки (лише whisper). Вимкнути звірку:"
-            " «Сервіси» → «Звірка Vosk»."
+            "Фонетика (символьна CTC-модель, без словника) ще раз розпізнає"
+            " аудіо кожної фрази буква за буквою: фраза, у якій вона не почула"
+            " нічого або зовсім інше, ніж whisper, не перекладається"
+            " (галюцинація whisper); решта перекладається зі звуку як основи"
+            " (промпт «Зі звуком» - вкладка «Переклад (LLM)»). На вузлі одна"
+            " модель однієї мови; фраза іншою мовою - лише whisper. Вимкнути:"
+            " «Сервіси» → «Фонетика»."
         )
         note.setWordWrap(True)
         layout.addWidget(note)
-        self.service = ServiceConfigPanel("vosk", endpoints, client_factory, bg)
+        self.service = ServiceConfigPanel("phonetic", endpoints, client_factory, bg)
         layout.addWidget(self.service)
         self.language_hint = QLabel("")
         self.language_hint.setWordWrap(True)
@@ -672,22 +673,22 @@ class VoskTab(QWidget):
             return
         lang = langs[model]
         src = self.source_language
-        text = f"Модель Vosk на вузлі: {model} (мова «{lang}»)."
+        text = f"Модель фонетики на вузлі: {model} (мова «{lang}»)."
         style = ""
         if src == "auto":
             text += (
-                " Мова мовлення - auto: звірка лише для фраз мовою"
+                " Мова мовлення - auto: фонетика лише для фраз мовою"
                 f" «{lang}», решта - лише whisper."
             )
         elif src != lang:
             style = "color: #b36b00;"
             text += (
-                f" Мова мовлення - «{src}»: звірка Vosk недоступна, переклад"
-                " лише з whisper."
+                f" Мова мовлення - «{src}»: фонетика недоступна для цієї мови,"
+                " переклад лише з whisper."
             )
             self._target = self.model_for(src)
             if self._target is None:
-                text += f" Моделі Vosk для «{src}» немає в реєстрі."
+                text += f" Моделі фонетики для «{src}» немає в реєстрі."
         self.language_hint.setText(text)
         self.language_hint.setStyleSheet(style)
         self.switch_button.setText(f"Завантажити модель для «{src}» ({self._target})")
@@ -1126,11 +1127,11 @@ class LlmTab(QWidget):
         self.system_prompt.setFixedHeight(110)
         self.user_template = QPlainTextEdit(llm.user_template)
         self.user_template.setFixedHeight(60)
-        # two-text mode (whisper + Vosk cross-check, TASK-SYS-12)
-        self.check_system_prompt = QPlainTextEdit(llm.check_system_prompt)
-        self.check_system_prompt.setFixedHeight(110)
-        self.check_user_template = QPlainTextEdit(llm.check_user_template)
-        self.check_user_template.setFixedHeight(60)
+        # sound mode ("condition F": SOUND primary + whisper TEXT)
+        self.sound_system_prompt = QPlainTextEdit(llm.sound_system_prompt)
+        self.sound_system_prompt.setFixedHeight(110)
+        self.sound_user_template = QPlainTextEdit(llm.sound_user_template)
+        self.sound_user_template.setFixedHeight(60)
         # «Словник термінів» (services.llm.terms) -> {{terms}}
         self.terms = QPlainTextEdit(", ".join(llm.terms))
         self.terms.setFixedHeight(60)
@@ -1173,20 +1174,20 @@ class LlmTab(QWidget):
         form.addRow("Воркер (вузол):", self.use)
         form.addRow(self.worker_model)
         form.addRow(QLabel(PROMPT_VARIABLES_HELP))
-        plain = QGroupBox("Без Vosk (лише текст whisper)")
+        plain = QGroupBox("Лише whisper (без фонетики)")
         plain_form = QFormLayout(plain)
         plain_form.addRow("System prompt:", self.system_prompt)
         plain_form.addRow("Шаблон запиту:", self.user_template)
-        check = QGroupBox("Зі звіркою Vosk (текст whisper + текст Vosk)")
-        check_form = QFormLayout(check)
-        check_form.addRow("System prompt:", self.check_system_prompt)
-        check_form.addRow("Шаблон запиту:", self.check_user_template)
-        self.active_prompts = QLabel(active_prompts_text(settings.use.vosk))
+        sound = QGroupBox("Зі звуком (фонетика - основа, whisper - підказка)")
+        sound_form = QFormLayout(sound)
+        sound_form.addRow("System prompt:", self.sound_system_prompt)
+        sound_form.addRow("Шаблон запиту:", self.sound_user_template)
+        self.active_prompts = QLabel(active_prompts_text(settings.use.phonetic))
         self.active_prompts.setWordWrap(True)
         self.active_prompts.setStyleSheet("font-weight: bold;")
         form.addRow(self.active_prompts)
         form.addRow(plain)
-        form.addRow(check)
+        form.addRow(sound)
         form.addRow("Словник термінів:", self.terms)
         form.addRow("Слів у {{text}} (максимум):", self.words_per_request)
         form.addRow("", reset)
@@ -1197,8 +1198,8 @@ class LlmTab(QWidget):
         for w in (
             self.system_prompt,
             self.user_template,
-            self.check_system_prompt,
-            self.check_user_template,
+            self.sound_system_prompt,
+            self.sound_user_template,
             self.terms,
         ):
             w.textChanged.connect(self.update_preview)
@@ -1217,13 +1218,13 @@ class LlmTab(QWidget):
         """Rendered requests for PREVIEW_SAMPLE (or the template errors)."""
         system = self.system_prompt.toPlainText().strip()
         template = self.user_template.toPlainText().strip()
-        check_system = self.check_system_prompt.toPlainText().strip()
-        check_template = self.check_user_template.toPlainText().strip()
+        sound_system = self.sound_system_prompt.toPlainText().strip()
+        sound_template = self.sound_user_template.toPlainText().strip()
         errors = (
             system_prompt_errors("System prompt", system)
             + template_errors("Шаблон", template, True)
-            + check_template_errors("System prompt звірки", check_system, False)
-            + check_template_errors("Шаблон звірки", check_template, True)
+            + sound_template_errors("System prompt «зі звуком»", sound_system, False)
+            + sound_template_errors("Шаблон «зі звуком»", sound_template, True)
         )
         if errors:
             self.preview.setPlainText("\n".join(errors))
@@ -1243,23 +1244,23 @@ class LlmTab(QWidget):
             lines.append(
                 f"[запит {n}/{len(chunks)}, {{{{text}}}} = {words} слів] {user}"
             )
-        check = build_messages(
-            check_system,
-            check_template,
-            PREVIEW_SAMPLE,
-            "pl",
-            check=PREVIEW_CHECK,
+        snd = build_messages(
+            sound_system,
+            sound_template,
+            PREVIEW_SOUND_TEXT,
+            "uk",
+            sound=PREVIEW_SOUND,
             terms=terms,
         )
-        lines.append(f"[звірка Vosk, system] {check[0]['content']}")
-        lines.append(f"[звірка Vosk, запит] {check[-1]['content']}")
+        lines.append(f"[зі звуком, system] {snd[0]['content']}")
+        lines.append(f"[зі звуком, запит] {snd[-1]['content']}")
         self.preview.setPlainText("\n".join(lines))
 
     def reset_prompts(self) -> None:
         self.system_prompt.setPlainText(DEFAULT_SYSTEM_PROMPT)
         self.user_template.setPlainText(DEFAULT_USER_TEMPLATE)
-        self.check_system_prompt.setPlainText(DEFAULT_CHECK_SYSTEM_PROMPT)
-        self.check_user_template.setPlainText(DEFAULT_CHECK_USER_TEMPLATE)
+        self.sound_system_prompt.setPlainText(DEFAULT_SOUND_SYSTEM_PROMPT)
+        self.sound_user_template.setPlainText(DEFAULT_SOUND_USER_TEMPLATE)
         self.terms.setPlainText(", ".join(DEFAULT_TERMS))
 
     def values(self) -> Dict[str, Any]:
@@ -1267,11 +1268,11 @@ class LlmTab(QWidget):
             "services.use.llm": self.use.currentData(),
             "services.llm.system_prompt": self.system_prompt.toPlainText().strip(),
             "services.llm.user_template": self.user_template.toPlainText().strip(),
-            "services.llm.check_system_prompt": (
-                self.check_system_prompt.toPlainText().strip()
+            "services.llm.sound_system_prompt": (
+                self.sound_system_prompt.toPlainText().strip()
             ),
-            "services.llm.check_user_template": (
-                self.check_user_template.toPlainText().strip()
+            "services.llm.sound_user_template": (
+                self.sound_user_template.toPlainText().strip()
             ),
             "services.llm.temperature": self.temperature.value(),
             "services.llm.max_tokens_cap": self.max_tokens_cap.value(),

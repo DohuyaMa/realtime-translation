@@ -305,8 +305,8 @@ def counting_pool(urls, kind):
     return p
 
 
-@pytest.mark.parametrize("kind", ["asr", "vosk"])
-def test_backlog_of_a_slow_ready_is_delivered_without_overflow(kind):
+def test_backlog_of_a_slow_ready_is_delivered_without_overflow():
+    kind = "asr"
     """Single local endpoint, ready after more than send_queue_s of audio
     with capture running: the whole pre-ready backlog reaches the server,
     the stream stays open and the endpoint is not marked down."""
@@ -404,15 +404,4 @@ def test_no_endpoint_backs_off_and_reports_once_while_audio_flows():
     assert wait_for(lambda: any(e["type"] == "ready" for e in events))
     stop.set()
     t.join()
-    c.close()
-
-
-def test_vosk_idle_reaches_the_pipeline():
-    server = FakeServer()
-    c, events = client(server)
-    c.start()
-    c.feed(tone(0.2))
-    assert wait_for(lambda: any(e["type"] == "ready" for e in events))
-    server.connections[0].push({"type": "idle", "at": 0.2, "audio_end": 0.2})
-    assert wait_for(lambda: any(e["type"] == "idle" for e in events))
     c.close()

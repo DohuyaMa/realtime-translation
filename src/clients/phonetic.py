@@ -1,8 +1,13 @@
-"""rt-vosk client: the rt-asr request shape, answered with Vosk's words.
+"""rt-phonetic client: the rt-asr request shape, answered with the letters a
+character-level CTC model heard.
 
-``POST /v1/audio/transcriptions`` (multipart ``file`` + ``language``) ->
-``{"text", "language", "words": [{"word", "conf", "start", "end"}]}``. Vosk
-cannot detect the language, so ``language`` is always sent.
+``POST /v1/audio/transcriptions`` (multipart ``file`` = 16 kHz mono wav +
+``language``) -> ``{"text": "<lowercase letters, stress marks stripped>",
+"language", "words": [{"word", "start", "end"}], "duration"}``; word times
+are seconds from the start of the sent audio; silence -> ``"text": ""``. A
+language without a loaded model -> HTTP 409 ``model_language_mismatch``
+(``ServiceError`` kind ``wrong_language``). The model cannot detect the
+language, so ``language`` is always sent.
 """
 
 from __future__ import annotations
@@ -17,31 +22,30 @@ from .base import ServiceClient
 
 
 @dataclass(frozen=True)
-class VoskWord:
+class PhoneticWord:
     word: str
-    conf: float
     start: float  # seconds from the start of the sent audio
     end: float
 
 
 @dataclass(frozen=True)
-class VoskResult:
+class PhoneticResult:
     text: str
     language: Optional[str] = None
-    words: tuple[VoskWord, ...] = ()
+    words: tuple[PhoneticWord, ...] = ()
+    duration: Optional[float] = None
 
 
-def _word(d: dict) -> VoskWord:
-    return VoskWord(
+def _word(d: dict) -> PhoneticWord:
+    return PhoneticWord(
         word=str(d.get("word") or ""),
-        conf=float(d.get("conf") or 0.0),
         start=float(d.get("start") or 0.0),
         end=float(d.get("end") or 0.0),
     )
 
 
-class VoskClient(ServiceClient):
-    service = "vosk"
+class PhoneticClient(ServiceClient):
+    service = "phonetic"
 
     def transcribe(
         self,
@@ -50,11 +54,11 @@ class VoskClient(ServiceClient):
         sample_rate: int = 16000,
         *,
         timeout_s: Optional[float] = None,
-    ) -> VoskResult:
+    ) -> PhoneticResult:
         if len(audio_int16) == 0:
-            return VoskResult(text="", language=language)
+            return PhoneticResult(text="", language=language, duration=0.0)
         files = {
-            "file": ("chunk.wav", encode_wav(audio_int16, sample_rate), "audio/wav")
+            "file": ("unit.wav", encode_wav(audio_int16, sample_rate), "audio/wav")
         }
         payload = self._json(
             self._request(
@@ -66,8 +70,10 @@ class VoskClient(ServiceClient):
             )
         )
         words = payload.get("words") or []
-        return VoskResult(
+        duration = payload.get("duration")
+        return PhoneticResult(
             text=str(payload.get("text") or "").strip(),
             language=payload.get("language") or language,
             words=tuple(_word(w) for w in words if isinstance(w, dict)),
+            duration=None if duration is None else float(duration),
         )

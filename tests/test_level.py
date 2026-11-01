@@ -77,7 +77,7 @@ def test_trim_keeps_the_speech_and_short_pads():
 
 
 def test_pipeline_warns_about_a_quiet_microphone_and_feeds_gained_audio():
-    from test_vosk_crosscheck import system
+    from test_phonetic_crosscheck import system
 
     ts, streams, _, events = system()
     assert ts.start()

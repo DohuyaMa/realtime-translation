@@ -3,7 +3,7 @@
 
 services:
   mode: auto                    # auto | transcribe | translate (auto: translate iff llm and tts sources exist)
-  # Service discovery: Django lists the llm workers / rt-asr / rt-tts and their tokens
+  # Service discovery: Django lists the llm workers / rt-asr / rt-tts / rt-phonetic and their tokens
   django_urls: []               # own host first, e.g. ["http://127.0.0.1:8000", "http://cyborg:8000"]
   django_token_file: null       # user DRF token file (never the token itself)
   allowed_services: null        # ["llm:cyborg", "tts:sktop", ...] (kind:node, own node too); null = all discovered
@@ -11,7 +11,7 @@ services:
     llm: null                   #   a node name = only that node (no failover; down = explicit error)
     asr: null
     tts: null
-    vosk: null                  #   vosk: also "off" = no cross-check, whisper-only translation
+    phonetic: null              #   phonetic: also "off" = no gate, whisper-only translation
   # Services on this host, always tried first. A discovered service of this
   # host is reached here, or at 127.0.0.1:<its port> when null - never via
   # the cluster (tailscale) URL Django lists for it.
@@ -20,11 +20,11 @@ services:
     llm: null                   # e.g. "http://127.0.0.1:8080"
     asr: "http://127.0.0.1:8091"
     tts: null                   # e.g. "http://127.0.0.1:8093"
-    vosk: null                  # e.g. "http://127.0.0.1:8092" (rt-vosk: cross-checks whisper in translate mode)
+    phonetic: null              # e.g. "http://127.0.0.1:8092" (rt-phonetic: letter transcript per unit in translate mode)
   local_token_file: /run/llama/local-token   # local worker token when Django is unreachable
   source_language: auto         # auto | pl | uk | ru | en
   # «Записувати сесію для аналізу» (env RT_EDGE_RECORD_SESSION): every translate-mode
-  # segment's WAV + per-phrase JSONL (whisper, Vosk + conf, gate, translation) in
+  # unit's WAV + per-unit JSONL (whisper, phonetic + similarity, gate, mode, translation) in
   # ~/.local/state/real-time-translator/sessions/<timestamp>/ for offline replay
   record_session: false
   timeouts:
@@ -50,11 +50,12 @@ services:
     # rejected with a WARNING and the default template is used.
     system_prompt: ""           # "" = built-in interpreter prompt
     user_template: ""           # "" = "{{text}}"
-    # Phrases Vosk also recognized (TASK-SYS-12): {{text}} = whisper, {{vosk_text}} =
-    # Vosk (both required in check_user_template). "" = built-in (whisper = TEXT, translated
-    # whole; Vosk = HINT, fixes misheard words: "TEXT: {{text}}\nHINT: {{vosk_text}}").
-    check_system_prompt: ""
-    check_user_template: ""
+    # Units rt-phonetic heard ("condition F"): {{sound_text}} = its letter-by-letter
+    # transcript, the PRIMARY source (SOUND); {{text}} = whisper, only spelling / word
+    # boundaries / numbers (both required in sound_user_template). "" = built-in
+    # ("SOUND: {{sound_text}}\nTEXT: {{text}}"). Old check_* / {{vosk_text}} keys are errors.
+    sound_system_prompt: ""
+    sound_user_template: ""
     # «Словник термінів»: {{terms}} of both system prompts ("Known terms (always
     # written in English): ..."). null = built-in IT list; "" = none; list or
     # "a, b" / one per line
@@ -72,7 +73,7 @@ audio:
 ui:
   minimize_to_tray: false
   start_minimized: false
-  show_vosk_text: true          # «Показувати текст Vosk» under each recognized phrase
+  show_phonetic_text: true      # «Показувати звук (фонетика)» under each recognized phrase
 
 logging:
   level: "INFO"

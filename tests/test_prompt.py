@@ -171,7 +171,7 @@ def test_next_line_only_in_the_last_message():
 
 
 def test_terms_render_only_when_present():
-    from src.core.prompt import DEFAULT_CHECK_SYSTEM_PROMPT, parse_terms
+    from src.core.prompt import DEFAULT_SOUND_SYSTEM_PROMPT, parse_terms
 
     assert parse_terms("CRM, SaaS\nPlaywright,, crm , CS2") == (
         "CRM",
@@ -179,15 +179,22 @@ def test_terms_render_only_when_present():
         "Playwright",
         "CS2",
     )
-    for prompt in (DEFAULT_SYSTEM_PROMPT, DEFAULT_CHECK_SYSTEM_PROMPT):
+    # the sound prompt names its own examples (tuned by replay, no IT_DOMAIN)
+    for prompt, end in (
+        (DEFAULT_SYSTEM_PROMPT, "English term."),
+        (DEFAULT_SOUND_SYSTEM_PROMPT, "Output only the English translation."),
+    ):
         with_terms = build_messages(prompt, "{{text}}", "x", "uk", terms=("CRM",))
         assert with_terms[0]["content"].endswith(
             "Known terms (always written in English): CRM."
         )
-        assert "about IT" in with_terms[0]["content"]
         bare = build_messages(prompt, "{{text}}", "x", "uk")[0]["content"]
         assert "{{" not in bare and "Known terms" not in bare
-        assert bare.endswith("English term.")
+        assert bare.endswith(end)
+    assert (
+        "about IT"
+        in build_messages(DEFAULT_SYSTEM_PROMPT, "{{text}}", "x", "uk")[0]["content"]
+    )
     mid = build_messages("A {{terms}} B\n{{terms}}\nC", "{{text}}", "x", "uk")
     assert mid[0]["content"] == "A B\n\nC"
 

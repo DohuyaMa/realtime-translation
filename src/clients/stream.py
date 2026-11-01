@@ -1,4 +1,4 @@
-"""Edge client of ``WS /v1/audio/stream`` (rt-asr / rt-vosk), spec 2026-10-31
+"""Edge client of rt-asr's ``WS /v1/audio/stream``, spec 2026-10-31
 §3 / §3a.
 
 One thread per stream. The pipeline ``feed``s 16 kHz PCM16 at any time: it
@@ -12,7 +12,8 @@ toward the send queue: the queue limit measures only audio fed after
 ``ready`` that the link could not take (live test 2026-10-31 §15).
 
 Timeline: sample 0 is the first fed sample; ``start.t0`` and every time the
-server sends are seconds on it, so rt-asr and rt-vosk words share one scale.
+server sends are seconds on it; ``audio(t0, t1)`` cuts a unit's audio on the
+same scale (sent to rt-phonetic and kept by the session recording).
 
 Failover: a broken connection (refused handshake, closed socket, a send
 queue of more than ``send_queue_s`` seconds of audio fed after ``ready``, an
@@ -491,7 +492,7 @@ class StreamClient:
                 )
             self._committed_end = float(words[-1]["end"])
             self._emit(msg)
-        elif kind in ("partial", "endpoint", "idle"):  # idle: rt-vosk only
+        elif kind in ("partial", "endpoint"):
             self._emit(msg)
         elif kind == "error":
             raise _Down(

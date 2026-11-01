@@ -16,10 +16,10 @@ from typing import List, Optional, Tuple
 import datetime
 from loguru import logger
 
-SHOW_CHECK_TEXT = "Показувати текст Vosk"
-CHECK_PREFIX = "    Vosk: "
-CHECK_NONE = "(без звірки)"
-CHECK_EMPTY = "(нічого не почув)"
+SHOW_SOUND_TEXT = "Показувати звук (фонетика)"
+SOUND_PREFIX = "    Звук: "
+SOUND_NONE = "(без фонетики)"
+SOUND_EMPTY = "(нічого не почула)"
 
 
 class StatusLogger(QWidget):
@@ -29,7 +29,7 @@ class StatusLogger(QWidget):
         super().__init__(parent)
         self._messages: List[Tuple] = []
         self._max_messages = 1000
-        # (time, whisper text, Vosk text of the same audio or None)
+        # (time, whisper text, rt-phonetic's transcript of the unit or None)
         self._recognized: List[Tuple[str, str, Optional[str]]] = []
         self.init_ui()
 
@@ -53,14 +53,15 @@ class StatusLogger(QWidget):
         self.tail_label.setStyleSheet("color: gray;")
         self.tail_label.setToolTip("Ще не перекладено: whisper може його уточнити")
         rec_layout.addWidget(self.tail_label)
-        # Vosk's text of the same phrase under whisper's line, to compare
-        self.show_check = QCheckBox(SHOW_CHECK_TEXT)
-        self.show_check.setChecked(True)
-        self.show_check.setToolTip(
-            "Під кожною фразою whisper - що почув Vosk (звірка) у тому ж аудіо"
+        # rt-phonetic's letters of the same unit under whisper's line
+        self.show_sound = QCheckBox(SHOW_SOUND_TEXT)
+        self.show_sound.setChecked(True)
+        self.show_sound.setToolTip(
+            "Під кожною фразою whisper - що почула фонетика (буква за буквою,"
+            " без словника) у тому ж аудіо; саме це LLM перекладає"
         )
-        self.show_check.toggled.connect(lambda _on: self._render_recognized())
-        rec_layout.addWidget(self.show_check)
+        self.show_sound.toggled.connect(lambda _on: self._render_recognized())
+        rec_layout.addWidget(self.show_sound)
         text_splitter.addWidget(rec_box)
 
         tr_box = QGroupBox("Переклад (Translated)")
@@ -113,28 +114,28 @@ class StatusLogger(QWidget):
     def set_status(self, message: str):
         self.status_area.setText(message)
 
-    def add_recognized(self, text: str, check: Optional[str] = None):
-        """Append a recognized phrase (whisper) and, when shown, Vosk's text
-        of the same audio (``check``; None = no Vosk check for it)."""
+    def add_recognized(self, text: str, sound: Optional[str] = None):
+        """Append a recognized phrase (whisper) and, when shown, rt-phonetic's
+        transcript of the same audio (``sound``; None = no phonetic check)."""
         ts = datetime.datetime.now().strftime("%H:%M:%S")
-        self._recognized.append((ts, text, check))
+        self._recognized.append((ts, text, sound))
         if len(self._recognized) > self._max_messages:
             self._recognized = self._recognized[-self._max_messages :]
             self._render_recognized()
             return
-        self.recognized_view.appendPlainText(self._recognized_lines(ts, text, check))
+        self.recognized_view.appendPlainText(self._recognized_lines(ts, text, sound))
         self._scroll_recognized()
 
-    def _recognized_lines(self, ts: str, text: str, check: Optional[str]) -> str:
+    def _recognized_lines(self, ts: str, text: str, sound: Optional[str]) -> str:
         line = f"[{ts}] {text}"
-        if not self.show_check.isChecked():
+        if not self.show_sound.isChecked():
             return line
-        if check is None:
-            return f"{line}\n{CHECK_PREFIX}{CHECK_NONE}"
-        return f"{line}\n{CHECK_PREFIX}{check or CHECK_EMPTY}"
+        if sound is None:
+            return f"{line}\n{SOUND_PREFIX}{SOUND_NONE}"
+        return f"{line}\n{SOUND_PREFIX}{sound or SOUND_EMPTY}"
 
     def _render_recognized(self) -> None:
-        """Rebuild the panel (the Vosk toggle changed)."""
+        """Rebuild the panel (the «Показувати звук» toggle changed)."""
         self.recognized_view.setPlainText(
             "\n".join(self._recognized_lines(*r) for r in self._recognized)
         )
@@ -212,9 +213,9 @@ class StatusManager:
         if self.status_logger:
             self.status_logger.set_status(message)
 
-    def log_recognized(self, text: str, check: Optional[str] = None):
+    def log_recognized(self, text: str, sound: Optional[str] = None):
         if self.status_logger:
-            self.status_logger.add_recognized(text, check)
+            self.status_logger.add_recognized(text, sound)
 
     def set_tail(self, text: str):
         if self.status_logger:

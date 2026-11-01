@@ -132,12 +132,12 @@ class LlmClient:
         text: str,
         source_lang: str,
         context: Sequence[tuple] = (),
-        check: Optional[Aligned] = None,
+        sound: Optional[Aligned] = None,
         next_text: str = "",
     ) -> str:
         """Whole translation (joined stream)."""
         return " ".join(
-            self.translate_stream(text, source_lang, context, check, next_text)
+            self.translate_stream(text, source_lang, context, sound, next_text)
         )
 
     def translate_stream(
@@ -145,7 +145,7 @@ class LlmClient:
         text: str,
         source_lang: str,
         context: Sequence[tuple] = (),
-        check: Optional[Aligned] = None,
+        sound: Optional[Aligned] = None,
         next_text: str = "",
     ) -> Iterator[str]:
         """Translated TTS pieces (``_pieces``) as soon as each one is complete.
@@ -153,11 +153,12 @@ class LlmClient:
         One streamed call per chunk of <= words_per_request words (in order);
         earlier chunks of this phrase become context of the next ones.
 
-        ``check`` (TASK-SYS-12): the Vosk transcript aligned with ``text``
-        (whisper) - two-text mode with the check prompts; each chunk gets
-        the Vosk words of its time span. Context items are ``(source,
-        translation)`` or ``(source, translation, check)``; in two-text mode
-        only the latter are used (a whisper-only pair has no Vosk text).
+        ``sound``: rt-phonetic's letter transcript aligned with ``text``
+        (whisper) - sound mode ("condition F") with the sound prompts; each
+        chunk gets the phonetic words of its time span. Context items are
+        ``(source, translation)`` or ``(source, translation, sound)``; in
+        sound mode only the latter are used (a whisper-only pair has no
+        SOUND).
 
         ``next_text``: speech recognized after ``text`` (the NEXT line, for
         understanding only); a later chunk of the same text is part of an
@@ -169,26 +170,26 @@ class LlmClient:
         if source_lang not in SOURCE_LANGUAGES:
             raise ValueError(f"unsupported source language {source_lang!r}")
         s = self._settings
-        if check is None:
+        if sound is None:
             system, template = s.system_prompt, s.user_template
             ctx = tuple(context)
         else:
-            system, template = s.check_system_prompt, s.check_user_template
+            system, template = s.sound_system_prompt, s.sound_user_template
             ctx = tuple(c for c in context if len(c) > 2)
-        rest = check
+        rest = sound
         chunks = split_words(text, s.words_per_request)
         for i, chunk in enumerate(chunks):
-            chunk_check = None
+            chunk_sound = None
             if rest is not None:
                 part, rest = rest.cut(len(chunk.split()))
-                chunk_check = part.check_text
+                chunk_sound = part.sound_text
             messages = build_messages(
                 system,
                 template,
                 chunk,
                 source_lang,
                 ctx,
-                check=chunk_check,
+                sound=chunk_sound,
                 terms=s.terms,
                 next_text=" ".join(chunks[i + 1 :] + [next_text]).strip(),
             )
@@ -200,7 +201,7 @@ class LlmClient:
                 raise ServiceError(self.service, "http", "empty translation")
             done = " ".join(parts)
             ctx = ctx + (
-                (chunk, done) if chunk_check is None else (chunk, done, chunk_check),
+                (chunk, done) if chunk_sound is None else (chunk, done, chunk_sound),
             )
 
     def _open_stream(self, body: dict) -> httpx.Response:

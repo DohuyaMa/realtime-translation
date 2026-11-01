@@ -15,8 +15,11 @@ import re
 from typing import Mapping, Sequence
 
 PLACEHOLDERS = ("text", "source_lang", "target_lang")
-# two-text (Vosk cross-check) templates also get the Vosk transcript
-CHECK_PLACEHOLDERS = PLACEHOLDERS + ("vosk_text",)
+# sound-mode templates also get the phonetic (CTC letter) transcript
+SOUND_TEXT = "sound_text"
+SOUND_PLACEHOLDERS = PLACEHOLDERS + (SOUND_TEXT,)
+# placeholders of removed features -> what replaced them (explicit error)
+REMOVED_PLACEHOLDERS = {"vosk_text": "{{sound_text}} (Vosk was removed)"}
 # system prompts only: the glossary sentence (empty glossary -> "")
 TERMS = "terms"
 TERMS_SENTENCE = "Known terms (always written in English): {}."
@@ -137,32 +140,40 @@ DEFAULT_SYSTEM_PROMPT = (
 DEFAULT_USER_TEMPLATE = "TEXT: {{text}}"
 NEXT_LABEL = "NEXT (do not translate): "
 
-# TASK-SYS-12: two-text mode - the same audio recognized by whisper ({{text}},
-# TEXT: the PRIMARY transcript, translated whole) and Vosk ({{vosk_text}},
-# HINT: only fixes misrecognized TEXT words). The earlier "B3" prompt (Vosk
-# decides which words were spoken) cut live translations down to the few
-# words a sparse Vosk-nano transcript had (live test 2026-10-31 §10); this
-# one won the real-LLM re-test there. Hallucinated phrases are vetoed by
+# Sound mode ("condition F", owner 2026-11-01): the unit's audio recognized
+# twice - rt-phonetic's character-level CTC transcript ({{sound_text}},
+# SOUND: the PRIMARY source - no dictionary, so it cannot put a confident
+# wrong word in) and whisper ({{text}}, TEXT: only spelling, word boundaries,
+# numbers). As a mere hint the letter transcript did NOT help - whisper's
+# confident errors survived - so SOUND is what gets translated
+# (context/phonetic-bench-2026-11-01.md). The wording ("fluent sentences",
+# "never transliterate", the name examples) was tuned by
+# scripts/replay_session.py on the owner's 39 live units: a first draft
+# made Qwen3.5-4B transliterate SOUND into Latin letters from unit 12 on
+# (the bad pairs fed the context). Hallucinated units are dropped by
 # code before the LLM (``core.crosscheck.gate_reason``), never by the model.
-DEFAULT_CHECK_SYSTEM_PROMPT = (
-    "You are a live {{source_lang}}-to-{{target_lang}} interpreter. The user"
-    " message has two independent speech-recognition transcripts of the same"
-    " audio. TEXT is the main one: fluent, but some words may be misheard."
-    " HINT is rougher: often garbled, with words missing. Translate everything"
-    " TEXT says - every clause, never shortened or summarized; a word missing"
-    " from HINT is still translated. TEXT words that are misheard - not real"
-    " words, or out of place - are corrected from HINT, which often has the"
-    " right word where TEXT is wrong. HINT may run past the end of TEXT: never"
-    " translate HINT words that have no counterpart in TEXT. NEXT, when given,"
-    " is the speech right after TEXT, only for understanding: never translate"
-    " NEXT or any part of it. TEXT is the next fragment of a live speech:"
-    " continue your previous translations consistently. Never transliterate."
-    " Short fragments are translated as-is. Output only the {{target_lang}}"
-    " translation of TEXT - no comments, no {{source_lang}} words."
-    + IT_DOMAIN
-    + " {{terms}}"
+DEFAULT_SOUND_SYSTEM_PROMPT = (
+    "You are a live {{source_lang}}-to-{{target_lang}} interpreter. Translate"
+    " each fragment of live speech into natural, fluent {{target_lang}}"
+    " sentences with normal capitalization and punctuation. Each user message"
+    " gives two recognitions of the same fragment. SOUND is a letter-by-letter"
+    " transcript of what was actually heard: no dictionary, no punctuation,"
+    " some letters off, words sometimes split or merged; names and IT terms"
+    " are spelled by sound in Cyrillic letters (for example «сайборг» is the"
+    " server Cyborg, «ес кей топ» is SKTOP, «воск» is the Vosk recognizer,"
+    " «віспер» is the Whisper recognizer). TEXT is another recognizer's"
+    " output: well spelled, but it may confidently write a wrong word. Use"
+    " TEXT only for spelling, word boundaries and numbers; where SOUND and"
+    " TEXT disagree, trust SOUND. Translate the meaning of what SOUND says -"
+    " every clause, nothing added. NEXT, when given, is the speech right"
+    " after, only for understanding: never translate it. Continue your"
+    " previous translations consistently; short fragments are translated"
+    " as-is. Never transliterate: every {{source_lang}} word becomes an"
+    " {{target_lang}} word. Never explain, comment, ask for more text or"
+    " mention SOUND or TEXT. Output only the {{target_lang}} translation."
+    " {{terms}}"
 )
-DEFAULT_CHECK_USER_TEMPLATE = "TEXT: {{text}}\nHINT: {{vosk_text}}"
+DEFAULT_SOUND_USER_TEMPLATE = "SOUND: {{sound_text}}\nTEXT: {{text}}"
 DEFAULT_WORDS_PER_REQUEST = 40
 
 _PLACEHOLDER = re.compile(r"\{\{\s*([A-Za-z_]+)\s*\}\}")
@@ -189,7 +200,11 @@ def template_errors(
             " use {{source_lang}} / {{text}}"
         )
     names = {m.group(1) for m in _PLACEHOLDER.finditer(template)}
-    unknown = sorted(names - set(allowed))
+    for old in sorted(names & set(REMOVED_PLACEHOLDERS)):
+        errors.append(
+            f"{name}: {{{{{old}}}}} is removed; use {REMOVED_PLACEHOLDERS[old]}"
+        )
+    unknown = sorted(names - set(allowed) - set(REMOVED_PLACEHOLDERS))
     if unknown:
         errors.append(
             f"{name}: unknown placeholder(s) {', '.join(unknown)};"
@@ -208,16 +223,15 @@ def system_prompt_errors(name: str, template: str) -> list[str]:
     return template_errors(name, template, False, PLACEHOLDERS + (TERMS,))
 
 
-def check_template_errors(name: str, template: str, user: bool) -> list[str]:
-    """Two-text (Vosk cross-check) template: may use {{vosk_text}}; the user
-    template must carry both transcripts; the system prompt may use
-    {{terms}}."""
+def sound_template_errors(name: str, template: str, user: bool) -> list[str]:
+    """Sound-mode template: may use {{sound_text}}; the user template must
+    carry both transcripts; the system prompt may use {{terms}}."""
     return template_errors(
         name,
         template,
         require_text=user,
-        allowed=CHECK_PLACEHOLDERS + (() if user else (TERMS,)),
-        required=("vosk_text",) if user else (),
+        allowed=SOUND_PLACEHOLDERS + (() if user else (TERMS,)),
+        required=(SOUND_TEXT,) if user else (),
     )
 
 
@@ -264,22 +278,22 @@ def build_messages(
     chunk: str,
     source_lang: str,
     context: tuple[tuple, ...] = (),
-    check: str | None = None,
+    sound: str | None = None,
     terms: Sequence[str] = (),
     next_text: str = "",
 ) -> list[dict]:
     """Chat messages for one request (``chunk`` = up to words_per_request).
 
-    ``check``: the Vosk transcript of the chunk ({{vosk_text}}, two-text
-    mode). Context items are ``(source, translation)`` or, in two-text mode,
-    ``(source, translation, check)``. ``terms``: the glossary ({{terms}} of
+    ``sound``: the phonetic transcript of the chunk ({{sound_text}}, sound
+    mode). Context items are ``(source, translation)`` or, in sound mode,
+    ``(source, translation, sound)``. ``terms``: the glossary ({{terms}} of
     the system prompt). ``next_text``: speech recognized after the chunk -
     appended as the ``NEXT_LABEL`` line of the last message only."""
 
-    def values(text: str, vosk_text: str = "") -> dict:
+    def values(text: str, sound_text: str = "") -> dict:
         return {
             "text": text,
-            "vosk_text": vosk_text,
+            SOUND_TEXT: sound_text,
             "source_lang": LANGUAGE_NAMES.get(source_lang, source_lang),
             "target_lang": TARGET_LANG,
         }
@@ -288,12 +302,12 @@ def build_messages(
     messages = [{"role": "system", "content": system}]
     for item in context:
         src, tr = item[0], item[1]
-        chk = item[2] if len(item) > 2 else ""
+        snd = item[2] if len(item) > 2 else ""
         messages.append(
-            {"role": "user", "content": render(user_template, values(src, chk))}
+            {"role": "user", "content": render(user_template, values(src, snd))}
         )
         messages.append({"role": "assistant", "content": tr})
-    content = render(user_template, values(chunk, check or ""))
+    content = render(user_template, values(chunk, sound or ""))
     if next_text.strip():
         content += "\n" + NEXT_LABEL + next_text.strip()
     messages.append({"role": "user", "content": content})

@@ -1,4 +1,4 @@
-"""Render the rt-asr / rt-vosk / rt-tts env tables for docs/USAGE.md.
+"""Render the rt-asr / rt-phonetic / rt-tts env tables for docs/USAGE.md.
 
 Usage: python -m scripts.gen_env_table
 """
@@ -9,12 +9,12 @@ from typing import Any
 
 from src.services.asr.settings import AsrSettings
 from src.services.common.settings import render_env_value
+from src.services.phonetic.settings import PhoneticSettings
 from src.services.tts.settings import TtsSettings
-from src.services.vosk.settings import VoskSettings
 
 SERVICES = (
     ("rt-asr", AsrSettings),
-    ("rt-vosk", VoskSettings),
+    ("rt-phonetic", PhoneticSettings),
     ("rt-tts", TtsSettings),
 )
 

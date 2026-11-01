@@ -1,10 +1,10 @@
-"""Edge coordinator: mic -> rt-asr / rt-vosk streams -> units -> LLM -> rt-tts
--> playback (spec 2026-10-31 «streaming ASR + simultaneous translation»).
+"""Edge coordinator: mic -> rt-asr stream -> units -> rt-phonetic gate -> LLM
+-> rt-tts -> playback (spec 2026-10-31 «streaming ASR + simultaneous
+translation», phonetic cross-check 2026-11-01).
 
-Capture (48 kHz) is resampled to 16 kHz PCM16 and fed to two WS streams
-(``clients.stream.StreamClient``): rt-asr (whisper, LocalAgreement-2 - its
-finals are committed words that are never revised) and, in translate mode,
-rt-vosk (the cross-check); both send word times on one timeline.
+Capture (48 kHz) is resampled to 16 kHz PCM16 and fed to the rt-asr WS
+stream (``clients.stream.StreamClient``: whisper, LocalAgreement-2 - its
+finals are committed words that are never revised).
 
 Simultaneous translation (``core.simul``): whisper's committed words go into
 an append-only ``SourceLedger``; ``next_unit`` cuts the next unit at a
@@ -15,42 +15,49 @@ translated or spoken twice, a spoken translation is never corrected
 unit) is shown grey in the UI (``get_stats()["source_tail"]``), never
 spoken (decision 2).
 
-Vosk gate per unit (TASK-SYS-12, ``core.crosscheck.gate_reason``): the unit
-waits until Vosk has covered its end t1 - at most ``VOSK_WAIT_S`` - then its
-HINT is the Vosk words of [t0 - 0.25, t1 + 0.25] (``core.simul.VoskTrack``:
-covered = the end of Vosk's latest word, or Kaldi idle past t1 - heard
-silence, so a whisper hallucination in a pause is dropped as ``no_word``).
-Only clear hallucination
-is dropped (``vosk_gate_dropped`` / ``_disagree``, a dropped unit only moves
-the ledger on); Vosk late, off or unavailable -> whisper-only, counted and
-logged. Whisper's echo of its prompt is dropped by rt-asr itself.
+Phonetic gate per unit (``core.crosscheck``, owner 2026-11-01): the unit's
+audio (``stream.audio(t0, t1)``) goes to rt-phonetic, a character-level CTC
+model, in one HTTP request (budget ``PHONETIC_TIMEOUT_S``). An empty
+transcript is heard silence - whisper hallucinated the unit (``no_word``);
+letters less similar than ``GATE_MIN_SIMILARITY`` - another phrase
+(``disagree``): the unit is dropped (counted, logged, ``phonetic_gate``
+event; the ledger just goes on). rt-phonetic off, failing, slow (timeout) or
+without a model of the language (409) -> the unit is translated
+whisper-only, counted (``phonetic_unavailable`` / ``phonetic_timeout`` /
+``whisper_only``), logged and shown in the UI. Whisper's echo of its prompt
+is dropped by rt-asr itself.
 
-LLM request per unit: the previous source -> target pairs as context, then
-``TEXT:`` the unit, ``HINT:`` its Vosk words (two-text mode) and ``NEXT (do
+LLM request per unit ("condition F"): the previous source -> target pairs as
+context, then ``SOUND:`` the phonetic transcript (PRIMARY: translated),
+``TEXT:`` whisper (spelling, word boundaries, numbers only) and ``NEXT (do
 not translate):`` the committed words after it + whisper's partial, for
-understanding only (``core.output_guard`` rejects NEXT leakage).
+understanding only (``core.output_guard`` rejects NEXT leakage and meta
+replies). A rejected sound-mode reply of which nothing reached TTS yet is
+re-translated once whisper-only (``retry_whisper_only``); once sentences
+were queued it is only rejected (``rejected_after_tts``).
 
 Staged pipeline (owner 2026-10-31): the unit stage, LLM, TTS and playback
 are worker threads with bounded FIFO queues - the LLM translates unit n+1
 while TTS synthesizes n and n-1 plays. A full downstream queue blocks the
 stage (backpressure, logged + ``backpressure`` status event). The LLM output
 is streamed: each finished sentence goes to TTS at once. Each unit is logged
-in one INFO line (whisper, Vosk + mean conf + agreement, gate, LLM mode,
-NEXT, translation) and its timing (speech end -> commit -> LLM -> TTS ->
+in one INFO line (whisper, phonetic + similarity, gate, LLM mode, NEXT,
+translation) and its timing (speech end -> commit -> LLM -> TTS ->
 playback) in another; ``get_stats()["latency"]`` keeps p50/p90. The opt-in
 session recording (``core.session_record``) keeps each unit's audio.
 
 Warm-up (owner 2026-10-31, spec §3a): Start warms every service in parallel
-- it opens both streams (the handshake loads the model, an unloaded one gets
-``POST /model/load`` first; the server decodes 1 s of silence after
-``ready``), the LLM (one 1-token completion) and rt-tts (load if needed +
-one short synthesis). Capture starts at once; audio waits in the stream's
-ring buffer (<= 30 s) until the stream is ready. Each warm-up is logged with
+- it opens the rt-asr stream (the handshake loads the model, an unloaded one
+gets ``POST /model/load`` first; the server decodes 1 s of silence after
+``ready``), rt-phonetic (load if needed + 1 s of silence), the LLM (one
+1-token completion) and rt-tts (load if needed + one short synthesis).
+Capture starts at once; audio waits in the stream's ring buffer (<= 30 s)
+until the stream is ready. Each warm-up is logged with
 its ms, the UI shows «прогрів…» with the services still warming
 (``warmup_state`` events) and one INFO line gives Start -> all ready.
 
 Transcribe mode: only the rt-asr stream; every unit is one recognized line,
-no worker session is opened.
+no worker session is opened, no phonetic check.
 """
 
 from __future__ import annotations
@@ -85,20 +92,20 @@ from .clients import (
 from .clients.discovery import choices
 from .clients.model_status import ensure_model_ready
 from .clients.stream import StreamClient
+from .clients.phonetic import PhoneticResult
 from .core.crosscheck import (
     GATE_DISAGREE,
     GATE_DROPS,
     GATE_FOREIGN_TERMS,
     Aligned,
-    agreement,
     gate_reason,
-    mean_conf,
+    similarity,
 )
 from .core.output_guard import reject_reason
 from .core.prompt import render_asr_prompt
 from .core.runtime import KINDS, OFF, EdgeSettings, LlmSettings
 from .core.session_record import SessionRecorder
-from .core.simul import SourceLedger, Unit, VoskTrack, Word, parse_words, words_text
+from .core.simul import SourceLedger, Unit, Word, parse_words
 
 CAPTURE_RATE = 48000
 BLOCKSIZE = 1024
@@ -112,9 +119,12 @@ SHORT_SOURCE_WORDS = 3
 CAPTURE_START_CHECK_S = 0.2
 # TTS warm-up text (first Kokoro synthesis took 6.3 s live, 2026-10-31 §10)
 TTS_WARMUP_TEXT = "Hello."
-# a unit waits at most this long for Vosk to cover its end (spec §4)
-VOSK_WAIT_S = 0.3
-# the unit stage re-checks waiting units this often
+# budget of one rt-phonetic request per unit (CPU: 0.28 s per 2 s of audio,
+# bench 2026-11-01); slower -> whisper-only, counted
+PHONETIC_TIMEOUT_S = 1.5
+# rt-phonetic warm-up: this much silence after the model is ready
+PHONETIC_WARMUP_S = 1.0
+# the unit stage re-checks the ledger (sentence hold) this often
 UNIT_POLL_S = 0.02
 # playback that returns this much earlier than its audio lasts is reported
 PLAYBACK_SHORT_S = 0.3
@@ -122,12 +132,19 @@ PLAYBACK_SHORT_S = 0.3
 FED_TIMES_MAX = 4000
 # latency samples kept for get_stats()["latency"] p50/p90
 LATENCY_KEEP = 500
-# Vosk is "deaf" (no words) after this many consecutive whisper units of
-# >= VOSK_DEAF_WORDS words with an empty HINT (live 2026-10-31 §13)
-VOSK_DEAF_UNITS = 2
-VOSK_DEAF_WORDS = 3
-DEAF = "deaf"  # _vosk_state mode
-VOSK_DEAF_WHY = f"без слів Vosk у {VOSK_DEAF_UNITS} одиницях поспіль"
+# LLM input mode of a unit (log, session recording)
+MODE_SOUND = "sound"  # condition F: SOUND primary + TEXT
+MODE_WHISPER = "whisper-only"
+MODE_RETRY = "retry"  # sound-mode reply rejected -> whisper-only once
+# _phonetic_state modes besides on/off/unavailable: no model of the language
+NO_LANGUAGE = "no_language"
+# «фонетика недоступна для <мови>»
+LANGUAGE_GENITIVE = {
+    "uk": "української",
+    "pl": "польської",
+    "ru": "російської",
+    "en": "англійської",
+}
 
 # LlmSettings fields that only shape the prompt/request; everything else
 # changes where/how the LLM is reached and requires a restart.
@@ -138,8 +155,8 @@ _LLM_LIVE_FIELDS = (
     "context_pairs",
     "system_prompt",
     "user_template",
-    "check_system_prompt",
-    "check_user_template",
+    "sound_system_prompt",
+    "sound_user_template",
     "words_per_request",
     "terms",
 )
@@ -158,10 +175,13 @@ class _Unit:
     text: str = ""
     src: Optional[str] = None
     next_text: str = ""  # NEXT: speech after the unit (understanding only)
-    # Vosk words of the unit's span aligned with it; None = whisper-only
-    check: Optional[Aligned] = None
-    vosk_conf: Optional[float] = None
+    # rt-phonetic's words of the unit aligned with it; None = whisper-only
+    sound: Optional[Aligned] = None
+    phonetic: Optional[str] = None  # its transcript text
+    similarity: Optional[float] = None
+    phonetic_ms: Optional[float] = None
     gate: Optional[str] = None  # gate_reason of a passed unit
+    mode: str = MODE_WHISPER
     commit_ms: Optional[float] = None
     llm_first_ms: Optional[float] = None
     llm_ms: Optional[float] = None
@@ -361,7 +381,7 @@ class TranslationSystem:
         # «Записувати сесію для аналізу» (settings.record_session)
         self._recorder: Optional[SessionRecorder] = None
         self._stream_factory = stream_factory
-        # rt-asr / rt-vosk WS streams of the running pipeline (kind -> client)
+        # the rt-asr WS stream of the running pipeline (kind -> client)
         self._streams: Dict[str, Any] = {}
         self._downsampler = Downsampler(CAPTURE_RATE)
         self._normalizer = LevelNormalizer(CAPTURE_RATE)
@@ -394,9 +414,6 @@ class TranslationSystem:
         self._playback_queue: queue.Queue = queue.Queue(maxsize=PLAYBACK_QUEUE_MAX)
         # unit stage state (its thread only)
         self._ledger = SourceLedger()
-        self._vosk = VoskTrack()
-        self._waiting: Deque[_Unit] = deque()  # cut, waiting for Vosk
-        self._draining = False  # stop: no more waiting for Vosk
         self._detected_language: Optional[str] = None
         self._tail = ""  # ledger.tail() for the UI (grey)
         # stream seconds fed -> clock(): word times to wall time
@@ -421,16 +438,20 @@ class TranslationSystem:
         # seconds of translated audio queued for playback (get_stats)
         self._backlog_lock = threading.Lock()
         self._backlog_s = 0.0
-        self._vosk_silent_units = 0  # consecutive units with an empty HINT
         self._asr_no_words = 0
-        # Vosk cross-check (TASK-SYS-12)
-        self._vosk_state: Dict[str, Any] = {"mode": "off", "error": None}
-        self._vosk_checked = 0
-        self._vosk_gate_dropped = 0
-        self._vosk_gate_disagree = 0  # of those: whisper and Vosk disagree
-        self._vosk_gate_foreign_terms = 0  # passed: only foreign-script words
-        self._vosk_whisper_only = 0
-        self._vosk_late = 0  # whisper-only: Vosk did not cover t1 in time
+        # phonetic cross-check: on | off (settings) | unavailable |
+        # no_language (+ why); languages rt-phonetic has no model for (409)
+        self._phonetic_state: Dict[str, Any] = {"mode": "off", "error": None}
+        self._phonetic_no_model: set = set()
+        self._phonetic_checked = 0  # units translated in sound mode
+        self._gate_dropped = 0
+        self._gate_disagree = 0  # of those: the letters disagree
+        self._gate_foreign_terms = 0  # passed: only foreign-script words
+        self._whisper_only = 0  # units translated without a transcript
+        self._phonetic_unavailable = 0  # of those: request failed
+        self._phonetic_timeout = 0  # of those: no answer within the budget
+        self._retry_whisper_only = 0  # sound reply rejected, re-translated
+        self._rejected_after_tts = 0  # sound reply rejected after TTS got some
         # pipeline-start warm-up: kind -> {url, ms, error, loaded}; kinds
         # still warming; time.monotonic() of start()
         self._warmup: Dict[str, Dict[str, Any]] = {}
@@ -443,8 +464,8 @@ class TranslationSystem:
         self._threads: Dict[str, threading.Thread] = {}
 
         self._translation_context: deque = deque(maxlen=settings.llm.context_pairs)
-        # recognized units for the UI: {"text": whisper, "check": Vosk's
-        # text of the same span, None = no Vosk check for this unit}
+        # recognized units for the UI: {"text": whisper, "sound": rt-phonetic's
+        # transcript of the unit, None = no phonetic check for this unit}
         self._pending_recognized: List[Dict[str, Optional[str]]] = []
         self._pending_translated: List[str] = []
         self._audio_level_input = 0.0
@@ -464,7 +485,7 @@ class TranslationSystem:
         if self._background:
             self._directory.start_periodic()
         self._pools = self._pools_factory(self.settings, self._directory)
-        self._vosk_state = self._initial_vosk_state()
+        self._phonetic_state = self._initial_phonetic_state()
         self._llm_target = self._llm_target_factory(self.settings, self._directory)
         if isinstance(self._llm_target, WorkerSessions):
             self._llm_target.on_switch = self._warm_up_async
@@ -474,13 +495,14 @@ class TranslationSystem:
             else None
         )
 
-    def _initial_vosk_state(self) -> Dict[str, Any]:
-        if self.settings.use.vosk == OFF:
+    def _initial_phonetic_state(self) -> Dict[str, Any]:
+        if self.settings.use.phonetic == OFF:
             return {"mode": "off", "error": "вимкнено в налаштуваннях"}
-        if self._pools.vosk is None:
+        if self._pools.phonetic is None:
             return {
                 "mode": "unavailable",
-                "error": "rt-vosk не знайдено (немає локального і дозволених вузлів)",
+                "error": "rt-phonetic не знайдено (немає локального і дозволених"
+                " вузлів)",
             }
         return {"mode": "on", "error": None}
 
@@ -604,9 +626,6 @@ class TranslationSystem:
         self._tts_q = queue.Queue(maxsize=STAGE_QUEUE_MAX)
         self._playback_queue = queue.Queue(maxsize=PLAYBACK_QUEUE_MAX)
         self._ledger = SourceLedger()
-        self._vosk = VoskTrack()
-        self._waiting = deque()
-        self._draining = False
         self._detected_language = None
         self._tail = ""
         with self._fed_lock:
@@ -614,12 +633,13 @@ class TranslationSystem:
             self._fed_at.clear()
             self._fed_samples = 0
         self._translation_context.clear()
-        self._vosk_state = self._initial_vosk_state()
+        self._phonetic_state = self._initial_phonetic_state()
+        self._phonetic_no_model = set()
         if self._mode == "translate":
-            v = self._vosk_state
+            v = self._phonetic_state
             log = logger.info if v["mode"] == "on" else logger.warning
             log(
-                "vosk cross-check: {}{}",
+                "phonetic cross-check: {}{}",
                 v["mode"],
                 f" ({v['error']}) - whisper-only translation" if v["error"] else "",
             )
@@ -636,6 +656,10 @@ class TranslationSystem:
             self._start_recording()
         self._begin_warmup()
         self._open_streams()
+        if "phonetic" in self._warmup_pending:
+            threading.Thread(
+                target=self._warm_up_phonetic, daemon=True, name="rt-phonetic-warmup"
+            ).start()
         self.is_running = True
         self._capturing = True
         self._threads = {
@@ -716,15 +740,15 @@ class TranslationSystem:
         self._directory.start_periodic()
 
     def local_model_clients(self) -> Dict[str, Any]:
-        """Clients of THIS host's rt-asr / rt-vosk / rt-tts, whichever
+        """Clients of THIS host's rt-asr / rt-phonetic / rt-tts, whichever
         instance is picked for the pipeline; cluster nodes are never
-        included (they serve others). rt-vosk switched off in the settings
-        is left alone. The caller closes them."""
+        included (they serve others). rt-phonetic switched off in the
+        settings is left alone. The caller closes them."""
         f = client_factories(self.settings)
         out: Dict[str, Any] = {}
-        kinds = [("asr", f.asr), ("vosk", f.vosk), ("tts", f.tts)]
-        if self.settings.use.vosk == OFF:
-            kinds = [k for k in kinds if k[0] != "vosk"]
+        kinds = [("asr", f.asr), ("phonetic", f.phonetic), ("tts", f.tts)]
+        if self.settings.use.phonetic == OFF:
+            kinds = [k for k in kinds if k[0] != "phonetic"]
         for kind, make in kinds:
             local = [
                 e for e in choices(kind, self.settings, self._directory) if e.local
@@ -831,7 +855,7 @@ class TranslationSystem:
                 break
 
     def _feed(self, block: np.ndarray) -> None:
-        """48 kHz block -> level normalization -> 16 kHz PCM16 into every
+        """48 kHz block -> level normalization -> 16 kHz PCM16 into the
         stream; the signal level for the UI is the raw block's RMS."""
         self._audio_level_input = min(rms(block) * 5.0, 1.0)
         pcm = self._downsampler(self._normalizer(block))
@@ -847,7 +871,7 @@ class TranslationSystem:
     def _mic_level_changed(self) -> None:
         """The raw speech level stays low (or is back up): a warning in the
         UI and the log with the measured dBFS - the gain hides a quiet
-        microphone from the streams but Vosk still hears worse."""
+        microphone from the recognizers, but they still hear worse."""
         n = self._normalizer
         self._mic_quiet = n.quiet
         level = round(n.speech_db or 0.0, 1)
@@ -884,21 +908,19 @@ class TranslationSystem:
         return render_asr_prompt(self.settings.asr.prompt, self._language())
 
     def _open_streams(self) -> None:
-        """Open the WS streams (their warm-up); audio fed before ``ready``
-        waits in each stream's ring buffer."""
+        """Open the rt-asr WS stream (its warm-up); audio fed before
+        ``ready`` waits in the stream's ring buffer."""
         self._downsampler = Downsampler(CAPTURE_RATE)
         self._normalizer = LevelNormalizer(CAPTURE_RATE)
         self._mic_quiet = False
-        self._vosk_silent_units = 0
-        lang = self._language()
-        kinds: List[tuple] = [("asr", self._pools.asr, self._stream_prompt())]
-        if self._mode == "translate" and self._vosk_state["mode"] == "on":
-            kinds.append(("vosk", self._pools.vosk, None))
         streams = {
-            kind: self._stream_factory(
-                kind, pool, language=lang, prompt=prompt, on_event=self._on_stream_event
+            "asr": self._stream_factory(
+                "asr",
+                self._pools.asr,
+                language=self._language(),
+                prompt=self._stream_prompt(),
+                on_event=self._on_stream_event,
             )
-            for kind, pool, prompt in kinds
         }
         self._streams = streams
         for stream in streams.values():
@@ -951,18 +973,15 @@ class TranslationSystem:
                 item = None
             try:
                 if item is _STOP:
-                    self._draining = True
                     unit = self._ledger.flush()
                     if unit is not None:
-                        self._waiting.append(self._new_unit(unit))
-                    self._dispatch()
+                        self._process(self._new_unit(unit))
                     self._llm_q.put(_STOP)
                     return
                 if item is not None:
                     self._apply(*item)
                 for unit in self._ledger.units(self._clock()):
-                    self._waiting.append(self._new_unit(unit))
-                self._dispatch()
+                    self._process(self._new_unit(unit))
                 self._tail = self._ledger.tail()
             except Exception as e:
                 logger.exception("unit stage error: {}", e)
@@ -971,14 +990,10 @@ class TranslationSystem:
 
     def _apply(self, kind: str, msg: Dict[str, Any]) -> None:
         t = msg.get("type")
-        if kind == "vosk":
-            self._apply_vosk(t, msg)
-            return
         if t == "final":
             words = parse_words(msg.get("words"))
             if msg.get("language") and self._detected_language is None:
                 self._detected_language = str(msg["language"])
-                self._check_vosk_language()
             self._ledger.commit(words, eos=bool(msg.get("eos")), now=self._clock())
         elif t == "partial":
             self._ledger.partial = str(msg.get("text") or "")
@@ -996,41 +1011,6 @@ class TranslationSystem:
                 }
             )
 
-    def _apply_vosk(self, t: Optional[str], msg: Dict[str, Any]) -> None:
-        if t in ("final", "partial", "endpoint", "idle"):
-            self._vosk.on_message(msg)
-            if t == "final":
-                self._check_vosk_language()
-            if self._vosk_state["mode"] == DEAF and msg.get("words"):
-                self._vosk_silent_units = 0
-                self._set_vosk_state("on", None)
-        elif t == "ready":
-            if self._vosk_state["mode"] == "unavailable":
-                self._set_vosk_state("on", None)
-        elif t in ("down", "failed"):
-            error = str(msg.get("error") or "")
-            if "model_language_mismatch" in error:
-                lang = self._language() or self._detected_language or "?"
-                self._vosk_off(f"немає моделі для «{lang}»: {error}")
-            else:
-                self._set_vosk_state("unavailable", f"vosk: {error}")
-
-    def _check_vosk_language(self) -> None:
-        """Auto source language: whisper's language is fixed on the first
-        words; a Vosk model of another language cannot check it."""
-        whisper, vosk = self._detected_language, self._vosk.language
-        if whisper and vosk and whisper != vosk and "vosk" in self._streams:
-            self._vosk_off(f"немає моделі для «{whisper}» (модель Vosk: «{vosk}»)")
-
-    def _vosk_off(self, why: str) -> None:
-        """rt-vosk holds one model; switching it is the user's explicit
-        action (settings, Vosk tab), never automatic: the stream closes and
-        the session goes on whisper-only."""
-        stream = self._streams.pop("vosk", None)
-        if stream is not None:
-            stream.close()
-        self._set_vosk_state("unavailable", why)
-
     def _new_unit(self, unit: Unit) -> _Unit:
         self._seq += 1
         now = self._clock()
@@ -1040,50 +1020,21 @@ class TranslationSystem:
         self._latency["commit_ms"].append(u.commit_ms)
         return u
 
-    def _vosk_active(self) -> bool:
-        return "vosk" in self._streams and self._vosk_state["mode"] == "on"
-
-    def _vosk_heard(self, unit: _Unit, hint: List[Word]) -> bool:
-        """False = Vosk is deaf: it gave no words for VOSK_DEAF_UNITS
-        whisper units of >= VOSK_DEAF_WORDS words in a row (a quiet
-        microphone, live 2026-10-31 §13). The check is then off - the unit
-        and the next ones pass whisper-only - until Vosk words come back
-        (``_apply_vosk``)."""
-        if hint or len(unit.source.words) < VOSK_DEAF_WORDS:
-            self._vosk_silent_units = 0
-            return True
-        self._vosk_silent_units += 1
-        if self._vosk_silent_units < VOSK_DEAF_UNITS:
-            return True
-        self._set_vosk_state(DEAF, VOSK_DEAF_WHY)
-        return False
-
-    def _dispatch(self) -> None:
-        """Units in order: each waits <= VOSK_WAIT_S for Vosk to cover its
-        end (not while stopping), then goes through the gate."""
-        while self._waiting:
-            unit = self._waiting[0]
-            vosk = self._vosk_active() and self._mode == "translate"
-            if (
-                vosk
-                and not self._draining
-                and not self._vosk.covers(unit.source.t0, unit.source.t1)
-                and self._clock() - unit.t_cut < VOSK_WAIT_S
-            ):
-                return
-            self._waiting.popleft()
-            self._units_processed += 1
-            if self._mode == "translate":
-                self._gate(unit, vosk)
-            else:
-                self._transcribed(unit)
+    def _process(self, unit: _Unit) -> None:
+        """One cut unit, in order: the phonetic gate and on to the LLM
+        (translate mode) or a recognized line (transcribe mode)."""
+        self._units_processed += 1
+        if self._mode == "translate":
+            self._gate(unit)
+        else:
+            self._transcribed(unit)
 
     def _transcribed(self, unit: _Unit) -> None:
         text = unit.source.text
         if not self._has_words(text):
             return
         with self._lock:
-            self._pending_recognized.append({"text": text, "check": None})
+            self._pending_recognized.append({"text": text, "sound": None})
         self._emit({"status": "transcription_complete", "original_text": text})
 
     def _has_words(self, text: str) -> bool:
@@ -1097,110 +1048,170 @@ class TranslationSystem:
             logger.info("ASR output without words skipped: {!r}", text)
         return False
 
-    def _gate(self, unit: _Unit, vosk: bool) -> None:
-        """The Vosk gate of one unit, then the unit on to the LLM stage."""
+    def _unit_audio(self, unit: _Unit) -> np.ndarray:
+        """The unit's 16 kHz audio from the rt-asr stream's ring."""
+        stream = self._streams.get("asr")
+        s = unit.source
+        return stream.audio(s.t0, s.t1) if stream is not None else np.zeros(0)
+
+    def _gate(self, unit: _Unit) -> None:
+        """The phonetic gate of one unit, then the unit on to the LLM stage."""
         src = self._language() or self._detected_language
         text = unit.source.text
         if not self._has_words(text):
             return
-        hint: Optional[List[Word]] = None
-        partial = self._vosk.hint(unit.source.t0, unit.source.t1) if vosk else []
-        covered = vosk and self._vosk.covers(unit.source.t0, unit.source.t1)
-        if vosk and (covered or partial):
-            # Kaldi's partial lags ~1 s: Vosk words already in the span are
-            # used as the HINT even when its end is not covered yet (then
-            # never a veto: gate ``uncovered``)
-            hint = partial
-            if not self._vosk_heard(unit, hint):
-                hint = None
-                self._vosk_whisper_only += 1
-        elif vosk and not self._draining:
-            self._vosk_late += 1
-            if self._vosk.covered < unit.source.t0:
-                # no Vosk word since before the unit began: deaf, not late
-                self._vosk_heard(unit, [])
-            logger.info(
-                "unit #{}: vosk covered {:.2f} s < end {:.2f} s after {} ms"
-                " - whisper-only",
-                unit.seq,
-                self._vosk.covered,
-                unit.source.t1,
-                _ms(VOSK_WAIT_S),
-            )
-        elif vosk:  # stopping: Vosk sent all it had
-            hint = self._vosk.hint(unit.source.t0, unit.source.t1)
-            if not self._vosk_heard(unit, hint):
-                hint = None
-                self._vosk_whisper_only += 1
-        elif self.settings.use.vosk != OFF:
-            self._vosk_whisper_only += 1
-        self._vosk.forget_before(unit.source.t0)
-        hint_text = None if hint is None else words_text(hint)
-        reason = (
-            None
-            if hint_text is None
-            else gate_reason(text, hint_text, src, covered or self._draining)
-        )
-        if hint is not None:
-            unit.vosk_conf = mean_conf(hint)
         unit.src = src
-        self._record_unit(unit, src, text, hint, reason)
+        audio = self._unit_audio(unit)
+        result = self._phonetic(unit, src, audio) if src else None
+        sound_words: Optional[List[Word]] = None
+        reason: Optional[str] = None
+        if result is not None:
+            sound_words = self._sound_words(unit, result)
+            unit.phonetic = result.text
+            unit.similarity = similarity(text, result.text, src)
+            reason = gate_reason(text, result.text, src)
+        self._record_unit(unit, audio, src, text, sound_words, reason)
         if reason in GATE_DROPS:
-            assert hint_text is not None
-            self._gate_drop(unit, text, hint_text, reason)
+            assert result is not None
+            self._gate_drop(unit, text, result.text, reason)
             return
         if reason == GATE_FOREIGN_TERMS:
-            self._vosk_gate_foreign_terms += 1
+            self._gate_foreign_terms += 1
         unit.gate = reason
         unit.text = text
         with self._lock:
-            self._pending_recognized.append({"text": text, "check": hint_text})
+            self._pending_recognized.append({"text": text, "sound": unit.phonetic})
         if not src:
             logger.warning("source language unknown - skipping translation")
             return
-        if hint is not None:
-            self._vosk_checked += 1
-            unit.check = Aligned.from_words(unit.source.words, hint)
+        if sound_words is not None:
+            self._phonetic_checked += 1
+            unit.sound = Aligned.from_words(unit.source.words, sound_words)
+            unit.mode = MODE_SOUND
         unit.next_text = self._ledger.after(unit.source.end_index)
         self._put(self._llm_q, unit, "llm")
 
-    def _set_vosk_state(self, mode: str, error: Optional[str]) -> None:
-        old = self._vosk_state
-        self._vosk_state = {"mode": mode, "error": error}
-        if old["mode"] == mode:
-            if error and error != old["error"]:
-                logger.info("vosk still unavailable ({}): whisper-only", error)
+    @staticmethod
+    def _sound_words(unit: _Unit, result: PhoneticResult) -> List[Word]:
+        """rt-phonetic's words on the stream timeline (its times count from
+        the start of the sent audio = the unit's t0). A transcript without
+        word times (outside the contract) sits whole at the unit's span -
+        logged, so a split LLM request cannot cut it by time."""
+        t0 = unit.source.t0
+        if result.words:
+            return [Word(w.word, t0 + w.start, t0 + w.end) for w in result.words]
+        if result.text:
+            logger.warning(
+                "unit #{}: rt-phonetic sent text without word times", unit.seq
+            )
+            return [Word(result.text, t0, unit.source.t1)]
+        return []
+
+    def _phonetic(
+        self, unit: _Unit, src: str, audio: np.ndarray
+    ) -> Optional[PhoneticResult]:
+        """rt-phonetic's transcript of the unit, or None = whisper-only
+        (off in the settings, not found, failing, too slow, or no model of
+        ``src``) - every None but OFF is counted, logged and shown."""
+        pool = self._pools.phonetic
+        if self.settings.use.phonetic == OFF:
+            return None
+        if pool is None or src in self._phonetic_no_model:
+            self._whisper_only += 1
+            return None
+        t0 = time.monotonic()
+        try:
+            result = pool.call_once(
+                lambda c: c.transcribe(
+                    audio, src, ASR_RATE, timeout_s=PHONETIC_TIMEOUT_S
+                )
+            )
+        except ServiceError as e:
+            self._phonetic_failed(unit, src, e, _ms(time.monotonic() - t0))
+            return None
+        unit.phonetic_ms = _ms(time.monotonic() - t0)
+        if self._phonetic_state["mode"] != "on":
+            self._set_phonetic_state("on", None)
+        return result
+
+    def _phonetic_failed(
+        self, unit: _Unit, src: str, e: ServiceError, took_ms: float
+    ) -> None:
+        self._whisper_only += 1
+        if e.kind == "wrong_language":
+            self._phonetic_no_model.add(src)
+            lang = LANGUAGE_GENITIVE.get(src, f"«{src}»")
+            why = f"фонетика недоступна для {lang} мови"
+            logger.warning(
+                "unit #{}: rt-phonetic has no model for {!r} ({}) - whisper-only"
+                " for this language",
+                unit.seq,
+                src,
+                e,
+            )
+            self._set_phonetic_state(NO_LANGUAGE, why)
+            reason = NO_LANGUAGE
+        elif e.kind == "timeout":
+            self._phonetic_timeout += 1
+            logger.warning(
+                "unit #{}: rt-phonetic timeout after {} ms (budget {} ms) -"
+                " whisper-only",
+                unit.seq,
+                took_ms,
+                _ms(PHONETIC_TIMEOUT_S),
+            )
+            reason = "timeout"
+        else:
+            self._phonetic_unavailable += 1
+            logger.warning(
+                "unit #{}: rt-phonetic failed ({}) - whisper-only", unit.seq, e
+            )
+            self._set_phonetic_state("unavailable", f"phonetic: {e.kind}: {e}")
+            reason = "unavailable"
+        self._emit(
+            {
+                "status": "phonetic_whisper_only",
+                "reason": reason,
+                "error": str(e),
+                "original_text": unit.source.text,
+            }
+        )
+
+    def _set_phonetic_state(self, mode: str, error: Optional[str]) -> None:
+        old = self._phonetic_state
+        self._phonetic_state = {"mode": mode, "error": error}
+        if old["mode"] == mode and old["error"] == error:
             return
         if mode == "on":
-            logger.info("vosk cross-check back on")
+            logger.info("phonetic cross-check back on")
         else:
             logger.warning(
-                "vosk cross-check {} ({}): whisper-only translation", mode, error
+                "phonetic cross-check {} ({}): whisper-only translation", mode, error
             )
-        self._emit({"status": "vosk_state", "vosk": dict(self._vosk_state)})
+        self._emit({"status": "phonetic_state", "phonetic": dict(self._phonetic_state)})
 
-    def _gate_drop(self, unit: _Unit, text: str, check: str, reason: str) -> None:
+    def _gate_drop(self, unit: _Unit, text: str, sound: str, reason: str) -> None:
         """Whisper clearly hallucinated the unit (``gate_reason``): it is
         not translated - counted, logged, emitted; the ledger just goes on."""
-        self._vosk_gate_dropped += 1
+        self._gate_dropped += 1
         if reason == GATE_DISAGREE:
-            self._vosk_gate_disagree += 1
+            self._gate_disagree += 1
         logger.info(
-            "unit #{}: gate {} -> dropped | whisper {!r} | vosk {!r} (conf {},"
-            " agree {})",
+            "unit #{}: gate {} -> dropped | whisper {!r} | phonetic {!r}"
+            " (similarity {}, {} ms)",
             unit.seq,
             reason,
             text,
-            check,
-            _fmt(unit.vosk_conf),
-            _fmt(agreement(text, check, unit.src)),
+            sound,
+            _fmt(unit.similarity),
+            unit.phonetic_ms,
         )
         self._emit(
             {
-                "status": "vosk_gate",
+                "status": "phonetic_gate",
                 "reason": reason,
                 "original_text": text,
-                "check_text": check,
+                "sound_text": sound,
             }
         )
 
@@ -1209,18 +1220,16 @@ class TranslationSystem:
     def _record_unit(
         self,
         unit: _Unit,
+        audio: np.ndarray,
         language: Optional[str],
         text: str,
-        hint: Optional[List[Word]],
+        sound_words: Optional[List[Word]],
         gate: Optional[str],
     ) -> None:
         rec = self._recorder
         if rec is None or not rec.active:
             return
         s = unit.source
-        stream = self._streams.get("asr")
-        audio = stream.audio(s.t0, s.t1) if stream is not None else np.zeros(0)
-        hint_text = None if hint is None else words_text(hint)
         rec.segment(
             unit.seq,
             audio,
@@ -1235,41 +1244,39 @@ class TranslationSystem:
                     {"word": w.text, "start": w.start, "end": w.end, "conf": w.conf}
                     for w in s.words
                 ],
-                "vosk": hint_text,
-                "vosk_words": (
+                "phonetic": unit.phonetic,
+                "phonetic_words": (
                     None
-                    if hint is None
+                    if sound_words is None
                     else [
-                        {"word": w.text, "conf": w.conf, "start": w.start, "end": w.end}
-                        for w in hint
+                        {"word": w.text, "start": w.start, "end": w.end}
+                        for w in sound_words
                     ]
                 ),
-                "vosk_conf": None if hint is None else mean_conf(hint),
-                "agreement": (
-                    None if hint_text is None else agreement(text, hint_text, language)
-                ),
-                "gate": "no_vosk" if hint is None and gate is None else gate,
+                "phonetic_ms": unit.phonetic_ms,
+                "similarity": unit.similarity,
+                "gate": "no_phonetic" if gate is None else gate,
+                "mode": MODE_WHISPER if sound_words is None else MODE_SOUND,
             },
         )
 
     def _log_unit(self, unit: _Unit, translation: str, rejected: Optional[str]) -> None:
-        """One INFO line per translated unit: what whisper and Vosk heard,
-        the gate, the LLM input mode, NEXT and the result."""
-        mode = "whisper-only" if unit.check is None else "two-text"
-        hint = None if unit.check is None else unit.check.check_text
+        """One INFO line per LLM pass of a unit: what whisper and rt-phonetic
+        heard, the gate, the LLM input mode, NEXT and the result."""
+        sound = None if unit.sound is None else unit.sound.sound_text
         logger.info(
             "unit #{} ({}, {:.2f}-{:.2f} s): gate pass ({}) | whisper {!r} |"
-            " vosk {!r} (conf {}, agree {}) | llm {} | next {!r} | {} {!r}",
+            " phonetic {!r} (similarity {}, {} ms) | llm {} | next {!r} | {} {!r}",
             unit.seq,
             unit.source.reason,
             unit.source.t0,
             unit.source.t1,
-            unit.gate or "no_vosk",
+            unit.gate or "no_phonetic",
             unit.text,
-            hint,
-            _fmt(unit.vosk_conf),
-            _fmt(None if hint is None else agreement(unit.text, hint, unit.src)),
-            mode,
+            unit.phonetic,
+            _fmt(unit.similarity),
+            unit.phonetic_ms,
+            unit.mode,
             unit.next_text,
             f"rejected ({rejected}):" if rejected else "->",
             translation,
@@ -1279,10 +1286,10 @@ class TranslationSystem:
             rec.translation(
                 unit.seq,
                 {
-                    "mode": mode,
+                    "mode": unit.mode,
                     "gate": unit.gate,
                     "text": unit.text,
-                    "hint": hint,
+                    "sound": sound,
                     "next": unit.next_text,
                     "translation": translation,
                     "rejected": rejected,
@@ -1359,6 +1366,40 @@ class TranslationSystem:
         info["ms"] = _ms(time.monotonic() - t0)
         self._warmed("tts", info)
 
+    def _warm_up_phonetic(self) -> None:
+        """Own thread at start: rt-phonetic's model ready (loaded if needed)
+        + one transcription of PHONETIC_WARMUP_S of silence in the session
+        language (auto: the model only - the language is not known yet). A
+        409 here already shows «фонетика недоступна для ...»; any failure is
+        reported, units then go whisper-only until it answers."""
+        pool = self._pools.phonetic
+        lang = self._language()
+        t0 = time.monotonic()
+        info: Dict[str, Any] = {"url": None, "error": None, "loaded": False}
+        silence = np.zeros(int(PHONETIC_WARMUP_S * ASR_RATE), dtype=np.int16)
+
+        def go(client: Any) -> None:
+            info["loaded"] = ensure_model_ready("phonetic", client)
+            if lang is not None:
+                client.transcribe(silence, lang, ASR_RATE)
+
+        try:
+            pool.call(go)
+            info["url"] = (pool.active() or {}).get("url")
+        except ServiceError as e:
+            info["error"] = f"{type(e).__name__}: {e}"
+            if e.kind == "wrong_language" and lang is not None:
+                self._phonetic_no_model.add(lang)
+                self._set_phonetic_state(
+                    NO_LANGUAGE,
+                    f"фонетика недоступна для {LANGUAGE_GENITIVE.get(lang, lang)}"
+                    " мови",
+                )
+        except Exception as e:  # reported below
+            info["error"] = f"{type(e).__name__}: {e}"
+        info["ms"] = _ms(time.monotonic() - t0)
+        self._warmed("phonetic", info)
+
     def _begin_warmup(self) -> None:
         """Which services warm up at this start (all in parallel: the
         streams on their own threads, LLM and TTS on their stages);
@@ -1366,8 +1407,11 @@ class TranslationSystem:
         kinds = ["asr"]
         if self._mode == "translate":
             kinds += ["llm", "tts"]
-            if self._pools.vosk is not None:
-                kinds.append("vosk")
+            if (
+                self._pools.phonetic is not None
+                and self._phonetic_state["mode"] == "on"
+            ):
+                kinds.append("phonetic")
         self._warmup = {}
         self._warmup_pending = set(kinds)
         logger.info("warm-up started: {}", ", ".join(kinds))
@@ -1540,23 +1584,80 @@ class TranslationSystem:
     def _translate(self, unit: _Unit) -> None:
         """LLM stage: stream the translation, each sentence on to TTS.
 
-        Every sentence passes ``reject_reason`` (length, script, NEXT
-        leakage) on the cumulative output before TTS gets it; a short source
-        (<= SHORT_SOURCE_WORDS) is buffered whole first - those are the
-        fragments small models answer instead of translating, and buffering
-        them costs almost no latency.
+        Every sentence passes ``reject_reason`` (length, script, meta reply,
+        NEXT leakage) on the cumulative output before TTS gets it; a short
+        source (<= SHORT_SOURCE_WORDS) is buffered whole first - those are
+        the fragments small models answer instead of translating, and
+        buffering them costs almost no latency. A rejected sound-mode reply
+        of which nothing went to TTS is re-translated once whisper-only
+        (``retry_whisper_only``); otherwise it is rejected.
         """
         t0 = self._clock()
+        done = self._llm_pass(unit, t0)
+        if done is None:
+            return
+        output, reason = done
+        if reason and unit.mode == MODE_SOUND:
+            if unit.pieces == 0:
+                self._retry_whisper_only += 1
+                self._log_unit(unit, output, reason)
+                logger.warning(
+                    "unit #{}: sound-mode reply rejected ({}) - re-translating"
+                    " whisper-only once",
+                    unit.seq,
+                    reason,
+                )
+                self._emit(
+                    {
+                        "status": "translation_retry",
+                        "reason": reason,
+                        "original_text": unit.text,
+                        "output": output[:200],
+                    }
+                )
+                unit.mode, unit.sound = MODE_RETRY, None
+                done = self._llm_pass(unit, t0)
+                if done is None:
+                    return
+                output, reason = done
+            else:
+                self._rejected_after_tts += 1
+        if reason:
+            self._log_unit(unit, output, reason)
+            self._reject(unit, reason, output)
+            return
+        unit.llm_ms = _ms(self._clock() - t0)
+        self._log_unit(unit, output, None)
+        if unit.sound is None:
+            self._translation_context.append((unit.text, output))
+        else:
+            self._translation_context.append((unit.text, output, unit.sound.sound_text))
+        with self._lock:
+            self._pending_translated.append(output)
+        self._emit(
+            {
+                "status": "translation_complete",
+                "original_text": unit.text,
+                "translated_text": output,
+            }
+        )
+
+    def _llm_pass(self, unit: _Unit, t0: float) -> Optional[tuple]:
+        """One streamed LLM request of the unit in its ``mode``: sentences
+        go to TTS as they pass the guard (short sources only once the whole
+        reply passed). (output, reject reason or None); None = the request
+        failed (counted, reported)."""
         self._llm_requests += 1
         sentences: List[str] = []
         held: List[_Sentence] = []
         buffer_all = len(unit.text.split()) <= SHORT_SOURCE_WORDS
         reason: Optional[str] = None
+        started = self._clock()
         stream = self._llm.translate_stream(
             unit.text,
             unit.src,
             context=list(self._translation_context),
-            check=unit.check,
+            sound=unit.sound,
             next_text=unit.next_text,
         )
         try:
@@ -1576,42 +1677,22 @@ class TranslationSystem:
         except ServiceError as e:
             self._llm_errors += 1
             self._service_error(e)
-            return
+            return None
         except ValueError as e:  # unsupported source language
             self._llm_errors += 1
             self._pipeline_errors += 1
             logger.warning("translation skipped: {}", e)
             self._fail("llm", "language")
-            return
+            return None
         finally:
             close = getattr(stream, "close", None)
             if close:  # release the HTTP stream when we stopped early
                 close()
-            self._llm_time += self._clock() - t0
-        if reason:
-            self._log_unit(unit, " ".join(sentences), reason)
-            self._reject(unit, reason, " ".join(sentences))
-            return
-        for item in held:
-            self._queue_sentence(item)
-        unit.llm_ms = _ms(self._clock() - t0)
-        translation = " ".join(sentences)
-        self._log_unit(unit, translation, None)
-        if unit.check is None:
-            self._translation_context.append((unit.text, translation))
-        else:
-            self._translation_context.append(
-                (unit.text, translation, unit.check.check_text)
-            )
-        with self._lock:
-            self._pending_translated.append(translation)
-        self._emit(
-            {
-                "status": "translation_complete",
-                "original_text": unit.text,
-                "translated_text": translation,
-            }
-        )
+            self._llm_time += self._clock() - started
+        if not reason:
+            for item in held:
+                self._queue_sentence(item)
+        return " ".join(sentences), reason
 
     def _queue_sentence(self, item: _Sentence) -> None:
         item.unit.pieces += 1
@@ -1665,7 +1746,7 @@ class TranslationSystem:
 
     def get_stats(self) -> Dict:
         tts = self._pools.tts
-        vosk = self._pools.vosk
+        phonetic = self._pools.phonetic
         stats: Dict[str, Any] = {
             "running": self.is_running,
             "mode": self._mode,
@@ -1686,20 +1767,23 @@ class TranslationSystem:
             "discovery": self._directory.source,
             "active": {
                 "asr": self._pools.asr.active(),
-                "vosk": vosk.active() if vosk is not None else None,
+                "phonetic": phonetic.active() if phonetic is not None else None,
                 "tts": tts.active() if tts is not None else None,
             },
             "streams": {k: s.stats() for k, s in list(self._streams.items())},
             # whisper's words not yet in a unit + its partial: grey in the UI
             "source_tail": self._tail,
-            # TASK-SYS-12: on | off (settings) | unavailable (+ why)
-            "vosk": dict(self._vosk_state),
-            "vosk_checked": self._vosk_checked,
-            "vosk_gate_dropped": self._vosk_gate_dropped,
-            "vosk_gate_disagree": self._vosk_gate_disagree,
-            "vosk_gate_foreign_terms": self._vosk_gate_foreign_terms,
-            "vosk_whisper_only": self._vosk_whisper_only,
-            "vosk_late": self._vosk_late,
+            # on | off (settings) | unavailable | no_language (+ why)
+            "phonetic": dict(self._phonetic_state),
+            "phonetic_checked": self._phonetic_checked,
+            "gate_dropped": self._gate_dropped,
+            "gate_disagree": self._gate_disagree,
+            "gate_foreign_terms": self._gate_foreign_terms,
+            "whisper_only": self._whisper_only,
+            "phonetic_unavailable": self._phonetic_unavailable,
+            "phonetic_timeout": self._phonetic_timeout,
+            "retry_whisper_only": self._retry_whisper_only,
+            "rejected_after_tts": self._rejected_after_tts,
             "session": self._session_snapshot(),
             "timing": dict(self._timing),
             "latency": {
@@ -1707,7 +1791,6 @@ class TranslationSystem:
                 for k, v in self._latency.items()
             },
             "queues": {
-                "units": len(self._waiting),
                 "llm": self._llm_q.qsize(),
                 "tts": self._tts_q.qsize(),
                 "playback": self._playback_queue.qsize(),

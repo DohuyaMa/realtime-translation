@@ -115,7 +115,7 @@ rt-models --model-dir /var/lib/rt-asr/models list
 | `RT_MODEL_DIR` | `(не задано)` | BOOTSTRAP |
 | `RT_PORT` | `8091` | BOOTSTRAP |
 
-**rt-vosk**
+**rt-phonetic**
 
 | Ключ | Default | Клас |
 |---|---|---|
@@ -128,12 +128,11 @@ rt-models --model-dir /var/lib/rt-asr/models list
 | `RT_LISTEN_ADDRESSES` | `127.0.0.1` | BOOTSTRAP |
 | `RT_LOG_LEVEL` | `info` | TUNABLE |
 | `RT_MAX_PENDING` | `16` | BOOTSTRAP |
-| `RT_MODEL` | `vosk-small-uk-v3-nano` | RELOAD |
+| `RT_MODEL` | `uk-wav2vec2-stress` | RELOAD |
 | `RT_MODEL_DIR` | `(не задано)` | BOOTSTRAP |
+| `RT_PHONETIC_BACKEND` | `wav2vec2` | RELOAD |
+| `RT_PHONETIC_MAX_UPLOAD_MB` | `20` | TUNABLE |
 | `RT_PORT` | `8092` | BOOTSTRAP |
-| `RT_VOSK_BACKEND` | `vosk` | RELOAD |
-| `RT_VOSK_MAX_SESSIONS` | `4` | BOOTSTRAP |
-| `RT_VOSK_MAX_UPLOAD_MB` | `100` | TUNABLE |
 
 **rt-tts**
 
@@ -157,7 +156,6 @@ rt-models --model-dir /var/lib/rt-asr/models list
 | `RT_TTS_SAMPLE_RATE` | `24000` | TUNABLE |
 | `RT_TTS_SPEED` | `1.0` | TUNABLE |
 | `RT_TTS_VOICE` | `af_heart` | TUNABLE |
-### 4.2 `/config`
 
 Перед запитами: `TOKEN=$(cat /path/to/token)`, додавайте `-H "Authorization: Bearer $TOKEN"`, якщо сервіс запущено з `RT_API_TOKEN_FILE`.
 

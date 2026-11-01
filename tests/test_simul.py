@@ -9,7 +9,6 @@ from src.core.simul import (
     SENTENCE,
     STOP,
     SourceLedger,
-    VoskTrack,
     Word,
     ends_sentence,
 )
@@ -89,37 +88,6 @@ def test_units_never_overlap():
     units = led.units()
     assert [u.text for u in units] == ["Раз.", "Два.", "Три."]
     assert [w for u in units for w in u.words] == led.words
-
-
-def test_vosk_hint_is_the_words_of_the_span_with_margin():
-    v = VoskTrack()
-    v.on_message(
-        {
-            "type": "final",
-            "language": "uk",
-            "words": [
-                {"word": "раз", "start": 0.0, "end": 0.4, "conf": 0.9},
-                {"word": "два", "start": 1.0, "end": 1.4, "conf": 0.8},
-            ],
-            "audio_end": 1.6,
-        }
-    )
-    v.on_message(
-        {
-            "type": "partial",
-            "words": [{"word": "три", "start": 2.0, "end": 2.2}],
-            "audio_end": 2.4,
-        }
-    )
-    assert v.covered == 2.2 and v.language == "uk"  # its latest word, not audio_end
-    assert v.covers(2.0, 2.4) and not v.covers(2.0, 2.5)
-    assert [w.text for w in v.hint(0.0, 0.5)] == ["раз"]
-    assert [w.text for w in v.hint(1.0, 2.0)] == ["два", "три"]
-    v.forget_before(1.0)
-    assert [w.text for w in v.finals] == ["два"]
-
-
-# -- sentence-end finality (live 2026-11-01 §14) -----------------------------
 
 
 def lw(*items):
@@ -226,40 +194,3 @@ def test_hard_limit_wins_over_a_continuation():
     led.commit(ws(text + " далі"))
     unit = led.next_unit()
     assert len(unit.words) == 20 and unit.reason == SENTENCE
-
-
-def test_kaldi_idle_covers_heard_silence_minus_its_lag():
-    v = VoskTrack()
-    v.on_message(
-        {"type": "final", "words": [{"word": "або", "start": 44.8, "end": 45.21}]}
-    )
-    assert not v.covers(59.67, 60.79)  # «Дякую.»: no word since 45.21
-    v.on_message({"type": "idle", "at": 61.5, "silent_from": 45.4})
-    assert not v.covers(59.67, 60.79)  # Kaldi may still be ~1 s behind
-    v.on_message({"type": "idle", "at": 61.8, "silent_from": 45.4})
-    assert v.covers(59.67, 60.79) and v.hint(59.67, 60.79) == []
-    assert v.covered == 45.21  # word coverage unchanged
-    assert v.silences == [(45.4, pytest.approx(60.8))]  # one merged span
-
-
-def test_voiced_audio_without_a_vosk_word_is_never_heard_silence():
-    """§16: Kaldi heard «повільніше» (166.5-167.3) as nothing - endpoint
-    after «замість», then idle. The voice energy keeps the span out of the
-    silence, so later idles do not cover the unit: Vosk late, not no_word.
-    Real silence after it is still covered."""
-    v = VoskTrack()
-    v.on_message(
-        {"type": "final", "words": [{"word": "замість", "start": 165.9, "end": 166.4}]}
-    )
-    for at in (167.0, 167.3):  # inside the word: silence starts at the voice
-        v.on_message({"type": "idle", "at": at, "silent_from": at})
-    for at in (167.6, 168.5, 170.0):
-        v.on_message({"type": "idle", "at": at, "silent_from": 167.3})
-    assert not v.covers(166.5, 167.3)
-    assert v.covers(167.5, 168.9)  # a hallucination in the pause after it
-
-
-def test_idle_of_an_old_rt_vosk_is_no_silence():
-    v = VoskTrack()
-    v.on_message({"type": "idle", "at": 70.0})
-    assert v.silences == [] and not v.covers(59.67, 60.79)

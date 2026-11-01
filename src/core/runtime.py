@@ -1,9 +1,9 @@
 """Edge runtime settings: service discovery, local endpoints, per-user prompts.
 
-The app gets the list of available services (llm workers, rt-asr, rt-tts) and
-their tokens from Django (``django_urls``, own host first; DRF token in
-``django_token_file``), keeps only ``allowed_services`` and puts the local
-endpoints (``local.*``) first. Without Django it uses the cached list.
+The app gets the list of available services (llm workers, rt-asr, rt-tts,
+rt-phonetic) and their tokens from Django (``django_urls``, own host first;
+DRF token in ``django_token_file``), keeps only ``allowed_services`` and puts
+the local endpoints (``local.*``) first. Without Django it uses the cached list.
 
 Precedence: RT_EDGE_* environment > config.yml > defaults. Values that come
 from the environment are listed in `EdgeSettings.managed` (read-only in the UI).
@@ -17,28 +17,38 @@ from typing import Any, Literal, Mapping, Optional
 
 from .prompt import (
     DEFAULT_ASR_PROMPT,
-    DEFAULT_CHECK_SYSTEM_PROMPT,
-    DEFAULT_CHECK_USER_TEMPLATE,
+    DEFAULT_SOUND_SYSTEM_PROMPT,
+    DEFAULT_SOUND_USER_TEMPLATE,
     DEFAULT_SYSTEM_PROMPT,
     DEFAULT_TERMS,
     DEFAULT_USER_TEMPLATE,
     DEFAULT_WORDS_PER_REQUEST,
     asr_prompt_errors,
-    check_template_errors,
     is_legacy,
     parse_terms,
+    sound_template_errors,
     system_prompt_errors,
     template_errors,
 )
 
 DEFAULT_ASR_URL = "http://127.0.0.1:8091"
 DEFAULT_LOCAL_TOKEN_FILE = "/run/llama/local-token"
-# vosk: rt-vosk, the second (non-generative) ASR that cross-checks whisper
-# in translate mode (TASK-SYS-12)
-KINDS = ("llm", "asr", "tts", "vosk")
+# phonetic: rt-phonetic, the character-level CTC recognizer whose letter
+# transcript gates whisper and is the primary text of the translation
+# (translate mode, core/crosscheck.py)
+KINDS = ("llm", "asr", "tts", "phonetic")
 # services.use.<kind> value that switches a kind off (only OPTIONAL_KINDS)
 OFF = "off"
-OPTIONAL_KINDS = ("vosk",)
+OPTIONAL_KINDS = ("phonetic",)
+# config.yml keys of removed features -> the key that replaced them; an old
+# key is an explicit settings error (validate), never silently ignored
+REMOVED_KEYS = {
+    "services.use.vosk": "services.use.phonetic",
+    "services.local.vosk": "services.local.phonetic",
+    "services.llm.check_system_prompt": "services.llm.sound_system_prompt",
+    "services.llm.check_user_template": "services.llm.sound_user_template",
+    "ui.show_vosk_text": "ui.show_phonetic_text",
+}
 MODES = ("auto", "transcribe", "translate")
 SOURCE_LANGUAGES = ("auto", "pl", "uk", "ru", "en")
 
@@ -63,7 +73,7 @@ class LocalUrls:
     llm: Optional[str] = None
     asr: Optional[str] = DEFAULT_ASR_URL
     tts: Optional[str] = None
-    vosk: Optional[str] = None
+    phonetic: Optional[str] = None
     node: Optional[str] = None
 
 
@@ -76,10 +86,10 @@ class LlmSettings:
     timeout_s: float = 15.0
     system_prompt: str = DEFAULT_SYSTEM_PROMPT
     user_template: str = DEFAULT_USER_TEMPLATE
-    # two-text mode (whisper + Vosk cross-check, TASK-SYS-12): {{text}} =
-    # whisper, {{vosk_text}} = Vosk; used for every phrase Vosk recognized
-    check_system_prompt: str = DEFAULT_CHECK_SYSTEM_PROMPT
-    check_user_template: str = DEFAULT_CHECK_USER_TEMPLATE
+    # sound mode (condition F): {{sound_text}} = rt-phonetic's letter
+    # transcript (primary), {{text}} = whisper; every unit with a transcript
+    sound_system_prompt: str = DEFAULT_SOUND_SYSTEM_PROMPT
+    sound_user_template: str = DEFAULT_SOUND_USER_TEMPLATE
     # words of recognized text per LLM call; longer text is split (sentence
     # ends preferred) and every chunk goes through user_template
     words_per_request: int = DEFAULT_WORDS_PER_REQUEST
@@ -92,12 +102,13 @@ class ServiceUse:
     """Which instance serves each kind: None = auto (local first, failover
     over the allowed cluster services); a node name = only that node, no
     failover (a down pinned service is an explicit error); ``OFF`` = not
-    used at all (only OPTIONAL_KINDS: vosk off = whisper-only translation)."""
+    used at all (only OPTIONAL_KINDS: phonetic off = whisper-only
+    translation)."""
 
     llm: Optional[str] = None
     asr: Optional[str] = None
     tts: Optional[str] = None
-    vosk: Optional[str] = None
+    phonetic: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -138,6 +149,8 @@ class EdgeSettings:
     managed: frozenset[str] = frozenset()
     # config values replaced on load (e.g. old template syntax), for the UI
     notices: tuple[str, ...] = ()
+    # config.yml keys of removed features (REMOVED_KEYS): validate() errors
+    config_errors: tuple[str, ...] = ()
 
     def has_source(self, kind: str) -> bool:
         """A local endpoint or a Django that can list cluster ones."""
@@ -151,7 +164,7 @@ class EdgeSettings:
         return self.mode
 
     def validate(self) -> list[str]:
-        errors: list[str] = []
+        errors: list[str] = list(self.config_errors)
         if self.mode not in MODES:
             errors.append(f"unknown mode {self.mode!r}")
         if self.source_language not in SOURCE_LANGUAGES:
@@ -168,7 +181,12 @@ class EdgeSettings:
             errors.append("django_urls requires django_token_file")
         for item in self.allowed_services or ():
             kind, _, node = item.partition(":")
-            if kind not in KINDS or not node:
+            if kind == "vosk":
+                errors.append(
+                    f"allowed_services: {item!r} - Vosk was removed; use"
+                    f" phonetic:{node or '<node>'}"
+                )
+            elif kind not in KINDS or not node:
                 errors.append(f"allowed_services: {item!r} is not <kind>:<node>")
         for kind in KINDS:
             node = getattr(self.use, kind)
@@ -188,11 +206,11 @@ class EdgeSettings:
         errors += template_errors(
             "llm.user_template", self.llm.user_template, require_text=True
         )
-        errors += check_template_errors(
-            "llm.check_system_prompt", self.llm.check_system_prompt, user=False
+        errors += sound_template_errors(
+            "llm.sound_system_prompt", self.llm.sound_system_prompt, user=False
         )
-        errors += check_template_errors(
-            "llm.check_user_template", self.llm.check_user_template, user=True
+        errors += sound_template_errors(
+            "llm.sound_user_template", self.llm.sound_user_template, user=True
         )
         errors += asr_prompt_errors("asr.prompt", self.asr.prompt)
         if self.llm.words_per_request < 1:
@@ -328,8 +346,8 @@ def resolve_edge_settings(cfg: Mapping, environ: Mapping) -> EdgeSettings:
         timeout_s=float(llm_cfg.get("timeout_s", ld.timeout_s)),
         system_prompt=template("system_prompt", ld.system_prompt),
         user_template=template("user_template", ld.user_template),
-        check_system_prompt=template("check_system_prompt", ld.check_system_prompt),
-        check_user_template=template("check_user_template", ld.check_user_template),
+        sound_system_prompt=template("sound_system_prompt", ld.sound_system_prompt),
+        sound_user_template=template("sound_user_template", ld.sound_user_template),
         words_per_request=int(llm_cfg.get("words_per_request", ld.words_per_request)),
         # null/absent = the default glossary; "" / [] = none
         terms=(
@@ -378,7 +396,7 @@ def resolve_edge_settings(cfg: Mapping, environ: Mapping) -> EdgeSettings:
             llm=local("llm"),
             asr=local("asr"),
             tts=local("tts"),
-            vosk=local("vosk"),
+            phonetic=local("phonetic"),
             node=_clean(
                 pick("RT_EDGE_LOCAL_NODE", "local.node", local_cfg.get("node"))
             ),
@@ -414,8 +432,27 @@ def resolve_edge_settings(cfg: Mapping, environ: Mapping) -> EdgeSettings:
         ),
         managed=frozenset(managed),
         notices=tuple(notices),
+        config_errors=removed_key_errors(cfg),
     )
 
+
+def removed_key_errors(cfg: Mapping) -> tuple[str, ...]:
+    """config.yml keys of removed features (REMOVED_KEYS), each named with
+    the key that replaced it: an explicit error, never a silent ignore."""
+    errors = []
+    for old, new in REMOVED_KEYS.items():
+        node: Any = cfg
+        for part in old.split("."):
+            node = node.get(part, _MISSING) if isinstance(node, Mapping) else _MISSING
+        if node is not _MISSING:
+            errors.append(
+                f"config.yml: {old} is removed (Vosk was replaced by rt-phonetic);"
+                f" rename it to {new}"
+            )
+    return tuple(errors)
+
+
+_MISSING = object()
 
 _runtime_config: Optional[EdgeSettings] = None
 
