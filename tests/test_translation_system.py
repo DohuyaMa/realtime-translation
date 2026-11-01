@@ -383,15 +383,15 @@ def test_units_follow_sentence_ends_and_next_carries_the_rest():
         # one final with a sentence end inside: the first sentence goes at
         # once with the rest (committed + partial) as NEXT
         streams["asr"].emit({"type": "partial", "text": "dalsze słowa", "start": 2.0})
-        say(streams, "Pierwsze zdanie. drugie bez", eos=False)
+        say(streams, "Pierwsze zdanie. Drugie bez", eos=False)
         assert wait_for(lambda: len(sink.played) == 1)
-        assert ts.get_stats()["source_tail"] == "drugie bez dalsze słowa"
+        assert ts.get_stats()["source_tail"] == "Drugie bez dalsze słowa"
         streams["asr"].emit({"type": "endpoint", "at": 1.5})
         assert wait_for(lambda: len(sink.played) == 2)
     finally:
         ts.stop()
-    assert [c[0] for c in llm.calls] == ["Pierwsze zdanie.", "drugie bez"]
-    assert llm.nexts == ["drugie bez dalsze słowa", ""]
+    assert [c[0] for c in llm.calls] == ["Pierwsze zdanie.", "Drugie bez"]
+    assert llm.nexts == ["Drugie bez dalsze słowa", ""]
     assert ts.get_stats()["source_tail"] == ""
 
 
@@ -451,7 +451,7 @@ def test_transcribe_mode_lines_from_the_stream_and_no_session():
     ts, pools, llm, streams, capture, sink, events = make(settings, target=keeper)
     assert ts.start() is True
     try:
-        say(streams, "Довгий текст. і далі", eos=False)
+        say(streams, "Довгий текст. І далі", eos=False)
         assert wait_for(lambda: _phrase_events(events))
     finally:
         ts.stop()
@@ -460,7 +460,7 @@ def test_transcribe_mode_lines_from_the_stream_and_no_session():
     assert llm.calls == [] and pools.tts.client.calls == [] and sink.played == []
     assert [e["original_text"] for e in _phrase_events(events)] == [
         "Довгий текст.",
-        "і далі",  # stop: the rest is one more line
+        "І далі",  # stop: the rest is one more line
     ]
 
 

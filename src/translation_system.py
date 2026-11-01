@@ -18,7 +18,9 @@ spoken (decision 2).
 Vosk gate per unit (TASK-SYS-12, ``core.crosscheck.gate_reason``): the unit
 waits until Vosk has covered its end t1 - at most ``VOSK_WAIT_S`` - then its
 HINT is the Vosk words of [t0 - 0.25, t1 + 0.25] (``core.simul.VoskTrack``:
-covered = the end of Vosk's latest word). Only clear hallucination
+covered = the end of Vosk's latest word, or Kaldi idle past t1 - heard
+silence, so a whisper hallucination in a pause is dropped as ``no_word``).
+Only clear hallucination
 is dropped (``vosk_gate_dropped`` / ``_disagree``, a dropped unit only moves
 the ledger on); Vosk late, off or unavailable -> whisper-only, counted and
 logged. Whisper's echo of its prompt is dropped by rt-asr itself.
@@ -958,7 +960,7 @@ class TranslationSystem:
                     return
                 if item is not None:
                     self._apply(*item)
-                for unit in self._ledger.units():
+                for unit in self._ledger.units(self._clock()):
                     self._waiting.append(self._new_unit(unit))
                 self._dispatch()
                 self._tail = self._ledger.tail()
@@ -977,7 +979,7 @@ class TranslationSystem:
             if msg.get("language") and self._detected_language is None:
                 self._detected_language = str(msg["language"])
                 self._check_vosk_language()
-            self._ledger.commit(words, eos=bool(msg.get("eos")))
+            self._ledger.commit(words, eos=bool(msg.get("eos")), now=self._clock())
         elif t == "partial":
             self._ledger.partial = str(msg.get("text") or "")
         elif t == "endpoint":
@@ -995,7 +997,7 @@ class TranslationSystem:
             )
 
     def _apply_vosk(self, t: Optional[str], msg: Dict[str, Any]) -> None:
-        if t in ("final", "partial", "endpoint"):
+        if t in ("final", "partial", "endpoint", "idle"):
             self._vosk.on_message(msg)
             if t == "final":
                 self._check_vosk_language()
@@ -1103,9 +1105,11 @@ class TranslationSystem:
             return
         hint: Optional[List[Word]] = None
         partial = self._vosk.hint(unit.source.t0, unit.source.t1) if vosk else []
-        if vosk and (self._vosk.covers(unit.source.t1) or partial):
+        covered = vosk and self._vosk.covers(unit.source.t1)
+        if vosk and (covered or partial):
             # Kaldi's partial lags ~1 s: Vosk words already in the span are
-            # used as the HINT even when its end is not covered yet
+            # used as the HINT even when its end is not covered yet (then
+            # never a veto: gate ``uncovered``)
             hint = partial
             if not self._vosk_heard(unit, hint):
                 hint = None
@@ -1132,7 +1136,11 @@ class TranslationSystem:
             self._vosk_whisper_only += 1
         self._vosk.forget_before(unit.source.t0)
         hint_text = None if hint is None else words_text(hint)
-        reason = None if hint_text is None else gate_reason(text, hint_text, src)
+        reason = (
+            None
+            if hint_text is None
+            else gate_reason(text, hint_text, src, covered or self._draining)
+        )
         if hint is not None:
             unit.vosk_conf = mean_conf(hint)
         unit.src = src

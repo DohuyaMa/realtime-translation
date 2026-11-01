@@ -44,7 +44,9 @@ latest-wins (пропуск, поки попередній рахується). 
 
 `KaldiRecognizer` на WS-сесію (`SetWords`, `SetPartialWords` якщо є у версії):
 `AcceptWaveform` → `final` (слова, conf, start, end) або `partial` (≤ 1/300 мс,
-лише зміни). Edge шле ті самі кадри в обидва сервіси, час — семплами від
+лише зміни); без слова в поточній репліці — `idle{at}` у тому ж темпі (`at` —
+оброблене аудіо): edge вважає відрізок до `at` − 1 с почутою тишею (live test
+2026-10-31 §14: галюцинації whisper у паузі «Дякую.», «знову.»). Edge шле ті самі кадри в обидва сервіси, час — семплами від
 `start` → спільна шкала. Підказка для зафіксованого відрізка [t0, t1] — слова
 Vosk із серединою в [t0−0.25, t1+0.25] (finals; для хвоста partial words).
 
@@ -53,7 +55,8 @@ Vosk із серединою в [t0−0.25, t1+0.25] (finals; для хвост�
 Клієнт: `start{language, sample_rate:16000, prompt?, t0}`, binary PCM16LE по
 100 мс, `stop`. Сервер: `ready{session_id, model}`, `final{seq, text, words,
 start, end, eos}` (лише дописується), `partial{text, start}` (замінює хвіст),
-`endpoint{at}`, `error{code, state}`, `done`; кожне несе `audio_end`.
+`endpoint{at}`, `idle{at}` (лише vosk), `error{code, state}`, `done`; кожне
+несе `audio_end`.
 Токен у handshake (невірний → close 1008); модель не готова →
 `error{model_not_ready}` + 1013 (лінивий load як `runtime.acquire`); відкрита
 сесія блокує idle unload; unload/RELOAD → `error model_unloaded` + 1012; ліміт
@@ -74,13 +77,17 @@ start, end, eos}` (лише дописується), `partial{text, start}` (з�
 ## 4. Edge — один механізм
 
 `src/clients/stream.py` (WS-клієнт, потік, failover). `src/core/simul.py`:
-`SourceLedger` (лише дописується) + `next_unit()` (правила з рішення 1).
+`SourceLedger` (лише дописується) + `next_unit()` (правила з рішення 1;
+крапка whisper остаточна, лише якщо за нею не йде мале слово без паузи, а
+шматок з одного слова < 0.25 с приєднується до сусіда; ≤ 0.5 с очікування
+наступного слова — live test §14).
 LLM: контекст — попередні пари source→target; user: `TEXT:` одиниця, `HINT:`
 відрізок Vosk, `NEXT (do not translate):` решта зафіксованого + partial;
 system prompt: перекладати лише TEXT, NEXT — тільки для розуміння,
 продовжувати попередній переклад узгоджено; `reject_reason` ловить витік NEXT.
-Гейт Vosk — на одиницю (чекати покриття t1 ≤ 300 мс, інакше whisper-only,
-видно в лозі); відкинута одиниця лише зсуває ledger. TTS/відтворення без змін;
+Гейт Vosk — на одиницю (чекати покриття t1 словами або `idle` ≤ 300 мс,
+інакше whisper-only, видно в лозі; вето — лише при повному покритті і ≥ 2
+словах Vosk); відкинута одиниця лише зсуває ledger. TTS/відтворення без змін;
 `_Phrase` → `_Unit`; без повторної озвучки (одиниці не перетинаються).
 
 ## 5. Бюджет, вимірювання, міграція

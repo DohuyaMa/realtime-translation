@@ -21,6 +21,8 @@ from src.core.crosscheck import (
     GATE_FOREIGN_TERMS,
     GATE_NO_WORD,
     GATE_SHORT_WORDS,
+    GATE_SPARSE,
+    GATE_UNCOVERED,
     Aligned,
     agreement,
     gate_reason,
@@ -622,7 +624,6 @@ HALLUCINATIONS = [
     ("Дякую за перегляд!", "що можна зробити із віспером щоб він не галюцинував"),
     ("Субтитри зроблені спільнотою Amara.org", "відкрийте файл пдф і натисніть"),
     ("Продовження в наступній серії.", "запитайте про відео або аудіо яке в лівії"),
-    ("Дякую!", "так"),
 ]
 
 
@@ -647,6 +648,131 @@ def test_gate_silence_and_short_words():
     assert agreement("Інформації.", "інформа ції", "uk") == 1.0
 
 
+# live 2026-11-01 §14: real phrases dropped on a single (garbled) Vosk word
+SPARSE_VOSK = [
+    ("Ці повинніше.", "буде"),
+    ("Чи повільніше.", "ці"),
+    ("Або повільніше.", "та"),
+    ("Добре, зараз, щось зачитать.", "резонанс"),
+    ("що почули у відео аудио.", "щоб"),
+    ("Дякую!", "так"),
+]
+
+
+def test_exact_short_word_counts_as_agreement():
+    # was: agree 0.00 -> gate disagree -> dropped («як» has 2 letters)
+    assert agreement("як відчуття", "як", "uk") == pytest.approx(0.2)
+    assert gate_reason("як відчуття", "як", "uk") == GATE_AGREE
+    # a 2-letter word only by an exact match, never fuzzily
+    assert agreement("Ну, ок.", "та", "uk") is None
+
+
+@pytest.mark.parametrize("whisper,vosk", SPARSE_VOSK)
+def test_one_vosk_word_is_no_veto(whisper, vosk):
+    assert agreement(whisper, vosk, "uk") == 0.0
+    assert gate_reason(whisper, vosk, "uk") == GATE_SPARSE
+
+
+def test_partial_hint_short_of_the_unit_end_is_no_veto():
+    text = "Добре, зараз, щось зачитать."
+    assert gate_reason(text, "резонанс тут знову", "uk") == GATE_DISAGREE
+    assert gate_reason(text, "резонанс тут знову", "uk", covered=False) == (
+        GATE_UNCOVERED
+    )
+    assert gate_reason(text, "е", "uk", covered=False) == GATE_UNCOVERED
+    assert gate_reason(text, "", "uk", covered=False) == GATE_UNCOVERED
+
+
+def idle(at):
+    return {"type": "idle", "at": at, "audio_end": at}
+
+
+def test_whisper_in_a_pause_vosk_idle_past_it_is_dropped():
+    """§14: «Дякую.» (59.67-60.79 s) and «знову.» in silence - Vosk's last
+    word ended at 45.21 s, Kaldi idle since: no_word, not "Vosk late"."""
+    ts, streams, llm, events = system()
+    assert ts.start()
+    try:
+        speak(streams, "Або повільніше.", "або повільніше", 43.2)
+        assert wait_for(lambda: len(llm.calls) == 1)
+        for at in (50.0, 58.0, 61.5, 62.0):
+            streams["vosk"].emit(idle(at))
+        streams["asr"].emit(final("Дякую.", 59.67, step=1.12))
+        streams["vosk"].emit(idle(73.0))
+        streams["asr"].emit(final("знову.", 70.49, step=1.26))
+        speak(streams, "Це дуже добре.", "це дуже добре", 80.0)
+        assert wait_for(lambda: len(llm.calls) == 2)
+        stats = ts.get_stats()
+    finally:
+        ts.stop()
+    assert llm.calls == ["Або повільніше.", "Це дуже добре."]
+    assert stats["vosk_gate_dropped"] == 2 and stats["vosk_late"] == 0
+    drops = [e for e in events if e.get("status") == "vosk_gate"]
+    assert [(e["original_text"], e["reason"]) for e in drops] == [
+        ("Дякую.", GATE_NO_WORD),
+        ("знову.", GATE_NO_WORD),
+    ]
+
+
+def test_without_idle_a_pause_is_still_vosk_late():
+    """Kaldi not idle (busy / an old rt-vosk): no evidence, whisper-only."""
+    ts, streams, llm, _ = system()
+    assert ts.start()
+    try:
+        streams["vosk"].emit(vosk_final("або", 44.8, 45.21))
+        streams["vosk"].emit(idle(60.0))  # idle, but not 1 s past the end
+        streams["asr"].emit(final("Дякую.", 59.67, step=1.12))
+        assert wait_for(lambda: llm.calls)
+        stats = ts.get_stats()
+    finally:
+        ts.stop()
+    assert llm.calls == ["Дякую."] and llm.checks == [None]
+    assert stats["vosk_late"] == 1 and stats["vosk_gate_dropped"] == 0
+
+
+def test_idle_vosk_with_real_speech_still_turns_deaf():
+    """Laptop mic: Kaldi idle all along while whisper hears whole phrases -
+    the first is gated, then Vosk is deaf and units go whisper-only."""
+    ts, streams, llm, _ = system()
+    assert ts.start()
+    try:
+        streams["vosk"].emit(idle(30.0))
+        t = speak(streams, "Давай спробуємо щось перевести.", None)
+        t = speak(streams, "Знову нічого не чути вслух.", None, t)
+        speak(streams, "І ще одна фраза тут.", None, t)
+        assert wait_for(lambda: len(llm.calls) == 2)
+        stats = ts.get_stats()
+    finally:
+        ts.stop()
+    assert stats["vosk"]["mode"] == "deaf"
+    assert llm.calls == ["Знову нічого не чути вслух.", "І ще одна фраза тут."]
+
+
+def test_partial_hint_never_drops_the_unit():
+    """Vosk's partial words cover only the start of the unit: no veto."""
+    ts, streams, llm, _ = system()
+    assert ts.start()
+    try:
+        text = "Добре, зараз, щось зачитать."
+        streams["vosk"].emit(
+            {
+                "type": "partial",
+                "words": [
+                    {"word": "резонанс", "start": 0.0, "end": 0.3, "conf": 0.6},
+                    {"word": "тут", "start": 0.3, "end": 0.5, "conf": 0.6},
+                ],
+                "audio_end": 0.6,
+            }
+        )
+        streams["asr"].emit(final(text, 0.0))
+        assert wait_for(lambda: llm.calls)
+        stats = ts.get_stats()
+    finally:
+        ts.stop()
+    assert llm.calls == [text] and llm.checks == ["резонанс тут"]
+    assert stats["vosk_gate_dropped"] == 0
+
+
 # -- session recording and per-unit log ------------------------------------
 
 
@@ -663,7 +789,7 @@ def test_session_recording_writes_wav_and_jsonl(tmp_path):
     stats = run(
         ts,
         streams,
-        [("Дякую за перегляд!", "що можна"), ("Добрий день.", "добрий день")],
+        [("Дякую за перегляд!", "що можна зробити"), ("Добрий день.", "добрий день")],
         lambda: llm.calls,
     )
     (session,) = list(tmp_path.iterdir())

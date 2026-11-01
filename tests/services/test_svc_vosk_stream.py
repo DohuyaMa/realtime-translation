@@ -33,12 +33,13 @@ def test_session_partials_throttled_finals_with_words_and_endpoint():
     assert partials[0]["words"][0]["start"] == pytest.approx(2.0)
     s.feed(silence(0.6))
     out = s.step()
-    final, endpoint = out
+    final, endpoint, idle = out
     assert final["type"] == "final" and final["eos"] is True
     assert final["text"] == "w0 w1 w2" and final["language"] == "uk"
     assert final["words"][-1] == {"word": "w2", "start": 3.0, "end": 3.5, "conf": 0.9}
     assert (final["start"], final["end"]) == (2.0, 3.5)
     assert endpoint == {"type": "endpoint", "at": 3.5}
+    assert idle == {"type": "idle", "at": pytest.approx(4.1)}
     assert s.audio_end == pytest.approx(2.0 + 1.5 + 0.6)
 
 
@@ -63,6 +64,16 @@ def test_partial_throttle_is_300ms_of_audio():
         sent += [m for m in s.step() if m["type"] == "partial"]
     # 1.0 s of audio: partials at 0.1, 0.4, 0.7, 1.0
     assert len(sent) == 4
+
+
+def test_idle_while_kaldi_has_no_word_at_the_partial_pace():
+    s = VoskStreamSession(FakeVoskBackend("uk"), language="uk", t0=1.0)
+    out = []
+    for _ in range(10):  # 1.0 s of silence in 100 ms frames
+        s.feed(silence(0.1))
+        out += s.step()
+    assert [m["type"] for m in out] == ["idle"] * 4  # 0.1, 0.4, 0.7, 1.0 s
+    assert [m["at"] for m in out] == pytest.approx([1.1, 1.4, 1.7, 2.0])
 
 
 def test_finish_flushes_the_open_utterance():

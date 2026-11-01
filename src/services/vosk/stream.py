@@ -2,7 +2,11 @@
 session. Kaldi's own endpointing ends an utterance: ``final`` (words with
 conf/start/end, ``eos``) + ``endpoint``; between finals ``partial`` (the
 current utterance, with partial words) at most every ``PARTIAL_INTERVAL_S``
-of audio and only when it changed. Times are ``t0`` + samples / 16 kHz, the
+of audio and only when it changed; with no word in the current utterance,
+``idle{at}`` at the same pace instead (``at`` = processed audio time): Kaldi
+heard silence there, so the edge can tell a whisper hallucination in a
+pause (no Vosk word, Vosk idle past it) from Vosk being late (live
+2026-11-01 §14). Times are ``t0`` + samples / 16 kHz, the
 same scale as rt-asr, so the edge can match words of both.
 
 Pure class (no asyncio): ``feed`` only buffers; ``step``/``finish`` run the
@@ -84,7 +88,7 @@ class VoskStreamSession:
 
     def finish(self) -> List[dict]:
         out = self.step()
-        out = [m for m in out if m["type"] != "partial"]
+        out = [m for m in out if m["type"] not in ("partial", "idle")]
         return out + self._final(json.loads(self._rec.FinalResult()), endpoint=False)
 
     # --- messages -------------------------------------------------------------
@@ -134,7 +138,10 @@ class VoskStreamSession:
         result = json.loads(self._rec.PartialResult())
         text = (result.get("partial") or "").strip()
         if text == self._partial:
-            return []
+            if text:
+                return []
+            self._partial_at = now
+            return [{"type": "idle", "at": round(now, 3)}]
         words = self._words(result.get("partial_result"))
         self._partial, self._partial_at = text, now
         self._partials += 1

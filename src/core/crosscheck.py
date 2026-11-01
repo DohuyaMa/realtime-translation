@@ -6,9 +6,15 @@ and garbled). Two pieces of logic live here, both pure:
 
 - ``gate_reason``: the per-unit gate (code, never the LLM - it cannot
   reliably answer "nothing"). A unit is dropped before the LLM only when
-  whisper clearly hallucinated it: Vosk heard no word of >= 2 letters
-  (silence/noise), or not one whisper word of >= 3 letters agrees
-  (fuzzy) with a Vosk word. Any agreement keeps the WHOLE whisper text:
+  whisper clearly hallucinated it, and only when Vosk covered the whole
+  unit (``covered``; a HINT of Vosk's partial words inside the span is
+  no veto - ``uncovered``): Vosk heard no word of >= 2 letters
+  (silence/noise), or Vosk heard >= ``VETO_MIN_WORDS`` words of >= 3
+  letters and not one whisper word agrees with them (fuzzy for >= 3
+  letters, exact for 2: «як відчуття» / «як» was dropped, live 2026-11-01
+  §14). One Vosk word is no veto (``sparse_vosk``): the small model heard
+  «повільніше» as «буде», «ці», «та» and dropped a real phrase three
+  times. Any agreement keeps the WHOLE whisper text:
   Vosk is sparse and garbled (live test 2026-10-31 §10), so it may veto a
   phrase but never delete words from it. Whisper words written in another
   script than the Vosk model's language (Latin «TypeScript, Docker» for a
@@ -30,9 +36,11 @@ from difflib import SequenceMatcher
 from typing import Optional, Sequence
 
 GATE_MIN_LETTERS = 2
-# whisper words shorter than this are not evidence (« в », «і», «за» match
-# by chance)
+# whisper words shorter than this are not evidence by similarity (« в », «і»,
+# «за» match by chance); from GATE_MIN_LETTERS on an EXACT match counts
 AGREE_MIN_LETTERS = 3
+# a veto (GATE_DISAGREE) needs this many Vosk words of AGREE_MIN_LETTERS
+VETO_MIN_WORDS = 2
 # difflib ratio for "the same word, misrecognized" (Vosk «перемешують» ~
 # whisper «переміщують»); 0.67 separated real speech (>= 0.26 agreement,
 # Vosk nano/small on espeak audio) from hallucinations (0.0) in the
@@ -44,10 +52,13 @@ GATE_DISAGREE = "disagree"
 GATE_DROPS = (GATE_NO_WORD, GATE_DISAGREE)
 # ... or passes: some whisper word agrees with Vosk / every long whisper
 # word is in a script the Vosk model cannot write / no whisper word of
-# AGREE_MIN_LETTERS letters (no evidence, kept)
+# AGREE_MIN_LETTERS letters (no evidence, kept) / Vosk's words do not reach
+# the unit end / Vosk heard < VETO_MIN_WORDS words (too little to veto)
 GATE_AGREE = "agree"
 GATE_FOREIGN_TERMS = "foreign_terms"
 GATE_SHORT_WORDS = "short_words"
+GATE_UNCOVERED = "uncovered"
+GATE_SPARSE = "sparse_vosk"
 
 # alphabet of a Vosk model per language; a language missing here has no
 # script rule (every whisper word counts)
@@ -92,14 +103,20 @@ def countable_words(whisper: str, language: Optional[str]) -> list[str]:
 def agreement(whisper: str, vosk: str, language: Optional[str]) -> Optional[float]:
     """Letter-weighted share of countable whisper words (>= AGREE_MIN_LETTERS,
     in the Vosk model's script) that fuzzily match a Vosk word or two
-    adjacent Vosk words joined (Vosk splits words: «інформа ції»). None =
-    whisper has no such word (no evidence)."""
-    ww = countable_words(whisper, language)
-    if not ww:
-        return None
+    adjacent Vosk words joined (Vosk splits words: «інформа ції»), plus
+    shorter whisper words (>= GATE_MIN_LETTERS) that Vosk heard exactly
+    («як»). None = whisper has no such word (no evidence)."""
     vv = words(vosk)
+    exact = [
+        w
+        for w in words(whisper)
+        if GATE_MIN_LETTERS <= len(w) < AGREE_MIN_LETTERS and w in vv
+    ]
+    ww = countable_words(whisper, language)
+    if not ww and not exact:
+        return None
     cands = set(vv) | {a + b for a, b in zip(vv, vv[1:])}
-    total = hit = 0
+    total = hit = sum(len(w) for w in exact)
     for w in ww:
         total += len(w)
         if any(
@@ -115,17 +132,26 @@ def mean_conf(vosk_words: Sequence) -> Optional[float]:
     return sum(confs) / len(confs) if confs else None
 
 
-def gate_reason(whisper: str, vosk: str, language: Optional[str]) -> str:
+def gate_reason(
+    whisper: str, vosk: str, language: Optional[str], covered: bool = True
+) -> str:
     """The gate decision for one unit; dropped iff in GATE_DROPS.
 
-    Only clear hallucination is dropped: no real Vosk word (GATE_NO_WORD) or
-    zero agreement (GATE_DISAGREE). Passed: GATE_AGREE, GATE_FOREIGN_TERMS
-    (only words the ``language`` Vosk model cannot write), GATE_SHORT_WORDS
-    (no long whisper word; kept when Vosk heard a word)."""
+    Only clear hallucination is dropped, and only when Vosk ``covered`` the
+    unit's end: no real Vosk word (GATE_NO_WORD) or zero agreement with
+    >= VETO_MIN_WORDS long Vosk words (GATE_DISAGREE). Passed: GATE_AGREE,
+    GATE_UNCOVERED (no veto from a partial HINT), GATE_SPARSE (zero
+    agreement with too few Vosk words), GATE_FOREIGN_TERMS (only words the
+    ``language`` Vosk model cannot write), GATE_SHORT_WORDS (no long whisper
+    word; kept when Vosk heard a word)."""
     if not has_real_word(vosk):
-        return GATE_NO_WORD
+        return GATE_NO_WORD if covered else GATE_UNCOVERED
     share = agreement(whisper, vosk, language)
     if share == 0.0:
+        if not covered:
+            return GATE_UNCOVERED
+        if sum(len(w) >= AGREE_MIN_LETTERS for w in words(vosk)) < VETO_MIN_WORDS:
+            return GATE_SPARSE
         return GATE_DISAGREE
     if share is not None:
         return GATE_AGREE

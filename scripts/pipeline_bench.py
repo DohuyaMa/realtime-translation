@@ -84,7 +84,6 @@ def main() -> None:
     ap.add_argument("--vosk", default="http://127.0.0.1:8092", help="'' = off")
     ap.add_argument("--tts", default="http://127.0.0.1:8093")
     ap.add_argument("--llm", default="http://127.0.0.1:8080")
-    ap.add_argument("--model", default=LlmSettings().model)
     ap.add_argument("--log", default=None, help="INFO log file (units, timing)")
     ap.add_argument(
         "--gain-db",
@@ -106,7 +105,7 @@ def main() -> None:
             llm=args.llm, asr=args.asr, tts=args.tts, vosk=args.vosk or None
         ),
         use=ServiceUse(vosk=None if args.vosk else "off"),
-        llm=LlmSettings(model=args.model),
+        llm=LlmSettings(),
     )
     f = client_factories(settings)
 
