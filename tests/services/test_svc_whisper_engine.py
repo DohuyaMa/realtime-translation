@@ -93,7 +93,7 @@ def test_vad_profiles():
         "threshold": 0.5,
         "neg_threshold": 0.35,
         "min_speech_duration_ms": 250,
-        "min_silence_duration_ms": 500,
+        "min_silence_duration_ms": 800,
         "speech_pad_ms": 200,
         "max_speech_duration_s": 12.0,
     }

@@ -66,7 +66,7 @@ def test_stream_ready_finals_endpoint_stop_done():
             for _ in range(12):  # 2.4 s of speech, paced like a live mic
                 ws.send_bytes(speech(0.2))
                 time.sleep(0.02)
-            ws.send_bytes(silence(0.7))
+            ws.send_bytes(silence(1.0))
             msgs = collect_until(ws, "endpoint")
             finals = [m for m in msgs if m["type"] == "final"]
             assert finals and finals[-1]["eos"] is True
@@ -79,7 +79,7 @@ def test_stream_ready_finals_endpoint_stop_done():
             ws.send_bytes(speech(0.6))
             ws.send_json({"type": "stop"})
             msgs = collect_until(ws, "done")
-            assert msgs[-1]["audio_end"] == pytest.approx(5.0 + 3.1 + 0.6, abs=0.01)
+            assert msgs[-1]["audio_end"] == pytest.approx(5.0 + 3.4 + 0.6, abs=0.01)
             assert close_code(ws) == 1000
         assert client.get("/status").json()["sessions"]["active"] == 0
 
