@@ -106,6 +106,7 @@ from .core.crosscheck import (
     GATE_DISAGREE,
     GATE_DROPS,
     GATE_FOREIGN_TERMS,
+    GATE_SPARSE_SOUND,
     Aligned,
     gate_reason,
     similarity,
@@ -474,6 +475,7 @@ class TranslationSystem:
         self._gate_dropped = 0
         self._gate_disagree = 0  # of those: the letters disagree
         self._gate_foreign_terms = 0  # passed: only foreign-script words
+        self._gate_sparse_sound = 0  # passed: SOUND too sparse to judge
         self._whisper_only = 0  # units translated without a transcript
         self._phonetic_unavailable = 0  # of those: request failed
         self._phonetic_timeout = 0  # of those: no answer within the budget
@@ -1107,6 +1109,8 @@ class TranslationSystem:
             return
         if reason == GATE_FOREIGN_TERMS:
             self._gate_foreign_terms += 1
+        elif reason == GATE_SPARSE_SOUND:
+            self._gate_sparse_sound += 1
         unit.gate = reason
         unit.text = text
         with self._lock:
@@ -1889,6 +1893,7 @@ class TranslationSystem:
             "gate_dropped": self._gate_dropped,
             "gate_disagree": self._gate_disagree,
             "gate_foreign_terms": self._gate_foreign_terms,
+            "gate_sparse_sound": self._gate_sparse_sound,
             "whisper_only": self._whisper_only,
             "phonetic_unavailable": self._phonetic_unavailable,
             "phonetic_timeout": self._phonetic_timeout,

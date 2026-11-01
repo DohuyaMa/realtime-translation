@@ -481,6 +481,14 @@ def test_another_phrase_is_dropped_as_disagree():
     assert stats["gate_dropped"] == 1 and stats["gate_disagree"] == 1
 
 
+def test_sparse_sound_passes_and_is_counted():
+    ts, streams, llm, _ = system(phonetic=["сер"])
+    stats = run(
+        ts, streams, ["Сіду до infrastruktурної вирішення."], lambda: llm.calls
+    )
+    assert stats["gate_sparse_sound"] == 1 and stats["gate_dropped"] == 0
+
+
 def test_foreign_terms_pass_and_are_counted():
     ts, streams, llm, _ = system(phonetic=["тайпскрипт докер"])
     stats = run(ts, streams, ["TypeScript, Docker."], lambda: llm.calls)

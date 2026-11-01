@@ -163,6 +163,7 @@ def main() -> None:
         "phonetic_checked",
         "gate_dropped",
         "gate_foreign_terms",
+        "gate_sparse_sound",
         "whisper_only",
         "phonetic_unavailable",
         "phonetic_timeout",

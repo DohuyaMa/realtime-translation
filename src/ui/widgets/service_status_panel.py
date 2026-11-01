@@ -132,6 +132,7 @@ PIPELINE_COUNTERS = {
     "gate_dropped": "відкинуто як галюцинацію whisper (фонетика)",
     "gate_disagree": "з них: whisper не збігся зі звуком",
     "gate_foreign_terms": "пропущено фільтром: лише іноземні терміни",
+    "gate_sparse_sound": "пропущено фільтром: фонетика почула замало",
     "whisper_only": "перекладено лише з whisper (без фонетики)",
     "phonetic_unavailable": "з них: фонетика недоступна",
     "phonetic_timeout": "з них: фонетика не встигла",
