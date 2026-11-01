@@ -12,7 +12,7 @@
 |---|---|---|---|
 | edge (UI, стріми, одиниці перекладу, клієнти) | ПК користувача | `python -m src.main` | - |
 | `rt-asr` (faster-whisper) | будь-який хост | `.#rt-asr-cpu`, `.#rt-asr-gpu`, `python -m src.services.asr` | 8091 |
-| `rt-phonetic` (wav2vec2 CTC, лише CPU) | будь-який хост | `.#rt-phonetic-cpu`, `python -m src.services.phonetic` | 8092 |
+| `rt-phonetic` (wav2vec2 CTC, cpu або cuda) | будь-який хост | `.#rt-phonetic-cpu` / `.#rt-phonetic-gpu`, `python -m src.services.phonetic` | 8092 |
 | `rt-tts` (Kokoro ONNX) | будь-який хост | `.#rt-tts-cpu`, `.#rt-tts-gpu`, `python -m src.services.tts` | 8093 |
 | LLM (llama-воркер) | локальний або вузол кластера (список від Django) | app-сесія напряму у воркера | 8080 |
 
@@ -26,7 +26,7 @@
 
 `rt-phonetic` (порт 8092; у режимі `translate` - перевірка кожної одиниці whisper і основа перекладу, див. «Фонетика» нижче) - символьна CTC-модель (wav2vec2, жадібне декодування, без словника і мовної моделі): пише літери, які чує, тож не вигадує фраз, а імена й терміни пише як чути («сайборг», «віспер»). Той самий runtime (`/health`, `/status`, `/config`, `POST /model/{load,unload}`, токен, `listenAddresses`, вивантаження за простоєм) і той самий запит, що й `rt-asr`: `POST /v1/audio/transcriptions` (multipart `file` = wav 16 кГц моно + `language`) -> `{"text": "<малі літери, без наголосів>", "language", "words": [{"word", "start", "end"}], "duration"}` (час слів - від початку надісланого аудіо; тиша - `"text": ""`). `RT_MODEL` - ОДНА модель (default `uk-wav2vec2-stress` = `mouseyy/uk_wav2vec2_with_stress_mark`, лише uk): сервіс тримає в пам'яті одну модель однієї мови; мову модель не визначає: `language` порожня / `auto` - мова моделі, інша мова - 409 `model_language_mismatch` (модель запитом ніколи не перемикається; перемикання - явне `POST /config {"values": {"model": ...}}`, у UI - вкладка «Фонетика»). Модель вантажиться - 503 `model_*`. `GET /v1/models` показує `language` кожної моделі. Лише CPU (float32, `RT_NUM_THREADS` потоків torch, default 4: ~0.3 с на 2 с мови, ~2.2 ГБ RAM).
 
-Пакети flake: `rt-edge` (default package, `nix run .`), `rt-asr-{cpu,gpu}`, `rt-phonetic-cpu`, `rt-tts-{cpu,gpu}` (також ROCm-варіант ASR, якщо не `broken`), `nixosModules.rt-speech`, `nixosModules.virtual-sinks`, `overlays.default` (`pkgs.rtSpeech.{asr,phonetic,tts}.<variant>`), `lib.rtSpeech`.
+Пакети flake: `rt-edge` (default package, `nix run .`), `rt-asr-{cpu,gpu}`, `rt-phonetic-{cpu,gpu}`, `rt-tts-{cpu,gpu}` (також ROCm-варіант ASR, якщо не `broken`), `nixosModules.rt-speech`, `nixosModules.virtual-sinks`, `overlays.default` (`pkgs.rtSpeech.{asr,phonetic,tts}.<variant>`), `lib.rtSpeech`.
 
 ## 2. Локальний запуск у devShell
 
@@ -64,7 +64,7 @@ Edge говорить з воркером через app-сесію (розді�
 
 ## 3. Моделі
 
-Моделі закріплені в реєстрі (revision + sha256 кожного файлу): увесь каталог faster-whisper - `whisper-{tiny,base,small,medium}[.en]`, `whisper-large-v1/v2/v3`, `whisper-large-v3-turbo`, `whisper-distil-{large-v2,large-v3,large-v3.5,medium.en,small.en}` - і `kokoro-82m-v1.0-onnx`; для `rt-phonetic` - `uk-wav2vec2-stress` (uk, `mouseyy/uk_wav2vec2_with_stress_mark`, 1.26 ГБ на диску, ~2.2 ГБ RAM; 4 файли з HF, без токенізатора - словник `vocab.json` сервіс декодує сам). `.en` - лише англійська і зберігаються в `$RT_MODEL_DIR` (default `~/.cache/rt-speech/models`).
+Моделі закріплені в реєстрі (revision + sha256 кожного файлу): увесь каталог faster-whisper - `whisper-{tiny,base,small,medium}[.en]`, `whisper-large-v1/v2/v3`, `whisper-large-v3-turbo`, `whisper-distil-{large-v2,large-v3,large-v3.5,medium.en,small.en}` - і `kokoro-82m-v1.0-onnx`; для `rt-phonetic` - `uk-wav2vec2-stress` (uk, `mouseyy/uk_wav2vec2_with_stress_mark`, 1.26 ГБ на диску, ~2.2 ГБ RAM; 4 файли з HF, без токенізатора - словник `vocab.json` сервіс декодує сам; працює на cpu або cuda (`nix build .#rt-phonetic-gpu`), точність float32 на cpu / float16 на cuda; на cyborg cuda: 0.06-0.09 с на 10 с аудіо, ~1 ГіБ VRAM). `.en` - лише англійська і зберігаються в `$RT_MODEL_DIR` (default `~/.cache/rt-speech/models`).
 
 ```bash
 rt-models list                         # alias, сервіс, ліцензія, ok|missing
@@ -82,7 +82,7 @@ rt-models --model-dir /var/lib/rt-asr/models list
 
 ### 4.1 Env
 
-Класи: **BOOTSTRAP** - лише через env/рестарт; **TUNABLE** - змінюється через `/config` без перезавантаження моделі; **RELOAD** - змінюється через `/config`, модель перезавантажується: стара вивантажується, потім вантажиться нова (асинхронно; помилка - стан `error`, див. 4.2). Default-и нижче - для `RT_DEVICE=cpu` (на `cuda` default `RT_MODEL` для ASR - `whisper-large-v3-turbo`, beam 3, compute `int8_float16`).
+Класи: **BOOTSTRAP** - лише через env/рестарт; **TUNABLE** - змінюється через `/config` без перезавантаження моделі; **RELOAD** - змінюється через `/config`, модель перезавантажується: стара вивантажується, потім вантажиться нова (асинхронно; помилка - стан `error`, див. 4.2). Default-и нижче - для `RT_DEVICE=cpu` (на `cuda` default `RT_MODEL` для ASR - `whisper-large-v3-turbo`, beam 3, compute `int8_float16`; rt-phonetic на `cuda` - `float16`, на cpu - `float32`; `RT_DEVICE`/`RT_COMPUTE_TYPE` rt-phonetic перемикаються через `/config` з перезавантаженням).
 Таблиця згенерована (виконувати всередині `nix develop`): `python -m scripts.gen_env_table`.
 
 `RT_IDLE_UNLOAD_MINUTES` (NixOS: `services.rtSpeech.{asr,phonetic,tts}.idleUnloadMinutes`): модель вантажиться першим запитом і вивантажується після N хвилин без запитів (кожне завантаження/вивантаження - у лозі); `0` - завантажити на старті й не вивантажувати. `/health` модель не вантажить, показує `model.state`; `/status` вважає вивантажену за простоєм модель `ready` (перший запит після простою чекає завантаження з диска). Явне `POST /model/unload` запитами не скасовується: модель лишається вивантаженою до `POST /model/load` або зміни моделі.
@@ -120,9 +120,9 @@ rt-models --model-dir /var/lib/rt-asr/models list
 | Ключ | Default | Клас |
 |---|---|---|
 | `RT_API_TOKEN_FILE` | `(не задано)` | BOOTSTRAP |
-| `RT_COMPUTE_TYPE` | `float32` | BOOTSTRAP |
+| `RT_COMPUTE_TYPE` | `float32` | RELOAD |
 | `RT_CONFIG_STATE` | `(не задано)` | BOOTSTRAP |
-| `RT_DEVICE` | `cpu` | BOOTSTRAP |
+| `RT_DEVICE` | `cpu` | RELOAD |
 | `RT_DEVICES` | `cpu` | BOOTSTRAP |
 | `RT_IDLE_UNLOAD_MINUTES` | `15` | BOOTSTRAP |
 | `RT_LISTEN_ADDRESSES` | `127.0.0.1` | BOOTSTRAP |

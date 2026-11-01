@@ -13,7 +13,7 @@ python -m src.services.asr           # rt-asr (:8091); RT_ASR_BACKEND=faster-whi
 python -m src.services.tts           # rt-tts (:8093); RT_TTS_BACKEND=kokoro|fake
 python -m src.services.phonetic      # rt-phonetic (:8092); RT_PHONETIC_BACKEND=wav2vec2|fake
 nix develop -c pytest tests/ -q      # tests
-nix build .#rt-asr-cpu               # also rt-asr-gpu, rt-phonetic-cpu, rt-tts-cpu, rt-tts-gpu
+nix build .#rt-asr-cpu               # also rt-asr-gpu, rt-phonetic-{cpu,gpu}, rt-tts-cpu, rt-tts-gpu
 black src/ tests/ && flake8 src/ tests/ && mypy src/
 python -m scripts.gen_env_table      # (inside nix develop) regenerate env tables for docs/USAGE.md
 ```
@@ -33,7 +33,7 @@ Modes (`services.mode`): `transcribe` (stream units as text, ASR only), `transla
 | `src/main.py` | Entry point: Qt app, controllers, `MainWindow` |
 | `src/services/common/` | Shared service runtime: settings (`ENV_KEYS`, `TUNABLE_FIELDS`, `RELOAD_FIELDS`), `/config` (`runtime_config.py`), `/health`, `/status`, auth, model registry/store, `rt-models` CLI |
 | `src/services/asr/`, `src/services/tts/` | `rt-asr` (faster-whisper, `POST /audio/transcriptions`) and `rt-tts` (Kokoro ONNX, `POST /audio/speech`, `GET /audio/voices`; both `GET /v1/models`) FastAPI services |
-| `src/services/phonetic/` | `rt-phonetic` (character-level wav2vec2 CTC, no dictionary, CPU only; rt-asr request shape, answer = lowercase letters as heard + word times; `RT_MODEL` = ONE model of one language, `uk-wav2vec2-stress`; other language -> 409 `model_language_mismatch`). Edge translate mode, per unit: `core/crosscheck.py` letter gate (drops whisper hallucinations) and "condition F" translation - SOUND (letters) primary, whisper TEXT only spelling/numbers; `services.use.phonetic` = auto/node/off; evidence `context/phonetic-bench-2026-11-01.md`; offline replay `scripts/replay_session.py`; opt-in recording `core/session_record.py`, `services.record_session` |
+| `src/services/phonetic/` | `rt-phonetic` (character-level wav2vec2 CTC, no dictionary; cpu or cuda - float32 on cpu / float16 on cuda, on cyborg cuda 0.06-0.09 s per 10 s audio, ~1 GiB VRAM; rt-asr request shape, answer = lowercase letters as heard + word times; `RT_MODEL` = ONE model of one language, `uk-wav2vec2-stress`; other language -> 409 `model_language_mismatch`). Edge translate mode, per unit: `core/crosscheck.py` letter gate (drops whisper hallucinations) and "condition F" translation - SOUND (letters) primary, whisper TEXT only spelling/numbers; `services.use.phonetic` = auto/node/off; evidence `context/phonetic-bench-2026-11-01.md`; offline replay `scripts/replay_session.py`; opt-in recording `core/session_record.py`, `services.record_session` |
 | `src/core/simul.py`, `src/clients/stream.py`, `src/audio/{resample,level,trim}.py` | Stream pipeline: WS stream client (rt-asr), `SourceLedger` units (sentence/endpoint/clause/20 words), edge level normalization, TTS edge-silence trim |
 | `src/clients/` | HTTP clients: `asr`, `phonetic`, `tts`, `llm`, `discovery` (Django service list + cache), endpoint `pool` (priority order, failover), `session` (worker app session, failover/return-to-local), `health` |
 | `src/translation_system.py`, `src/adapters/`, `src/controller/` | Edge pipeline, adapter and controller on top of clients |
@@ -48,7 +48,7 @@ Modes (`services.mode`): `transcribe` (stream units as text, ASR only), `transla
 
 ### Nix (`nix/`, `flake.nix`)
 
-- `nix/packages/` - `rtSpeech.{asr,phonetic,tts}.<variant>` bundles (variants cpu/gpu, ROCm for ASR, cpu only for phonetic), exposed as `packages.rt-{asr,tts}-{cpu,gpu}`, `packages.rt-phonetic-cpu` and `overlays.default`;
+- `nix/packages/` - `rtSpeech.{asr,phonetic,tts}.<variant>` bundles (variants cpu/gpu, ROCm for ASR), exposed as `packages.rt-{asr,phonetic,tts}-{cpu,gpu}` and `overlays.default`;
 - `rt-edge` package (default, `nix run .`) - the edge UI;
 - `nix/home-manager/rt-translator.nix` - `homeManagerModules.rt-translator` (`rt-translator.*` options: django.{urls,tokenFile}, local.{llm,asr,tts}, localTokenFile, allowedServices, mode, autostart, virtualSinks -> `RT_EDGE_*` env);
 - `nix/nixos/rt-speech.nix` - `services.rtSpeech.{asr,phonetic,tts}` NixOS module; `nix/nixos/virtual-sinks.nix` - PipeWire devices (`lib.rtSpeech.virtualDevicesConf`, shared with the HM module): null sink `rt_virtual_input`, loopback `rt_virtual_output` (sink) -> `rt_virtual_mic` (source for other apps);
