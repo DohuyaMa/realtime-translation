@@ -7,8 +7,8 @@ assert info p.rtSpeech.asr.cpu == { service = "asr"; variant = "cpu"; port = 809
 assert info p.rtSpeech.asr.gpu == { service = "asr"; variant = "gpu"; port = 8091; main = "rt-asr"; };
 assert info p.rtSpeech.tts.cpu == { service = "tts"; variant = "cpu"; port = 8093; main = "rt-tts"; };
 assert !(p.rtSpeech.tts ? rocm);
-assert info p.rtSpeech.vosk.cpu == { service = "vosk"; variant = "cpu"; port = 8092; main = "rt-vosk"; };
-assert builtins.attrNames p.rtSpeech.vosk == [ "cpu" ];
+assert info p.rtSpeech.phonetic.cpu == { service = "phonetic"; variant = "cpu"; port = 8092; main = "rt-phonetic"; };
+assert builtins.attrNames p.rtSpeech.phonetic == [ "cpu" ];
 assert p.rtSpeech.asr.cpu.drvPath == self.packages.x86_64-linux.rt-asr-cpu.drvPath;
 # overlay adds only `rtSpeech`; GPU overrides stay scoped
 assert builtins.attrNames (self.overlays.default p pkgs) == [ "rtSpeech" ];

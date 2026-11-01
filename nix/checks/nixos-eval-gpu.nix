@@ -25,8 +25,8 @@ let
   ttsCpuNoMdwe = evalWith { tts = { enable = true; package = fake "rt-tts"; }; };
   ttsDefault = evalWith { tts = { enable = true; package = fake "rt-tts"; }; };
   ttsRocm = evalWith { tts = { enable = true; device = "rocm"; }; };
-  vosk = evalWith { vosk = { enable = true; package = fake "rt-vosk"; }; };
-  voskCuda = evalWith { vosk = { enable = true; device = "cuda"; package = fake "rt-vosk"; }; };
+  phonetic = evalWith { phonetic = { enable = true; package = fake "rt-phonetic"; }; };
+  phoneticCuda = evalWith { phonetic = { enable = true; device = "cuda"; package = fake "rt-phonetic"; }; };
   storeToken = evalWith { asr = { enable = true; package = fake "rt-asr"; apiTokenFile = "${builtins.storeDir}/x-token"; }; };
   firewall = evalWith { asr = { enable = true; package = fake "rt-asr"; listenAddresses = [ "127.0.0.1" "100.64.0.10" ]; openFirewall = true; }; };
   closed = evalWith { asr = { enable = true; package = fake "rt-asr"; listenAddresses = [ "127.0.0.1" "100.64.0.10" ]; }; };
@@ -106,18 +106,20 @@ let
       expected = true;
     };
     testTtsCpuAllowsJit = { expr = (sc ttsCpuNoMdwe "rt-tts").MemoryDenyWriteExecute; expected = false; };
-    testVoskHardenedOnItsPort = {
+    # torch's oneDNN JIT needs W+X memory, like ORT in rt-tts
+    testPhoneticOnItsPortAllowsJit = {
       expr = {
-        mdwe = (sc vosk "rt-vosk").MemoryDenyWriteExecute;
-        privateDevices = (sc vosk "rt-vosk").PrivateDevices;
-        port = builtins.elem ''"RT_PORT=8092"'' (sc vosk "rt-vosk").Environment;
-        user = (sc vosk "rt-vosk").User;
+        mdwe = (sc phonetic "rt-phonetic").MemoryDenyWriteExecute;
+        privateDevices = (sc phonetic "rt-phonetic").PrivateDevices;
+        port = builtins.elem ''"RT_PORT=8092"'' (sc phonetic "rt-phonetic").Environment;
+        user = (sc phonetic "rt-phonetic").User;
+        stateDir = (sc phonetic "rt-phonetic").StateDirectory;
       };
-      expected = { mdwe = true; privateDevices = true; port = true; user = "rt-vosk"; };
+      expected = { mdwe = false; privateDevices = true; port = true; user = "rt-phonetic"; stateDir = "rt-phonetic"; };
     };
-    testVoskGpuRejected = {
-      expr = failedAssertions voskCuda;
-      expected = [ ''services.rtSpeech.vosk runs on cpu only (Kaldi); devices = ["cuda"]'' ];
+    testPhoneticGpuRejected = {
+      expr = failedAssertions phoneticCuda;
+      expected = [ ''services.rtSpeech.phonetic runs on cpu only; devices = ["cuda"]'' ];
     };
     testTtsRocmRejected = {
       expr = (builtins.tryEval (builtins.deepSeq (sc ttsRocm "rt-tts").ExecStart true)).success;

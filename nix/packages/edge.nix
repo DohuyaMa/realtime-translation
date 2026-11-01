@@ -11,7 +11,7 @@ python313Packages.buildPythonApplication {
   dependencies = import ./edge-deps.nix python313Packages;
   # capture (parec), playback (pacat) and the PipeWire preflight (pactl)
   makeWrapperArgs = [ "--prefix" "PATH" ":" (lib.makeBinPath [ pulseaudio ]) ];
-  # pyproject also declares rt-asr/rt-vosk/rt-tts entry points; their modules are not in edgeSrc.
+  # pyproject also declares rt-asr/rt-phonetic/rt-tts entry points; their modules are not in edgeSrc.
   postInstall = ''
     find $out/bin -mindepth 1 -maxdepth 1 ! -name translator-ui -delete
   '';

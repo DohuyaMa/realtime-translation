@@ -4,7 +4,7 @@
 let
   services = {
     asr = { port = 8091; unit = "rt-asr"; stateDir = "/var/lib/rt-asr"; };
-    vosk = { port = 8092; unit = "rt-vosk"; stateDir = "/var/lib/rt-vosk"; };
+    phonetic = { port = 8092; unit = "rt-phonetic"; stateDir = "/var/lib/rt-phonetic"; };
     tts = { port = 8093; unit = "rt-tts"; stateDir = "/var/lib/rt-tts"; };
   };
 
