@@ -16,3 +16,12 @@ python -m src.main
 ```
 
 Tests: `nix develop -c pytest tests/ -q`. Packages: `nix build .#rt-asr-cpu` (also `rt-asr-gpu`, `rt-tts-cpu`, `rt-tts-gpu`).
+
+## License
+
+**Personal Noncommercial License** - see [LICENSE](LICENSE); third-party models and libraries: [NOTICE](NOTICE).
+
+- Free for individuals, for personal noncommercial use (study, hobby, private experiments).
+- Any use by or for an organization (companies, government bodies, NGOs, universities) and any commercial use, including hosted services, needs a separate agreement: a royalty, a fee, or engaging the author (B2B). Contact: <siticenterzetech@gmail.com> (<https://github.com/DohuyaMa>).
+
+Versions published before this license were released under AGPL-3.0.

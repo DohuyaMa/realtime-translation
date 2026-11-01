@@ -63,3 +63,16 @@ CLAUDE.md
 result
 result-*
 flake-global/result
+
+# Local notes, other tools' configs, third-party/reference code (not part of the app)
+/context/
+/plans/
+/.omo/
+/.zed/
+/.roomodes
+/stop-here.md
+/checklist.md
+/TRANSFORMATION_SUMMARY.md
+/whisper_real_time_translation-main/
+/scripts/examples/
+/scripts/scripts/

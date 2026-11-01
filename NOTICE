@@ -1,0 +1,27 @@
+Real-time Speech Translator
+Copyright (c) 2025-2026 DohuyaMa
+Licensed under the Personal Noncommercial License (see LICENSE).
+
+This repository contains no third-party models and no third-party source
+code. The components below are installed through Nix or downloaded at
+runtime and remain under their own licenses; check the upstream project or
+model card for the authoritative terms before any commercial use.
+
+Models (downloaded at runtime)
+- Whisper speech recognition models (OpenAI), CTranslate2 conversions
+  (Systran/faster-whisper-*, dropbox-dash/faster-whisper-large-v3-turbo,
+  distil-whisper/*) - MIT
+- Kokoro-82M text-to-speech (hexgrad), ONNX export
+  onnx-community/Kokoro-82M-v1.0-ONNX - Apache-2.0
+- mouseyy/uk_wav2vec2_with_stress_mark (rt-phonetic) - see its model card
+- LLM used for translation: chosen and loaded by the operator of the llama
+  worker; not distributed with this project
+
+Libraries and programs (installed through Nix)
+- faster-whisper, CTranslate2, ONNX Runtime, FastAPI, Starlette, Uvicorn,
+  httpx, Pydantic, loguru - MIT
+- PyTorch, NumPy, SciPy - BSD-3-Clause
+- Hugging Face transformers, huggingface_hub - Apache-2.0
+- PySide6 / Qt for Python - LGPL-3.0 (dynamically linked)
+- llama.cpp (llama-server) - MIT
+- espeak-ng - GPL-3.0; used only as a separate program, not linked
