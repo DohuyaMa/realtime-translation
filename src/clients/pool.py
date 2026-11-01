@@ -112,6 +112,11 @@ class EndpointPool(Generic[C]):
                 self._clients[url] = self._factory(self.endpoints[url])
             return self._clients[url]
 
+    def has_alternative(self, url: str) -> bool:
+        """Another endpoint than ``url`` is up: failing over can help."""
+        with self._lock:
+            return any(u != url and not self._is_down(u) for u in self.urls)
+
     def mark_down(self, url: str) -> None:
         with self._lock:
             self._down_until[url] = self._clock() + self._down_s

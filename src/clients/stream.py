@@ -6,18 +6,25 @@ goes into a ring buffer (the last ``ring_s`` seconds) and from there to the
 server in 100 ms frames once the stream is open. Audio fed while the stream
 is still opening (warm-up: the handshake loads the model, an unloaded model
 gets ``POST /model/load`` first) waits in the ring and is sent at once after
-``ready`` - capture never waits for a service.
+``ready`` - capture never waits for a service. That backlog (up to ``ring_s``,
+e.g. a 6-20 s cold model load) is delivered in full and does not count
+toward the send queue: the queue limit measures only audio fed after
+``ready`` that the link could not take (live test 2026-10-31 §15).
 
 Timeline: sample 0 is the first fed sample; ``start.t0`` and every time the
 server sends are seconds on it, so rt-asr and rt-vosk words share one scale.
 
 Failover: a broken connection (refused handshake, closed socket, a send
-queue of more than ``send_queue_s`` seconds of audio, an ``error``) marks
-the endpoint down in the ``EndpointPool`` and the next one is opened; the
-audio from the end of the last committed word on is replayed from the ring
-and finals that end at or before it are dropped (dedupe by ``end``). With no
-endpoint left the client says so (``failed``) and retries every
-``RETRY_S`` while audio keeps going into the ring.
+queue of more than ``send_queue_s`` seconds of audio fed after ``ready``, an
+``error``) marks the endpoint down in the ``EndpointPool`` and the next one
+is opened; the audio from the end of the last committed word on is replayed
+from the ring and finals that end at or before it are dropped (dedupe by
+``end``). A send-queue overflow marks the endpoint down only when the pool
+has another one up (marking the only endpoint down just stops the stream for
+``down_s``). Reconnecting to the same endpoint and retrying with no endpoint
+available back off from ``RETRY_S`` doubling up to ``RETRY_MAX_S`` (reset
+once a session hears from the server); with no endpoint the client says so
+once (``failed``) per outage while audio keeps going into the ring.
 
 Events (``on_event(kind, msg)``, on the client thread): the server's
 ``final`` (deduped) / ``partial`` / ``endpoint`` and, from the client,
@@ -48,6 +55,7 @@ RING_S = 30.0
 SEND_QUEUE_S = 5.0
 STOP_TIMEOUT_S = 2.0
 RETRY_S = 1.0
+RETRY_MAX_S = 8.0
 OPEN_TIMEOUT_S = 10.0
 # the handshake may wait for a lazy model load on the server
 READY_TIMEOUT_S = 600.0
@@ -100,6 +108,7 @@ class StreamClient:
         send_queue_s: float = SEND_QUEUE_S,
         connect: Callable[[str, Dict[str, str]], Any] = _default_connect,
         retry_s: float = RETRY_S,
+        retry_max_s: float = RETRY_MAX_S,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.kind = kind
@@ -111,14 +120,21 @@ class StreamClient:
         self._queue_max = int(send_queue_s * RATE)
         self._connect = connect
         self._retry_s = retry_s
+        self._retry_max_s = retry_max_s
+        self._failures = 0  # consecutive failed connects, for the backoff
         self._clock = clock
         self._lock = threading.Lock()
+        # set only by stop/close: wakes a backoff wait (feed must not, or
+        # the wait never waits - live test 2026-10-31 §15)
         self._wake = threading.Event()
         self._ring: Deque[Tuple[int, np.ndarray]] = deque()
         self._ring_start = 0  # sample of the oldest kept audio
         self._end = 0  # samples fed
         self._lost = 0  # samples dropped from the ring before they were sent
         self._sent: Optional[int] = None  # None = not connected
+        # samples fed when the session became ready: the backlog before it
+        # is exempt from the send-queue limit
+        self._ready_end = 0
         self._committed_end = 0.0  # end of the last final word, s
         self._stopping = False
         self._closed = False
@@ -147,7 +163,6 @@ class StreamClient:
             self._ring.append((self._end, pcm))
             self._end += pcm.size
             self._trim_ring()
-        self._wake.set()
 
     def _trim_ring(self) -> None:
         """Caller holds the lock: keep at most ``ring_s`` of audio; audio
@@ -223,8 +238,15 @@ class StreamClient:
         except Exception as e:  # never kills the stream thread
             logger.exception("{} stream: event handler failed: {}", self.kind, e)
 
+    def _backoff(self) -> None:
+        """Wait before the next connect: ``retry_s`` doubling per consecutive
+        failure up to ``retry_max_s``; stop/close cut it short."""
+        delay = min(self._retry_s * 2 ** max(0, self._failures - 1), self._retry_max_s)
+        self._wake.wait(delay)
+
     def _run(self) -> None:
         first = True
+        unavailable = False  # in a "no endpoint available" outage
         while not self._closed:
             if self._stopping and self._sent is None and not first:
                 break
@@ -232,15 +254,19 @@ class StreamClient:
                 url = self._pool.activate()
             except ServiceError as e:
                 self.state = "down"
-                logger.error(
-                    "{} stream: {} - retry in {} s", self.kind, e, self._retry_s
-                )
-                self._emit({"type": "failed", "error": str(e)})
+                self._failures += 1
+                if not unavailable:  # one error + event per outage
+                    unavailable = True
+                    logger.error("{} stream: {}", self.kind, e)
+                    self._emit({"type": "failed", "error": str(e)})
                 if self._stopping:
                     break
-                self._wake.wait(self._retry_s)
-                self._wake.clear()
+                logger.info(
+                    "{} stream: still no endpoint, retry #{}", self.kind, self._failures
+                )
+                self._backoff()
                 continue
+            unavailable = False
             self.url = url
             try:
                 self._session(url, first)
@@ -250,17 +276,23 @@ class StreamClient:
                     self._sent = None
                 self.state = "down"
                 self.reconnects += 1
+                self._failures += 1
                 if e.mark:
                     self._pool.mark_down(url)
-                logger.warning("{} stream on {} lost: {}", self.kind, url, e)
+                logger.warning(
+                    "{} stream on {} lost{}: {}",
+                    self.kind,
+                    url,
+                    "" if e.mark else " (endpoint kept)",
+                    e,
+                )
                 self._emit({"type": "down", "url": url, "error": str(e)})
                 first = False
                 if self._stopping:
                     # the rest is lost: stop must not wait for another node
                     break
-                if not e.mark:  # same endpoint again: not in a tight loop
-                    self._wake.wait(0.2)
-                    self._wake.clear()
+                if not e.mark:  # same endpoint again: back off, never a tight loop
+                    self._backoff()
         self.state = "done"
         with self._lock:
             sent = self._sent if self._sent is not None else self._ring_start
@@ -333,17 +365,21 @@ class StreamClient:
         ms = round((self._clock() - (self._t_start if first else t0)) * 1000.0, 1)
         with self._lock:
             self._sent = replay
+            self._ready_end = self._end
+            backlog = self._end - replay
         self.state = "open"
         if first:
             self.ready_ms = ms
         logger.info(
-            "{} stream on {} ready in {} ms{} (session {}, replay from {:.2f} s)",
+            "{} stream on {} ready in {} ms{} (session {}, replay from {:.2f} s,"
+            " backlog {:.1f} s sent outside the queue limit)",
             self.kind,
             url,
             ms,
             " (model loaded first)" if loaded else "",
             str(ready.get("session_id", ""))[:8],
             replay / RATE,
+            backlog / RATE,
         )
         self._emit(
             {
@@ -385,10 +421,15 @@ class StreamClient:
         while True:
             with self._lock:
                 sent = self._sent if self._sent is not None else self._end
-                if self._end - sent > self._queue_max:
+                # audio fed after ready that the link has not taken yet
+                queued = self._end - max(sent, self._ready_end)
+                if queued > self._queue_max:
                     raise _Down(
-                        f"send queue {(self._end - sent) / RATE:.1f} s"
-                        f" > {self._queue_max / RATE:.0f} s"
+                        f"send queue {queued / RATE:.1f} s"
+                        f" > {self._queue_max / RATE:.0f} s",
+                        # the only endpoint stays up: marking it down would
+                        # stop the stream for the pool's down_s
+                        mark=self._pool.has_alternative(self.url or ""),
                     )
                 n = min(FRAME, self._end - sent)
                 if n <= 0 or (n < FRAME and not flush):
@@ -430,6 +471,8 @@ class StreamClient:
             return None
         msg = json.loads(raw)
         kind = msg.get("type")
+        if kind in ("final", "partial", "endpoint", "idle", "done"):
+            self._failures = 0  # the session works: next failure retries fast
         if kind == "final":
             words = [
                 w
@@ -448,7 +491,7 @@ class StreamClient:
                 )
             self._committed_end = float(words[-1]["end"])
             self._emit(msg)
-        elif kind in ("partial", "endpoint"):
+        elif kind in ("partial", "endpoint", "idle"):  # idle: rt-vosk only
             self._emit(msg)
         elif kind == "error":
             raise _Down(

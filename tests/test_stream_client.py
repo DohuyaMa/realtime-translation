@@ -8,6 +8,7 @@ import threading
 import time
 
 import numpy as np
+import pytest
 
 from src.clients import Credential, Endpoint, EndpointPool
 from src.clients.stream import FRAME, RATE, StreamClient, ws_url
@@ -284,4 +285,134 @@ def test_no_endpoint_is_reported_and_retried():
     c.start()
     assert wait_for(lambda: any(e["type"] == "failed" for e in events))
     assert c.state == "down"
+    c.close()
+
+
+# --- live test 2026-10-31 §15: cold model load > send_queue_s --------------
+
+
+def counting_pool(urls, kind):
+    eps = [Endpoint(kind, u, u, Credential("tok")) for u in urls]
+    p = EndpointPool(kind, eps, lambda e: ModelClient())
+    p.marked = []
+    mark = p.mark_down
+
+    def mark_down(url):
+        p.marked.append(url)
+        mark(url)
+
+    p.mark_down = mark_down
+    return p
+
+
+@pytest.mark.parametrize("kind", ["asr", "vosk"])
+def test_backlog_of_a_slow_ready_is_delivered_without_overflow(kind):
+    """Single local endpoint, ready after more than send_queue_s of audio
+    with capture running: the whole pre-ready backlog reaches the server,
+    the stream stays open and the endpoint is not marked down."""
+    gate = threading.Event()
+    server = FakeServer(ready_gate=gate)
+    p = counting_pool(("http://a",), kind)
+    events = []
+    c = StreamClient(
+        kind,
+        p,
+        language="uk",
+        on_event=lambda k, msg: events.append(msg),
+        connect=server.connect,
+        retry_s=0.05,
+        send_queue_s=1.0,
+    )
+    c.start()
+    for _ in range(25):  # 2.5 s of audio while the model loads (> 1 s queue)
+        c.feed(tone(0.1))
+    gate.set()
+    assert wait_for(lambda: any(e["type"] == "ready" for e in events))
+    for _ in range(5):  # capture goes on after ready
+        c.feed(tone(0.1))
+    ws = server.connections[0]
+    assert wait_for(lambda: len(ws.audio) == 30 * FRAME * 2)
+    assert server.connections[0].start["t0"] == 0.0
+    assert not [e for e in events if e["type"] in ("down", "failed")]
+    assert p.marked == [] and c.state == "open" and len(server.connections) == 1
+    assert c.stats()["lost_s"] == 0.0
+    c.stop()
+
+
+def test_overflow_after_ready_keeps_the_only_endpoint_up_and_backs_off():
+    """A stuck link after ready is still a break, but the single endpoint is
+    not marked down: the client reconnects to it after a backoff."""
+    gate = threading.Event()
+    server = FakeServer()
+    first = threading.Event()
+
+    def stall(ws, data):
+        if ws is server.connections[0]:
+            first.set()
+            gate.wait(5)
+
+    server.on_audio = stall
+    p = counting_pool(("http://a",), "asr")
+    c, events = client(server, p, send_queue_s=1.0)
+    c.start()
+    c.feed(tone(0.2))
+    assert first.wait(3)
+    c.feed(tone(1.5))
+    gate.set()
+    assert wait_for(lambda: len(server.connections) >= 2)
+    down = [e for e in events if e["type"] == "down"][0]
+    assert "send queue" in down["error"]
+    assert p.marked == []
+    assert not [e for e in events if e["type"] == "failed"]
+    assert wait_for(lambda: c.state == "open")
+    c.close()
+
+
+def test_no_endpoint_backs_off_and_reports_once_while_audio_flows():
+    """The live spam: feed() woke the retry wait, so 'retry in 1.0 s' ran
+    hundreds of times a second. Now: one failed event per outage, retries
+    double up to retry_max_s, and the stream opens once the endpoint is back."""
+    clock = [0.0]
+    eps = [Endpoint("asr", "http://a", "http://a", Credential("tok"))]
+    p = EndpointPool("asr", eps, lambda e: ModelClient(), clock=lambda: clock[0])
+    p.mark_down("http://a")
+    server = FakeServer()
+    calls = []
+    activate = p.activate
+
+    def counted():
+        calls.append(time.monotonic())
+        return activate()
+
+    p.activate = counted
+    c, events = client(server, p, retry_max_s=0.2)
+    c.start()
+    stop = threading.Event()
+
+    def capture():
+        while not stop.is_set():
+            c.feed(tone(0.01))
+            time.sleep(0.002)
+
+    t = threading.Thread(target=capture, daemon=True)
+    t.start()
+    time.sleep(0.6)
+    # 0.05 + 0.1 + 0.2 + 0.2 ... -> a handful, not hundreds
+    assert 2 <= len(calls) <= 6
+    assert len([e for e in events if e["type"] == "failed"]) == 1
+    clock[0] = 100.0  # the endpoint's down_s is over
+    assert wait_for(lambda: any(e["type"] == "ready" for e in events))
+    stop.set()
+    t.join()
+    c.close()
+
+
+def test_vosk_idle_reaches_the_pipeline():
+    server = FakeServer()
+    c, events = client(server)
+    c.start()
+    c.feed(tone(0.2))
+    assert wait_for(lambda: any(e["type"] == "ready" for e in events))
+    server.connections[0].push({"type": "idle", "at": 0.2, "audio_end": 0.2})
+    assert wait_for(lambda: any(e["type"] == "idle" for e in events))
     c.close()
