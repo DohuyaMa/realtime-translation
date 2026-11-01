@@ -29,14 +29,35 @@ translation for the words it uses:
   20261101-154159: of 119 accepted translations of 5+ words the lowest ratio
   of a real one was 0.67 (6 -> 4 words; 0.88 from 8 words on), unit 26 was
   0.40. The whole-reply check is monotonic (the output only grows), so the
-  edge sends a sentence to TTS only once ``min_output_words`` is reached.
+  edge sends a sentence to TTS only once ``min_output_words`` is reached;
+* ``transliterated``: a sentence of the output is mostly the source (TEXT or
+  SOUND) written in Latin letters instead of translated ("Raz dva tri.",
+  "Takozh prosymo vas aktivuvaty logy."). Live 2026-11-01 18:07-18:12: once
+  a few such pairs were in the context, Qwen3.5-4B transliterated every unit
+  and never recovered (context poisoning; ``core.prompt.build_messages``
+  also keeps such pairs out of the context). A word counts when it is not
+  English (SCOWL en_US word list ``RT_EDGE_EN_DICT``, simple suffixes), not
+  a glossary term, acronym or CamelCase, and its letters match a source
+  word transliterated by ``_CYR_LATIN`` (one spelling per letter; the output
+  side is folded the same way: y/j -> i, kh/g -> h, c -> ts) at
+  ``TRANSLIT_MATCH`` or more; the sentence is rejected when more than
+  ``TRANSLIT_SHARE`` of its words count. Calibrated on all 297 units of
+  2026-11-01 (journal ``_log_unit`` + session 20261101-154159): every
+  transliterated reply of the poisoned run is caught except English words
+  ("Tot.", "Tan." - real words), and of the rest only transliterations of
+  whisper hallucinations ("Tvers.", "Visper.", "Casmur.").
 """
 
 from __future__ import annotations
 
 import math
+import os
 import re
-from typing import Optional
+from difflib import SequenceMatcher
+from functools import lru_cache
+from typing import Iterable, Optional
+
+from .prompt import DEFAULT_TERMS
 
 # A translation is at most a few times longer than its source; the floor keeps
 # short sources (one word -> "Thank you very much.") from tripping it.
@@ -73,6 +94,96 @@ def max_output_words(source_text: str) -> int:
     return max(MIN_MAX_WORDS, MAX_WORDS_RATIO * len(source_text.split()))
 
 
+TRANSLIT_MATCH = 0.75
+TRANSLIT_SHARE = 0.5
+EN_DICT_ENV = "RT_EDGE_EN_DICT"
+_CYR_LATIN = dict(
+    zip(
+        "абвгґдезиіїйклмнопрстуфхцчшщьюяєыэёъ",
+        "a b v h h d e z i i i i k l m n o p r s t u f h ts ch sh shch _ iu ia ie"
+        " i e io _".split(),
+    )
+)
+_CYRILLIC_WORD = re.compile(r"[а-яіїєґёыэъ]+", re.IGNORECASE)
+_LATIN_WORD = re.compile(r"[A-Za-z]+")
+_SENTENCES = re.compile(r"(?<=[.!?…])\s+")
+_EN_SUFFIXES = ("s", "es", "ed", "d", "ing", "ly", "er", "ers")
+
+
+@lru_cache(maxsize=1)
+def english_words() -> frozenset:
+    """Lower-case words of the hunspell ``.dic`` at ``RT_EDGE_EN_DICT`` (set
+    by the Nix package wrapper and the devShell); missing -> explicit
+    error, never a guard without it."""
+    path = os.environ.get(EN_DICT_ENV)
+    if not path:
+        raise RuntimeError(
+            f"{EN_DICT_ENV} is not set: the output guard needs the English word"
+            " list (hunspellDicts.en_US, set by the rt-edge wrapper/devShell)"
+        )
+    with open(path, encoding="utf-8") as f:
+        next(f)  # the word count
+        return frozenset(
+            w for w in (line.split("/", 1)[0].strip() for line in f) if w.islower()
+        )
+
+
+_TERM_WORDS = frozenset(
+    w.lower() for t in DEFAULT_TERMS for w in _LATIN_WORD.findall(t)
+)
+
+
+def _latin(word: str) -> str:
+    return "".join(_CYR_LATIN.get(c, c) for c in word.lower()).replace("_", "")
+
+
+def _fold(word: str) -> str:
+    w = word.lower().replace("kh", "h").replace("g", "h")
+    w = w.replace("y", "i").replace("j", "i").replace("w", "v")
+    w = w.replace("x", "ks").replace("q", "k")
+    return re.sub(r"c(?!h)", "ts", w)
+
+
+def _is_english(word: str, terms: frozenset) -> bool:
+    w = word.lower()
+    if w in terms or (word.isupper() and len(word) > 1):
+        return True
+    if any(c.isupper() for c in word[1:]):  # DevOps, SaaS, PostgreSQL
+        return True
+    words = english_words()
+    return w in words or any(
+        w.endswith(s) and w[: -len(s)] in words for s in _EN_SUFFIXES
+    )
+
+
+def transliterated(
+    source_text: str, output: str, sound: str = "", terms: Iterable[str] = ()
+) -> bool:
+    """A sentence of ``output`` is mostly ``source_text`` / ``sound`` in Latin
+    letters (see the module doc)."""
+    sources = {
+        _latin(w) for t in (source_text, sound) for w in _CYRILLIC_WORD.findall(t)
+    }
+    sources.discard("")
+    if not sources:
+        return False
+    known = _TERM_WORDS | {w.lower() for t in terms for w in _LATIN_WORD.findall(t)}
+    for sentence in _SENTENCES.split(output.strip()):
+        words = _LATIN_WORD.findall(sentence)
+        hits = sum(
+            1
+            for w in words
+            if not _is_english(w, known)
+            and any(
+                SequenceMatcher(None, _fold(w), s).ratio() >= TRANSLIT_MATCH
+                for s in sources
+            )
+        )
+        if words and hits / len(words) > TRANSLIT_SHARE:
+            return True
+    return False
+
+
 def word_count(text: str) -> int:
     """Words and numbers of ``text`` (what ``too_short`` compares): tokens
     with a letter or digit - a lone dash is none, «п'ять» is one."""
@@ -96,11 +207,17 @@ def _copies(output: str, next_text: str) -> bool:
 
 
 def reject_reason(
-    source_text: str, output: str, next_text: str = "", complete: bool = False
+    source_text: str,
+    output: str,
+    next_text: str = "",
+    complete: bool = False,
+    sound: str = "",
+    terms: Iterable[str] = (),
 ) -> Optional[str]:
     """Why ``output`` (or the output so far) is not a translation of
-    ``source_text`` (the request's TEXT; ``next_text`` = its NEXT):
-    ``"too_long"`` / ``"foreign_script"`` / ``"meta"`` / ``"next_leak"``,
+    ``source_text`` (the request's TEXT; ``next_text`` = its NEXT; ``sound``
+    = its SOUND, ``terms`` = the glossary): ``"too_long"`` /
+    ``"foreign_script"`` / ``"meta"`` / ``"next_leak"`` / ``"transliterated"``,
     with ``complete`` (``output`` is the whole reply) also ``"too_short"``;
     else None."""
     if len(output.split()) > max_output_words(source_text):
@@ -116,6 +233,8 @@ def reject_reason(
             return "next_leak"
         if _copies(output, next_text):
             return "next_leak"
+    if transliterated(source_text, output, sound, terms):
+        return "transliterated"
     if complete and word_count(output) < min_output_words(source_text):
         return "too_short"
     return None

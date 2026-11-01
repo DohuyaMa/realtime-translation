@@ -25,6 +25,8 @@ pkgs.mkShell {
   ];
   shellHook = ''
     export HF_HOME="$HOME/.cache/huggingface"
+    # English word list of the LLM output guard (core.output_guard)
+    export RT_EDGE_EN_DICT="${pkgs.hunspellDicts.en_US}/share/hunspell/en_US.dic"
     # Dev-only pactl equivalent of lib.rtSpeech.virtualDevicesConf (the deployed
     # devices come from the Home Manager / NixOS drop-in): pipewire-pulse cannot
     # create a loopback sink->source pair, so the microphone is a remap of the

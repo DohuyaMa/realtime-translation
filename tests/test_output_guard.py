@@ -2,7 +2,12 @@
 
 import pytest
 
-from src.core.output_guard import min_output_words, reject_reason
+from src.core.output_guard import (
+    EN_DICT_ENV,
+    english_words,
+    min_output_words,
+    reject_reason,
+)
 
 OWNER_REPLY = (
     "The content is missing. Please provide the Polish text you would like me"
@@ -218,10 +223,15 @@ LIVE_2026_11_01 = [
 ]
 
 
+# whisper hallucinations the model only transliterated: rightly rejected
+LIVE_TRANSLITERATED = {"Tvers.", "Visper."}
+
+
 @pytest.mark.parametrize("source, output, next_text", LIVE_2026_11_01)
 def test_meta_check_passes_the_live_translations(source, output, next_text):
-    assert reject_reason(source, output, next_text) is None
-    assert reject_reason(source, output, next_text, complete=True) is None
+    expected = "transliterated" if output in LIVE_TRANSLITERATED else None
+    assert reject_reason(source, output, next_text) == expected
+    assert reject_reason(source, output, next_text, complete=True) == expected
 
 
 @pytest.mark.parametrize(
@@ -288,6 +298,82 @@ def test_min_output_words_floor():
     assert min_output_words("раз два три чотири п'ять") == 0  # 5 words
     assert min_output_words("раз два три чотири п'ять шість") == 3
     assert min_output_words("раз - два, три — чотири п'ять шість сім") == 4
-    assert reject_reason(
-        "раз два три чотири п'ять шість", "One two.", complete=True
-    ) == "too_short"
+    assert (
+        reject_reason("раз два три чотири п'ять шість", "One two.", complete=True)
+        == "too_short"
+    )
+
+
+# live 2026-11-01 18:07-18:12 (TEXT, SOUND, reply): context poisoning - the
+# model transliterated every unit
+POISONED = [
+    ("Моно жабра аналогове.", "мону жабра налогове", "Monu."),
+    ("Дата Телеграм.", "де ти тіль гра", "De ty tyl gra."),
+    ("Раз, два, три.", "раз два три", "Raz dva tri."),
+    ("Раз.", "ра", "Ra."),
+    ("Один.", "один", "Odyin."),
+    ("Щас.", "стя", "Stia."),
+    ("Так.", "тя", "Tia."),
+    ("Господин Аллахай, штука.", "гоподи лагаєще штук", "Hopody."),
+    (
+        "Системний вивід за замовчення.",
+        "цес темний вивід за замовченн",
+        "Ces temny vyvid za zamovchen.",
+    ),
+    (
+        "Також просимо вас активувати логи.",
+        "також просуємо вас актививати лой",
+        "Takozh prosymo vas aktivuvaty logy.",
+    ),
+    (
+        "Все мати прямий зв 'язок із спеціалістом",
+        "щоб мати прямий зв’язок і спеціалістом",
+        "Shchob maty pryamy zvyazok i speetsialistom",
+    ),
+    ("Раз, один, два, три.", "аз один два три", "Az odyn dva try."),
+]
+
+
+@pytest.mark.parametrize("text, sound, output", POISONED)
+def test_transliterated_replies_are_rejected(text, sound, output):
+    assert reject_reason(text, output, sound=sound) == "transliterated"
+
+
+def test_sound_is_needed_where_text_differs():
+    text, sound, output = POISONED[1]  # TEXT «Дата Телеграм», SOUND «де ти тіль гра»
+    assert reject_reason(text, output) is None
+    assert reject_reason(text, output, sound=sound) == "transliterated"
+
+
+@pytest.mark.parametrize(
+    "text, sound, output",
+    [
+        # English cognates, names, terms, acronyms, numbers (live 2026-11-01)
+        ("Модель.", "", "Model."),
+        ("ентерпрайз архітектур.", "ентерпраз архітект ч", "Enterprise architecture"),
+        ("Девопс.", "де в опс", "DevOps."),
+        ("Телеграм.", "це лягра", "It's Telegram."),
+        ("Телеграм.", "телеграм", "Telegram."),
+        ("Кубернетіс.", "кубернетіс", "Kubernetes."),
+        ("Хе", "аі", "AI"),
+        ("Раз, два, три.", "раз два три", "One, two, three."),
+        ("15 -20 раз із айті -словами.", "", "15-20 times with IT words."),
+        ("Тікаво У нас виходить.", "цікаво в нас виходи", "Interesting, it works."),
+        # a transliterated name in a translated sentence
+        ("Оля сказала привіт.", "оля сказала привіт", "Olya said hello."),
+        # the glossary (``terms``) is English by definition
+        ("Сайборг.", "сайборг", "Cyborg."),
+    ],
+)
+def test_translations_with_cognates_and_names_pass(text, sound, output):
+    assert reject_reason(text, output, sound=sound, terms=("Cyborg",)) is None
+
+
+def test_missing_word_list_is_an_explicit_error(monkeypatch):
+    english_words.cache_clear()
+    monkeypatch.delenv(EN_DICT_ENV)
+    try:
+        with pytest.raises(RuntimeError, match=EN_DICT_ENV):
+            english_words()
+    finally:
+        english_words.cache_clear()

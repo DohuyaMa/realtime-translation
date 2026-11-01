@@ -1,4 +1,4 @@
-{ lib, python313Packages, pulseaudio }:
+{ lib, python313Packages, pulseaudio, hunspellDicts }:
 let
   sources = import ./sources.nix { inherit lib; };
 in
@@ -10,7 +10,11 @@ python313Packages.buildPythonApplication {
   build-system = [ python313Packages.setuptools ];
   dependencies = import ./edge-deps.nix python313Packages;
   # capture (parec), playback (pacat) and the PipeWire preflight (pactl)
-  makeWrapperArgs = [ "--prefix" "PATH" ":" (lib.makeBinPath [ pulseaudio ]) ];
+  # + the English word list of the LLM output guard (core.output_guard)
+  makeWrapperArgs = [
+    "--prefix" "PATH" ":" (lib.makeBinPath [ pulseaudio ])
+    "--set-default" "RT_EDGE_EN_DICT" "${hunspellDicts.en_US}/share/hunspell/en_US.dic"
+  ];
   # pyproject also declares rt-asr/rt-phonetic/rt-tts entry points; their modules are not in edgeSrc.
   postInstall = ''
     find $out/bin -mindepth 1 -maxdepth 1 ! -name translator-ui -delete

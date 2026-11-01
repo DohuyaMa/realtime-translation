@@ -133,7 +133,9 @@ DEFAULT_SYSTEM_PROMPT = (
     " only the {{target_lang}} translation of TEXT, nothing else; if TEXT has"
     " no words, output nothing. Fix obvious speech-recognition errors using"
     " context. Never keep or transliterate a source word you cannot"
-    " translate: restore the intended word from context or leave it out."
+    " translate: restore the intended word from context or leave it out;"
+    " never write {{source_lang}} words in Latin letters, even where your"
+    " previous replies did."
     " Never add content that is not in TEXT. Write only {{target_lang}} - no"
     " {{source_lang}} words or letters." + IT_DOMAIN + " {{terms}}"
 )
@@ -165,7 +167,10 @@ COMPLETE_RETRY_NOTE = (
 # registration" (live test 2026-11-01). The examples are generic: personal
 # names (machines, people) belong in the glossary ({{terms}}), not here.
 # Hallucinated units are dropped by code before the LLM
-# (``core.crosscheck.gate_reason``), never by the model.
+# (``core.crosscheck.gate_reason``), never by the model. "Never write
+# {{source_lang}} words in Latin letters, even where your previous replies
+# did; if SOUND is unclear, translate TEXT": live 2026-11-01 18:07-18:12 the
+# model transliterated every unit once such pairs were in its context.
 DEFAULT_SOUND_SYSTEM_PROMPT = (
     "You are a live {{source_lang}}-to-{{target_lang}} interpreter. Translate"
     " each fragment of live speech into natural, fluent {{target_lang}}"
@@ -189,7 +194,9 @@ DEFAULT_SOUND_SYSTEM_PROMPT = (
     " the speech right after, only for understanding: never translate it."
     " Continue your previous translations consistently; short fragments are"
     " translated as-is. Never transliterate: every {{source_lang}} word"
-    " becomes an {{target_lang}} word. Never explain, comment, ask for more"
+    " becomes an {{target_lang}} word - never write {{source_lang}} words in"
+    " Latin letters, even where your previous replies did; if SOUND is"
+    " unclear, translate TEXT. Never explain, comment, ask for more"
     " text or mention SOUND or TEXT. Output only the {{target_lang}}"
     " translation. {{terms}}"
 )
@@ -311,7 +318,12 @@ def build_messages(
     the system prompt). ``next_text``: speech recognized after the chunk -
     appended as the ``NEXT_LABEL`` line of the last message only.
     ``insist_complete``: the retry of a ``too_short`` reply - the last
-    message ends with ``COMPLETE_RETRY_NOTE``."""
+    message ends with ``COMPLETE_RETRY_NOTE``.
+
+    A context pair whose translation is a transliteration of its source
+    (``core.output_guard.transliterated``) is left out: such pairs teach the
+    model to transliterate (live 2026-11-01 18:07: it never recovered)."""
+    from .output_guard import transliterated  # output_guard imports this module
 
     def values(text: str, sound_text: str = "") -> dict:
         return {
@@ -326,6 +338,8 @@ def build_messages(
     for item in context:
         src, tr = item[0], item[1]
         snd = item[2] if len(item) > 2 else ""
+        if transliterated(src, tr, snd, terms):
+            continue
         messages.append(
             {"role": "user", "content": render(user_template, values(src, snd))}
         )

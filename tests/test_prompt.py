@@ -244,3 +244,26 @@ def test_sound_prompt_takes_english_terms_from_text_and_names_no_machines():
     assert "trust SOUND" in p
     for personal in ("сайборг", "Cyborg", "SKTOP", "ес кей топ"):
         assert personal not in p
+
+
+def test_transliterated_context_pairs_are_left_out():
+    """Live 2026-11-01 18:07: transliterated pairs in the context made the
+    model transliterate every next unit."""
+    ctx = (
+        ("Раз, два, три.", "Raz dva tri.", "раз два три"),
+        ("Добре.", "Okay.", "добре"),
+    )
+    msgs = build_messages(
+        "S", "SOUND: {{sound_text}}\nTEXT: {{text}}", "Так.", "uk", ctx, sound="так"
+    )
+    contents = [m["content"] for m in msgs]
+    assert "Raz dva tri." not in contents and "Okay." in contents
+    assert len(msgs) == 4  # system + one pair + the request
+
+
+def test_prompts_forbid_latin_source_words_even_after_bad_context():
+    from src.core.prompt import DEFAULT_SOUND_SYSTEM_PROMPT
+
+    for p in (DEFAULT_SYSTEM_PROMPT, DEFAULT_SOUND_SYSTEM_PROMPT):
+        assert "even where your previous replies did" in p
+    assert "if SOUND is unclear, translate TEXT" in DEFAULT_SOUND_SYSTEM_PROMPT

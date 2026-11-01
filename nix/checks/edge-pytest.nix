@@ -12,6 +12,7 @@ pkgs.runCommand "rt-edge-pytest" { nativeBuildInputs = [ py ]; SSL_CERT_FILE = "
   chmod -R u+w work
   cd work
   export HOME=$TMPDIR QT_QPA_PLATFORM=offscreen
+  export RT_EDGE_EN_DICT=${pkgs.hunspellDicts.en_US}/share/hunspell/en_US.dic
   python -m pytest tests -q -p no:cacheprovider \
     --ignore=tests/services --ignore=tests/test_audio.py
   touch $out
