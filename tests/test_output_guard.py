@@ -2,7 +2,7 @@
 
 import pytest
 
-from src.core.output_guard import reject_reason
+from src.core.output_guard import min_output_words, reject_reason
 
 OWNER_REPLY = (
     "The content is missing. Please provide the Polish text you would like me"
@@ -221,6 +221,7 @@ LIVE_2026_11_01 = [
 @pytest.mark.parametrize("source, output, next_text", LIVE_2026_11_01)
 def test_meta_check_passes_the_live_translations(source, output, next_text):
     assert reject_reason(source, output, next_text) is None
+    assert reject_reason(source, output, next_text, complete=True) is None
 
 
 @pytest.mark.parametrize(
@@ -237,3 +238,56 @@ def test_meta_check_passes_the_live_translations(source, output, next_text):
 )
 def test_meta_replies_are_rejected(output):
     assert reject_reason("раз два три чотири пять шість сім", output) == "meta"
+
+
+# live test 2026-11-01 (enterprise text), unit 26 (whisper-only): the second
+# half of the enumeration was dropped and nothing caught it
+UNIT_26_SOURCE = (
+    "про стежуваність вимог контроль версії управління залежностями"
+    " централізоване логування та моніторинг життєвого циклу програмного"
+    " забезпечення"
+)
+UNIT_26_OUTPUT = "requirement tracking, version control, dependency management"
+
+
+def test_dropped_half_is_too_short_only_on_the_whole_reply():
+    assert reject_reason(UNIT_26_SOURCE, UNIT_26_OUTPUT, complete=True) == "too_short"
+    # mid-stream the reply may still grow: no verdict yet
+    assert reject_reason(UNIT_26_SOURCE, UNIT_26_OUTPUT) is None
+    full = (
+        "requirement tracking, version control, dependency management,"
+        " centralized logging and monitoring of the software development"
+        " lifecycle"
+    )
+    assert reject_reason(UNIT_26_SOURCE, full, complete=True) is None
+
+
+@pytest.mark.parametrize(
+    "source, output",
+    [
+        # the lowest-ratio real translations of 2026-11-01 (journal _log_unit
+        # lines + session 20261101-154159): 0 false positives
+        ("Звук на копий чи не поки.", "Sound on or off."),
+        ("А лось заботу краще меж просто", "Well, much better than"),
+        ("Що ж тут у нас є", "What do we have here"),
+        (
+            "К складній синтактичні конструкції аббревіатури та контекстні"
+            " залежності.",
+            "Complex syntactic constructions, abbreviations, and contextual"
+            " dependencies.",
+        ),
+        # under MIN_SOURCE_WORDS: no floor
+        ("Ну це вже набагато краще", "Better."),
+    ],
+)
+def test_real_short_translations_are_not_too_short(source, output):
+    assert reject_reason(source, output, complete=True) is None
+
+
+def test_min_output_words_floor():
+    assert min_output_words("раз два три чотири п'ять") == 0  # 5 words
+    assert min_output_words("раз два три чотири п'ять шість") == 3
+    assert min_output_words("раз - два, три — чотири п'ять шість сім") == 4
+    assert reject_reason(
+        "раз два три чотири п'ять шість", "One two.", complete=True
+    ) == "too_short"

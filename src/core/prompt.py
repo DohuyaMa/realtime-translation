@@ -139,6 +139,14 @@ DEFAULT_SYSTEM_PROMPT = (
 )
 DEFAULT_USER_TEMPLATE = "TEXT: {{text}}"
 NEXT_LABEL = "NEXT (do not translate): "
+# Last line of the retry of a reply ``core.output_guard`` found ``too_short``
+# (owner 2026-11-01). Live unit 26 (15 words -> 6) at temperature 0.1: the
+# same sentence in the system prompt changed nothing (2/2 still 6 words),
+# as the request's last line 2/2 translated all of it.
+COMPLETE_RETRY_NOTE = (
+    "A previous translation of this TEXT left part of it out: translate all"
+    " of TEXT, every item to the last word, nothing omitted."
+)
 
 # Sound mode ("condition F", owner 2026-11-01): the unit's audio recognized
 # twice - rt-phonetic's character-level CTC transcript ({{sound_text}},
@@ -150,28 +158,40 @@ NEXT_LABEL = "NEXT (do not translate): "
 # "never transliterate", the name examples) was tuned by
 # scripts/replay_session.py on the owner's 39 live units: a first draft
 # made Qwen3.5-4B transliterate SOUND into Latin letters from unit 12 on
-# (the bad pairs fed the context). Hallucinated units are dropped by
-# code before the LLM (``core.crosscheck.gate_reason``), never by the model.
+# (the bad pairs fed the context). The phonetic model knows only Ukrainian
+# letters, so English terms are TEXT's (owner 2026-11-01): Latin-script TEXT
+# words verbatim, Cyrillic-spelled English terms of TEXT as that term - with
+# "trust SOUND" «AI-First» became "jailbreak" and «Zero Trust» "User
+# registration" (live test 2026-11-01). The examples are generic: personal
+# names (machines, people) belong in the glossary ({{terms}}), not here.
+# Hallucinated units are dropped by code before the LLM
+# (``core.crosscheck.gate_reason``), never by the model.
 DEFAULT_SOUND_SYSTEM_PROMPT = (
     "You are a live {{source_lang}}-to-{{target_lang}} interpreter. Translate"
     " each fragment of live speech into natural, fluent {{target_lang}}"
     " sentences with normal capitalization and punctuation. Each user message"
     " gives two recognitions of the same fragment. SOUND is a letter-by-letter"
     " transcript of what was actually heard: no dictionary, no punctuation,"
-    " some letters off, words sometimes split or merged; names and IT terms"
-    " are spelled by sound in Cyrillic letters (for example «сайборг» is the"
-    " server Cyborg, «ес кей топ» is SKTOP, «воск» is the Vosk recognizer,"
-    " «віспер» is the Whisper recognizer). TEXT is another recognizer's"
-    " output: well spelled, but it may confidently write a wrong word. Use"
-    " TEXT only for spelling, word boundaries and numbers; where SOUND and"
-    " TEXT disagree, trust SOUND. Translate the meaning of what SOUND says -"
-    " every clause, nothing added. NEXT, when given, is the speech right"
-    " after, only for understanding: never translate it. Continue your"
-    " previous translations consistently; short fragments are translated"
-    " as-is. Never transliterate: every {{source_lang}} word becomes an"
-    " {{target_lang}} word. Never explain, comment, ask for more text or"
-    " mention SOUND or TEXT. Output only the {{target_lang}} translation."
-    " {{terms}}"
+    " some letters off, words sometimes split or merged; it knows only"
+    " {{source_lang}} letters, so names and English terms come out spelled by"
+    " sound (for example «віспер» is the Whisper recognizer, «кубернетіс» is"
+    " Kubernetes, «постгрес» is PostgreSQL). TEXT is another recognizer's"
+    " output: well spelled, but it may confidently write a wrong word."
+    " English terms come from TEXT, never from SOUND: a word TEXT writes in"
+    " Latin letters (API, Kubernetes, Zero Trust, CI/CD, Human-in-the-Loop) is"
+    " kept as TEXT writes it, only fixing an obvious misspelling; a TEXT word"
+    " that is an English term in Cyrillic letters («зеротраст», «деплой») is"
+    " translated as that English term (Zero Trust, deploy). For"
+    " {{source_lang}} words use TEXT only for spelling, word boundaries and"
+    " numbers; where SOUND and TEXT disagree on a {{source_lang}} word, trust"
+    " SOUND. Translate the meaning of what was said - every clause and every"
+    " item of a list, nothing left out, nothing added. NEXT, when given, is"
+    " the speech right after, only for understanding: never translate it."
+    " Continue your previous translations consistently; short fragments are"
+    " translated as-is. Never transliterate: every {{source_lang}} word"
+    " becomes an {{target_lang}} word. Never explain, comment, ask for more"
+    " text or mention SOUND or TEXT. Output only the {{target_lang}}"
+    " translation. {{terms}}"
 )
 DEFAULT_SOUND_USER_TEMPLATE = "SOUND: {{sound_text}}\nTEXT: {{text}}"
 DEFAULT_WORDS_PER_REQUEST = 40
@@ -281,6 +301,7 @@ def build_messages(
     sound: str | None = None,
     terms: Sequence[str] = (),
     next_text: str = "",
+    insist_complete: bool = False,
 ) -> list[dict]:
     """Chat messages for one request (``chunk`` = up to words_per_request).
 
@@ -288,7 +309,9 @@ def build_messages(
     mode). Context items are ``(source, translation)`` or, in sound mode,
     ``(source, translation, sound)``. ``terms``: the glossary ({{terms}} of
     the system prompt). ``next_text``: speech recognized after the chunk -
-    appended as the ``NEXT_LABEL`` line of the last message only."""
+    appended as the ``NEXT_LABEL`` line of the last message only.
+    ``insist_complete``: the retry of a ``too_short`` reply - the last
+    message ends with ``COMPLETE_RETRY_NOTE``."""
 
     def values(text: str, sound_text: str = "") -> dict:
         return {
@@ -310,6 +333,8 @@ def build_messages(
     content = render(user_template, values(chunk, sound or ""))
     if next_text.strip():
         content += "\n" + NEXT_LABEL + next_text.strip()
+    if insist_complete:
+        content += "\n" + COMPLETE_RETRY_NOTE
     messages.append({"role": "user", "content": content})
     return messages
 

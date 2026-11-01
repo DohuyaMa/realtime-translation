@@ -211,3 +211,36 @@ def test_terms_config_and_validation():
     assert terms({"terms": "CRM, медіабаєри"}) == ("CRM", "медіабаєри")
     s = EdgeSettings(llm=LlmSettings(user_template="{{text}} {{terms}}"))
     assert any("terms" in e for e in s.validate())
+
+
+def test_retry_note_is_the_last_line_of_the_last_message_only():
+    from src.core.prompt import COMPLETE_RETRY_NOTE, NEXT_LABEL
+
+    msgs = build_messages(
+        DEFAULT_SYSTEM_PROMPT,
+        "TEXT: {{text}}",
+        "раз два",
+        "uk",
+        context=(("Раніше.", "Earlier."),),
+        next_text="три",
+        insist_complete=True,
+    )
+    assert msgs[1] == {"role": "user", "content": "TEXT: Раніше."}
+    assert msgs[-1]["content"] == (
+        f"TEXT: раз два\n{NEXT_LABEL}три\n{COMPLETE_RETRY_NOTE}"
+    )
+    assert COMPLETE_RETRY_NOTE not in msgs[0]["content"]
+
+
+def test_sound_prompt_takes_english_terms_from_text_and_names_no_machines():
+    """Owner 2026-11-01: the phonetic model is Ukrainian-only, so Latin-script
+    TEXT words are kept verbatim and "trust SOUND" is for Ukrainian words;
+    the owner's own machine names (Cyborg, SKTOP) belong in the glossary."""
+    from src.core.prompt import DEFAULT_SOUND_SYSTEM_PROMPT
+
+    p = DEFAULT_SOUND_SYSTEM_PROMPT
+    assert "English terms come from TEXT, never from SOUND" in p
+    assert "Latin letters" in p and "Zero Trust" in p
+    assert "trust SOUND" in p
+    for personal in ("сайборг", "Cyborg", "SKTOP", "ес кей топ"):
+        assert personal not in p

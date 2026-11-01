@@ -254,7 +254,7 @@ def test_sound_messages_put_sound_first_and_name_it_primary():
     )
     system_text = msgs[0]["content"]
     assert system_text.startswith("You are a live Ukrainian-to-English interpreter.")
-    assert "trust SOUND" in system_text and "«сайборг»" in system_text
+    assert "trust SOUND" in system_text and "«віспер»" in system_text
     assert "{{" not in system_text
     assert msgs[-1] == {"role": "user", "content": "SOUND: дякую\nTEXT: Дякую."}
 
