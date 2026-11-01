@@ -19,8 +19,13 @@ of, scanning word by word:
   endpoint);
 * >= ``CLAUSE_WORDS`` untranslated words ending at a clause mark (``,;:``);
 * ``HARD_WORDS`` untranslated words;
-* the end of the committed words when an endpoint (VAD silence; ``final``
-  with ``eos``) closed them.
+* the end of the committed words when an endpoint (VAD silence >= 0.8 s,
+  rt-asr; ``final`` with ``eos``) closed them - except a short piece
+  (<= ``SHORT_WORDS`` words, no sentence end: «використання принципів»,
+  live 2026-11-01 §18): it joins the next unit when the next words are
+  already there, whisper's partial goes on, or within ``SHORT_HOLD_S`` of
+  the endpoint; otherwise (the speaker stopped) it is cut alone
+  (``short_merged`` counts the joins).
 
 Units never overlap, so nothing is translated or spoken twice (owner
 decisions 2/3). In translate mode each unit's audio is then recognized by
@@ -41,6 +46,10 @@ CLAUSE_MARKS = ",;:"
 CONTINUE_GAP_S = 0.05
 TINY_S = 0.25
 SENTENCE_HOLD_S = 0.5
+# a short endpoint piece (``SourceLedger._hold_short``): this many words at
+# most; it waits this long after the endpoint for the next words
+SHORT_WORDS = 3
+SHORT_HOLD_S = 1.0
 _CLOSERS = "\"')]}»”’"
 
 # Unit.reason values
@@ -130,7 +139,10 @@ class SourceLedger:
         self.committed_at: List[Optional[float]] = []  # clock of each commit
         self.cursor = 0  # words before it are in units
         self.closed = 0  # words before it are closed by an endpoint
+        self.closed_at: Optional[float] = None  # clock of the last endpoint
         self.partial = ""  # uncommitted hypothesis after the last word
+        self.short_merged = 0  # short endpoint pieces joined to the next unit
+        self._held: Optional[int] = None  # closed index of a held short piece
 
     def commit(
         self, words: Sequence[Word], eos: bool = False, now: Optional[float] = None
@@ -139,17 +151,40 @@ class SourceLedger:
         self.words.extend(new)
         self.committed_at.extend(now for _ in new)
         if eos:
-            self.endpoint()
+            self.endpoint(now)
 
-    def endpoint(self) -> None:
+    def endpoint(self, now: Optional[float] = None) -> None:
         """Silence: the committed words so far form a complete utterance."""
         self.closed = len(self.words)
+        self.closed_at = now
         self.partial = ""
 
     def _cut(self, end: int, reason: str) -> Unit:
         unit = Unit(tuple(self.words[self.cursor : end]), reason, end)
         self.cursor = end
+        if self._held is not None and end >= self._held:
+            if end > self._held:
+                self.short_merged += 1
+            self._held = None
         return unit
+
+    def _hold_short(self, now: Optional[float]) -> bool:
+        """The endpoint piece [cursor, closed) is short and the speaker goes
+        on: do not cut it, it joins the next unit."""
+        piece = self.words[self.cursor : self.closed]
+        if len(piece) > SHORT_WORDS or ends_sentence(piece[-1].text):
+            return False
+        if len(self.words) > self.closed:
+            hold = True  # the next words are already committed
+        elif now is None:
+            hold = False
+        elif self.partial:
+            hold = True  # whisper hears more speech
+        else:
+            hold = self.closed_at is not None and now - self.closed_at < SHORT_HOLD_S
+        if hold:
+            self._held = self.closed
+        return hold
 
     def _tiny(self, i: int) -> bool:
         """Word i is a whole sentence piece of one word shorter than TINY_S."""
@@ -195,7 +230,7 @@ class SourceLedger:
                 return self._cut(i + 1, CLAUSE)
             if n >= HARD_WORDS:
                 return self._cut(i + 1, HARD)
-        if self.closed > self.cursor:
+        if self.closed > self.cursor and not self._hold_short(now):
             return self._cut(self.closed, ENDPOINT)
         return None
 

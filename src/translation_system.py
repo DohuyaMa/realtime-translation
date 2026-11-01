@@ -17,7 +17,8 @@ spoken (decision 2).
 
 Phonetic gate per unit (``core.crosscheck``, owner 2026-11-01): the unit's
 audio (``stream.audio(t0, t1)``) goes to rt-phonetic, a character-level CTC
-model, in one HTTP request (budget ``PHONETIC_TIMEOUT_S``). An empty
+model, in one HTTP request (budget ``phonetic_budget_s``: 0.5 s + 0.25 s
+per second of unit audio, 1.5..4 s). An empty
 transcript is heard silence - whisper hallucinated the unit (``no_word``);
 letters less similar than ``GATE_MIN_SIMILARITY`` - another phrase
 (``disagree``): the unit is dropped (counted, logged, ``phonetic_gate``
@@ -43,8 +44,10 @@ stage (backpressure, logged + ``backpressure`` status event). The LLM output
 is streamed: each finished sentence goes to TTS at once. Each unit is logged
 in one INFO line (whisper, phonetic + similarity, gate, LLM mode, NEXT,
 translation) and its timing (speech end -> commit -> LLM -> TTS ->
-playback) in another; ``get_stats()["latency"]`` keeps p50/p90. The opt-in
-session recording (``core.session_record``) keeps each unit's audio.
+playback) in another; ``get_stats()["latency"]`` keeps p50/p90. While more
+than 4 s of translation waits for playback, TTS speaks faster (up to x1.25,
+back below 2 s; ``core.catchup``, logged, ``tts_catchup`` in the stats). The
+opt-in session recording (``core.session_record``) keeps each unit's audio.
 
 Warm-up (owner 2026-10-31, spec §3a): Start warms every service in parallel
 - it opens the rt-asr stream (the handshake loads the model, an unloaded one
@@ -93,6 +96,7 @@ from .clients.discovery import choices
 from .clients.model_status import ensure_model_ready
 from .clients.stream import StreamClient
 from .clients.phonetic import PhoneticResult
+from .core.catchup import CatchUp
 from .core.crosscheck import (
     GATE_DISAGREE,
     GATE_DROPS,
@@ -119,9 +123,20 @@ SHORT_SOURCE_WORDS = 3
 CAPTURE_START_CHECK_S = 0.2
 # TTS warm-up text (first Kokoro synthesis took 6.3 s live, 2026-10-31 §10)
 TTS_WARMUP_TEXT = "Hello."
-# budget of one rt-phonetic request per unit (CPU: 0.28 s per 2 s of audio,
-# bench 2026-11-01); slower -> whisper-only, counted
-PHONETIC_TIMEOUT_S = 1.5
+# budget of one rt-phonetic request per unit (``phonetic_budget_s``): base +
+# per second of the unit's audio, capped; slower -> whisper-only, counted.
+# Live 2026-11-01 §18: a fixed 1.5 s timed out on 5/39 units, all long ones
+# (#26: 10.2 s of audio -> now 3.05 s); answers took 0.5-1.4 s (CPU, bench:
+# 0.28 s per 2 s idle). Floor: the old 1.5 s - live calls on 0.9-3 s units
+# took up to 0.76-1.31 s (overhead ~0.4-0.7 s per call), so 0.5 + 0.25/s
+# alone would have timed out 2/50 of the day's units that answered. Cap: a
+# hard-limit unit (20 words) is ~10-14 s of speech -> ~3-4 s; the unit's
+# translation waits for this answer, a longer wait costs more than the SOUND
+# transcript gives.
+PHONETIC_BUDGET_BASE_S = 0.5
+PHONETIC_BUDGET_PER_S = 0.25
+PHONETIC_BUDGET_MIN_S = 1.5
+PHONETIC_BUDGET_MAX_S = 4.0
 # rt-phonetic warm-up: this much silence after the model is ready
 PHONETIC_WARMUP_S = 1.0
 # the unit stage re-checks the ledger (sentence hold) this often
@@ -162,6 +177,12 @@ _LLM_LIVE_FIELDS = (
 )
 
 _STOP = object()
+
+
+def phonetic_budget_s(audio_s: float) -> float:
+    """rt-phonetic's time budget for a unit of ``audio_s`` seconds."""
+    budget = PHONETIC_BUDGET_BASE_S + PHONETIC_BUDGET_PER_S * max(0.0, audio_s)
+    return min(PHONETIC_BUDGET_MAX_S, max(PHONETIC_BUDGET_MIN_S, budget))
 
 
 @dataclass
@@ -438,6 +459,7 @@ class TranslationSystem:
         # seconds of translated audio queued for playback (get_stats)
         self._backlog_lock = threading.Lock()
         self._backlog_s = 0.0
+        self._catchup = CatchUp()  # faster TTS while playback lags behind
         self._asr_no_words = 0
         # phonetic cross-check: on | off (settings) | unavailable |
         # no_language (+ why); languages rt-phonetic has no model for (409)
@@ -626,6 +648,7 @@ class TranslationSystem:
         self._tts_q = queue.Queue(maxsize=STAGE_QUEUE_MAX)
         self._playback_queue = queue.Queue(maxsize=PLAYBACK_QUEUE_MAX)
         self._ledger = SourceLedger()
+        self._catchup = CatchUp()
         self._detected_language = None
         self._tail = ""
         with self._fed_lock:
@@ -998,7 +1021,7 @@ class TranslationSystem:
         elif t == "partial":
             self._ledger.partial = str(msg.get("text") or "")
         elif t == "endpoint":
-            self._ledger.endpoint()
+            self._ledger.endpoint(self._clock())
         elif t in ("down", "failed"):
             self._pipeline_errors += 1
             self.last_error = f"asr: {msg.get('error')}"
@@ -1119,15 +1142,14 @@ class TranslationSystem:
         if pool is None or src in self._phonetic_no_model:
             self._whisper_only += 1
             return None
+        budget = phonetic_budget_s(len(audio) / ASR_RATE)
         t0 = time.monotonic()
         try:
             result = pool.call_once(
-                lambda c: c.transcribe(
-                    audio, src, ASR_RATE, timeout_s=PHONETIC_TIMEOUT_S
-                )
+                lambda c: c.transcribe(audio, src, ASR_RATE, timeout_s=budget)
             )
         except ServiceError as e:
-            self._phonetic_failed(unit, src, e, _ms(time.monotonic() - t0))
+            self._phonetic_failed(unit, src, e, _ms(time.monotonic() - t0), budget)
             return None
         unit.phonetic_ms = _ms(time.monotonic() - t0)
         if self._phonetic_state["mode"] != "on":
@@ -1135,7 +1157,7 @@ class TranslationSystem:
         return result
 
     def _phonetic_failed(
-        self, unit: _Unit, src: str, e: ServiceError, took_ms: float
+        self, unit: _Unit, src: str, e: ServiceError, took_ms: float, budget: float
     ) -> None:
         self._whisper_only += 1
         if e.kind == "wrong_language":
@@ -1154,11 +1176,12 @@ class TranslationSystem:
         elif e.kind == "timeout":
             self._phonetic_timeout += 1
             logger.warning(
-                "unit #{}: rt-phonetic timeout after {} ms (budget {} ms) -"
-                " whisper-only",
+                "unit #{}: rt-phonetic timeout after {} ms (budget {} ms for"
+                " {:.1f} s of audio) - whisper-only",
                 unit.seq,
                 took_ms,
-                _ms(PHONETIC_TIMEOUT_S),
+                _ms(budget),
+                unit.source.t1 - unit.source.t0,
             )
             reason = "timeout"
         else:
@@ -1721,9 +1744,15 @@ class TranslationSystem:
         """TTS stage: one piece at a time, in order, edge silence trimmed,
         on to playback."""
         tts = self.settings.tts
+        with self._backlog_lock:
+            backlog = self._backlog_s
+        change = self._catchup.update(backlog)
+        if change:
+            logger.info("{} (base {})", change, tts.speed or "rt-tts default 1.0")
+        speed = self._catchup.speed(tts.speed)
         try:
             audio, sr = self._pools.tts.call(
-                lambda c: c.synthesize(item.text, tts.voice, tts.speed)
+                lambda c: c.synthesize(item.text, tts.voice, speed)
             )
         except ServiceError as e:
             self._service_error(e)
@@ -1797,6 +1826,9 @@ class TranslationSystem:
             },
             "backpressure": dict(self._backpressure),
             "playback_backlog_s": round(self._backlog_s, 1),
+            # faster TTS while the backlog is long: active, factor, episodes
+            "tts_catchup": self._catchup.stats(),
+            "units_short_merged": self._ledger.short_merged,
             "mic": {
                 "quiet": self._normalizer.quiet,
                 "dbfs": (

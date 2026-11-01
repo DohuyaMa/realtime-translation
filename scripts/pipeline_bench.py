@@ -172,6 +172,8 @@ def main() -> None:
         "pipeline_errors",
         "backpressure",
         "playback_backlog_s",
+        "tts_catchup",
+        "units_short_merged",
         "mic",
     )
     print({k: stats[k] for k in keys})

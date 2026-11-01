@@ -179,6 +179,14 @@ def format_pipeline_stats(status: Dict) -> str:
     behind = {k: v for k, v in (status.get("backpressure") or {}).items() if v}
     if behind:
         parts.append("не встигає: " + ", ".join(f"{k} ×{v}" for k, v in behind.items()))
+    catchup = status.get("tts_catchup") or {}
+    if catchup.get("active"):
+        parts.append(
+            f"черга відтворення {status.get('playback_backlog_s', 0)} с:"
+            f" озвучка ×{catchup['factor']:.2f}"
+        )
+    if catchup.get("pieces"):
+        parts.append(f"озвучено пришвидшено: {catchup['pieces']}")
     counters = [
         f"{label}: {status[key]}"
         for key, label in PIPELINE_COUNTERS.items()

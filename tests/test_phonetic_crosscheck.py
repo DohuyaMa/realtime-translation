@@ -44,7 +44,7 @@ from src.core.runtime import (
     resolve_edge_settings,
 )
 from src.core.simul import Word
-from src.translation_system import TranslationSystem
+from src.translation_system import TranslationSystem, phonetic_budget_s
 from test_pipeline_stages import SlowLlm, SlowTts
 from test_translation_system import (
     FakeAsr,
@@ -412,7 +412,7 @@ def test_unit_audio_goes_to_phonetic_and_sound_is_primary():
     ts, streams, llm, _ = system(phonetic=["добрий день"])
     stats = run(ts, streams, ["Добрий день."], lambda: llm.calls)
     # final(): 2 words x 0.3 s -> the unit's 0.6 s of audio, with the budget
-    assert ts.phonetic.calls == [(9600, "uk", 1.5)]
+    assert ts.phonetic.calls == [(9600, "uk", 1.5)]  # the budget floor
     assert ts.phonetic.warmups == ["uk"]
     assert llm.sounds == ["добрий день"]
     assert stats["phonetic_checked"] == 1
@@ -475,6 +475,32 @@ def test_phonetic_failure_is_whisper_only_counted_and_visible(error, counter, mo
             e["phonetic"]["mode"] for e in events if e.get("status") == "phonetic_state"
         ]
         assert states == ["unavailable", "on"]
+
+
+@pytest.mark.parametrize(
+    "audio_s, budget",
+    [
+        (0.6, 1.5),  # floor: a short unit keeps the old 1.5 s
+        (4.0, 1.5),
+        (6.0, 2.0),
+        # live 2026-11-01 §18 unit #26: 10.2 s timed out on the fixed 1.5 s
+        (10.18, 3.045),
+        (14.0, 4.0),
+        (30.0, 4.0),  # capped
+    ],
+)
+def test_phonetic_budget_grows_with_the_unit_audio(audio_s, budget):
+    assert phonetic_budget_s(audio_s) == pytest.approx(budget)
+
+
+def test_phonetic_request_gets_the_budget_of_its_unit_audio():
+    long = " ".join(["слово"] * 19) + "."  # 19 words * 0.3 s
+    ts, streams, llm, _ = system(phonetic=["раз", "слово " * 19])
+    run(ts, streams, ["Раз.", long], lambda: len(llm.calls) == 2)
+    (short_s, _, short_budget), (long_s, _, long_budget) = ts.phonetic.calls
+    assert short_budget == 1.5
+    assert long_budget == pytest.approx(phonetic_budget_s(long_s / 16000))
+    assert long_budget > 1.9
 
 
 def test_language_without_a_model_is_whisper_only_and_never_asked_again():

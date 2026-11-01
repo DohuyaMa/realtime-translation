@@ -8,6 +8,7 @@ from src.core.simul import (
     HARD,
     SENTENCE,
     STOP,
+    SHORT_HOLD_S,
     SourceLedger,
     Word,
     ends_sentence,
@@ -194,3 +195,65 @@ def test_hard_limit_wins_over_a_continuation():
     led.commit(ws(text + " далі"))
     unit = led.next_unit()
     assert len(unit.words) == 20 and unit.reason == SENTENCE
+
+
+# -- short endpoint pieces (live test 2026-11-01 §18) -------------------------
+
+
+def test_short_endpoint_piece_joins_the_next_unit_live_example():
+    """«використання принципів» + pause + «зеротраст передбачає ...» (live
+    units #28/#29): one unit, not a two-word fragment."""
+    led = SourceLedger()
+    led.commit(ws("використання принципів", 125.7, 0.8), eos=True, now=10.0)
+    assert led.next_unit(10.2) is None  # within SHORT_HOLD_S
+    led.partial = "зеротраст"
+    assert led.next_unit(11.5) is None  # whisper hears more speech
+    led.commit(ws("зеротраст передбачає що жоден користувач", 127.5), now=12.0)
+    assert led.next_unit(12.0) is None
+    led.endpoint(13.0)
+    unit = led.next_unit(13.0)
+    assert unit.text == (
+        "використання принципів зеротраст передбачає що жоден користувач"
+    )
+    assert unit.reason == ENDPOINT
+    assert led.short_merged == 1
+
+
+def test_short_endpoint_piece_merged_into_a_sentence_cut():
+    led = SourceLedger()
+    led.commit(ws("автентифікації авторизація"), eos=True, now=0.0)
+    assert led.next_unit(0.1) is None
+    led.commit(ws("багатофакторна перевірка особи. Далі", 2.0), now=0.5)
+    unit = led.next_unit(0.5)
+    assert unit.text == "автентифікації авторизація багатофакторна перевірка особи."
+    assert unit.reason == SENTENCE
+    assert led.short_merged == 1
+
+
+def test_short_endpoint_piece_is_cut_alone_when_the_speaker_stopped():
+    led = SourceLedger()
+    led.commit(ws("так звісно"), eos=True, now=0.0)
+    assert led.next_unit(SHORT_HOLD_S - 0.1) is None
+    unit = led.next_unit(SHORT_HOLD_S + 0.01)
+    assert (unit.text, unit.reason) == ("так звісно", ENDPOINT)
+    assert led.short_merged == 0
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "окремі департамент нерідко впроваджують",  # 4 words: a unit
+        "Добре.",  # a sentence: a unit
+    ],
+)
+def test_long_or_finished_endpoint_piece_is_cut_at_once(text):
+    led = SourceLedger()
+    led.commit(ws(text), eos=True, now=0.0)
+    led.partial = "далі"
+    assert led.next_unit(0.0).text == text
+
+
+def test_short_piece_without_a_clock_is_cut_at_once():
+    led = SourceLedger()
+    led.commit(ws("інформація про"), eos=True)
+    assert led.next_unit().text == "інформація про"
