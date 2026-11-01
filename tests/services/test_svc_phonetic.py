@@ -44,13 +44,33 @@ def test_settings_defaults_port_and_language():
     assert PhoneticSettings.from_env({}).backend == "wav2vec2"
 
 
+def test_settings_cuda_defaults_to_float16_and_switches_per_device():
+    cuda = PhoneticSettings.from_env({**FAKE, "RT_DEVICE": "cuda"})
+    assert (cuda.device, cuda.compute_type, cuda.torch_device) == (
+        "cuda",
+        "float16",
+        "cuda",
+    )
+    f32 = PhoneticSettings.from_env(
+        {**FAKE, "RT_DEVICE": "cuda", "RT_COMPUTE_TYPE": "float32"}
+    )
+    assert f32.compute_type == "float32"
+    both = PhoneticSettings.from_env({**FAKE, "RT_DEVICES": "cpu,cuda"})
+    assert (both.device, both.devices, both.compute_type) == (
+        "cpu",
+        ("cpu", "cuda"),
+        "float32",
+    )
+
+
 @pytest.mark.parametrize(
     "env,match",
     [
         ({"RT_MODEL": "whisper-small"}, "unknown phonetic model"),
-        ({"RT_DEVICE": "cuda"}, "cpu only"),
-        ({"RT_DEVICES": "cpu,cuda"}, "cpu only"),
-        ({"RT_COMPUTE_TYPE": "int8"}, "float32 only"),
+        ({"RT_DEVICE": "rocm"}, "cpu/cuda, not rocm"),
+        ({"RT_DEVICES": "cpu,rocm"}, "cpu/cuda, not rocm"),
+        ({"RT_COMPUTE_TYPE": "float16"}, "on cpu computes in float32"),
+        ({"RT_DEVICE": "cuda", "RT_COMPUTE_TYPE": "int8"}, "float16/float32"),
     ],
 )
 def test_settings_reject(env, match):
@@ -167,11 +187,20 @@ def test_models_list_with_language_and_no_cpu_heavy_warning(tmp_path, monkeypatc
     assert not model["cached"] and "warning" not in model
 
 
-def test_config_schema_has_no_device_switch():
+def test_config_schema_offers_the_nodes_devices():
     app, _ = make()
     with running(app) as client:
         schema = client.get("/config").json()["schema"]
-    assert set(schema) == {"backend", "log_level", "max_upload_mb", "model"}
+    assert set(schema) == {
+        "backend",
+        "compute_type",
+        "device",
+        "log_level",
+        "max_upload_mb",
+        "model",
+    }
+    assert schema["device"]["choices"] == ["cpu"]  # this node's RT_DEVICES
+    assert schema["device"]["reload"] and schema["compute_type"]["reload"]
     assert schema["model"]["reload"] is True
     assert schema["model"]["type"] == "model"
     assert schema["model"]["choices"] == [DEFAULT_PHONETIC_MODEL]
@@ -200,6 +229,39 @@ def test_phonetic_shares_the_model_lifecycle():
             assert time.monotonic() < deadline
             time.sleep(0.005)
         assert transcribe(client).json()["language"] == "uk"
+
+
+def test_device_switch_reloads_and_status_reports_it():
+    """cpu -> cuda via POST /config: the model is unloaded, then loaded on
+    the new device (fake backend; the real one moves torch to the GPU)."""
+    env = {**FAKE, "RT_DEVICES": "cpu,cuda"}
+    loaded = []
+
+    def factory():
+        loaded.append(app.state.config.current().device)
+        return FakePhoneticBackend("uk", DEFAULT_PHONETIC_MODEL)
+
+    app = create_app(
+        PhoneticSettings.from_env(env),
+        backend_factory=factory,
+        bootstrap_env=env,
+        state_path=None,
+    )
+    runtime = app.state.runtime
+    with running(app) as client:
+        assert transcribe(client).status_code == 200
+        assert client.get("/status").json()["model"]["device"] == "cpu"
+        r = client.post("/config", json={"version": 1, "values": {"device": "cuda"}})
+        assert r.status_code == 200 and r.json()["reloaded"] is True
+        deadline = time.monotonic() + 5
+        while runtime.state.value != "ready":
+            assert time.monotonic() < deadline
+            time.sleep(0.005)
+        status = client.get("/status").json()
+        assert status["model"]["device"] == "cuda"
+        values = client.get("/config").json()["values"]
+        assert (values["device"], values["compute_type"]) == ("cuda", "float16")
+    assert loaded == ["cpu", "cuda"]
 
 
 def test_failed_load_is_reported_in_status():

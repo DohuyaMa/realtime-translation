@@ -4,8 +4,10 @@
 no dictionary or LM): it writes what it hears letter by letter in the
 alphabet of one language (from the model registry); a request in another
 language is refused (409 ``model_language_mismatch``), the model is
-switched explicitly via ``POST /config``. CPU only, float32 (the model is
-small enough: ~0.3 s per 2 s of speech on 4 threads, RT_NUM_THREADS).
+switched explicitly via ``POST /config``. CPU (float32, RT_NUM_THREADS
+torch threads) or CUDA (float16 default, float32 allowed): 4-9 s units took
+0.5-1.4 s on 4 CPU threads next to Kokoro and missed the edge's per-unit
+budget live (2026-11-01), so a node with a GPU runs it there.
 """
 
 from __future__ import annotations
@@ -17,6 +19,10 @@ from typing import ClassVar, Dict, Mapping, Optional
 from ..common.env import SettingsError, env_int
 from ..common.model_registry import specs_for
 from ..common.settings import BaseSettings, FieldMeta, base_from_env
+
+PHONETIC_DEVICES = ("cpu", "cuda")
+# precision per device: CPU torch has no fast float16 convolutions
+COMPUTE_TYPES = {"cpu": ("float32",), "cuda": ("float16", "float32")}
 
 PHONETIC_BACKENDS = ("wav2vec2", "fake")
 DEFAULT_PHONETIC_MODEL = "uk-wav2vec2-stress"
@@ -51,9 +57,15 @@ class PhoneticSettings(BaseSettings):
     TUNABLE_FIELDS: ClassVar[frozenset[str]] = BaseSettings.TUNABLE_FIELDS | {
         "max_upload_mb"
     }
-    RELOAD_FIELDS: ClassVar[frozenset[str]] = frozenset({"backend", "model"})
+    RELOAD_FIELDS: ClassVar[frozenset[str]] = BaseSettings.RELOAD_FIELDS
     FIELD_META: ClassVar[Mapping[str, FieldMeta]] = {
         **BaseSettings.FIELD_META,
+        "device": FieldMeta("choice", "compute device", PHONETIC_DEVICES),
+        "compute_type": FieldMeta(
+            "choice",
+            "torch precision (cpu: float32; cuda: float16/float32)",
+            ("float16", "float32"),
+        ),
         "backend": FieldMeta("choice", "phonetic backend", PHONETIC_BACKENDS),
         "model": FieldMeta(
             "model",
@@ -79,15 +91,19 @@ class PhoneticSettings(BaseSettings):
             default_backend="wav2vec2",
             default_model=DEFAULT_PHONETIC_MODEL,
             compute_cpu="float32",
-            compute_gpu="float32",
+            compute_gpu="float16",
         )
-        if base["devices"] != ("cpu",):
+        bad = [d for d in base["devices"] if d not in PHONETIC_DEVICES]
+        if bad:
             raise SettingsError(
-                f"{keys['device']}/{keys['devices']}: rt-phonetic runs on cpu only"
+                f"{keys['device']}/{keys['devices']}: rt-phonetic runs on"
+                f" {'/'.join(PHONETIC_DEVICES)}, not {', '.join(bad)}"
             )
-        if base["compute_type"] != "float32":
+        allowed = COMPUTE_TYPES[base["device"]]
+        if base["compute_type"] not in allowed:
             raise SettingsError(
-                f"{keys['compute_type']}: rt-phonetic computes in float32 only"
+                f"{keys['compute_type']}={base['compute_type']}: rt-phonetic on"
+                f" {base['device']} computes in {'/'.join(allowed)}"
             )
         base["model"] = parse_model(keys["model"], base["model"])
         return cls(

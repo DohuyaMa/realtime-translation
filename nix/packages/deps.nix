@@ -12,7 +12,7 @@ let
   perService = {
     asr = with ps; [ faster-whisper ];
     tts = with ps; [ onnxruntime kokoro enCoreWebSm ];
-    # wav2vec2 CTC on CPU torch (cache.nixos.org substitutes it)
+    # wav2vec2 CTC on torch (cpu: cache.nixos.org; gpu: the variant's CUDA torch, cache.nixos-cuda.org)
     phonetic = with ps; [ torch transformers ];
   };
 in

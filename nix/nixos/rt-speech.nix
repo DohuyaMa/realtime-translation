@@ -85,7 +85,10 @@ let
       vad = mkOption { type = types.bool; default = true; description = "RT_ASR_VAD."; };
       chunkSeconds = mkOption { type = types.nullOr types.float; default = null; description = "RT_ASR_CHUNK_SECONDS; null = not emitted (service default)."; };
     };
-    phonetic = { }; # CPU only (torch wav2vec2 CTC); the common options cover it
+    # torch wav2vec2 CTC on cpu or cuda (no rocm bundle); computeType:
+    # cpu float32 only, cuda float16 or float32; null = per device (keep null
+    # when the device switches at runtime: a fixed float16 cannot start on cpu)
+    phonetic = { computeType = computeTypeOption; };
     tts = {
       voice = mkOption { type = types.str; default = "af_heart"; description = "RT_TTS_VOICE."; };
       speed = mkOption { type = types.float; default = 1.0; description = "RT_TTS_SPEED."; };
@@ -112,8 +115,8 @@ let
           message = "services.rtSpeech.${service}.device '${cfg.device}' is not in devices ${builtins.toJSON cfg.devices}";
         }
         {
-          assertion = service != "phonetic" || cfg.devices == [ "cpu" ];
-          message = "services.rtSpeech.phonetic runs on cpu only; devices = ${builtins.toJSON cfg.devices}";
+          assertion = service != "phonetic" || !(lib.elem "rocm" cfg.devices);
+          message = "services.rtSpeech.phonetic runs on cpu or cuda (no ROCm torch bundle); devices = ${builtins.toJSON cfg.devices}";
         }
         {
           assertion = !(lib.elem "cuda" cfg.devices && lib.elem "rocm" cfg.devices);

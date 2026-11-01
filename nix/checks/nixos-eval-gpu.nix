@@ -26,7 +26,8 @@ let
   ttsDefault = evalWith { tts = { enable = true; package = fake "rt-tts"; }; };
   ttsRocm = evalWith { tts = { enable = true; device = "rocm"; }; };
   phonetic = evalWith { phonetic = { enable = true; package = fake "rt-phonetic"; }; };
-  phoneticCuda = evalWith { phonetic = { enable = true; device = "cuda"; package = fake "rt-phonetic"; }; };
+  phoneticCuda = evalWith { phonetic = { enable = true; device = "cpu"; devices = [ "cpu" "cuda" ]; }; };
+  phoneticRocm = evalWith { phonetic = { enable = true; device = "rocm"; package = fake "rt-phonetic"; }; };
   storeToken = evalWith { asr = { enable = true; package = fake "rt-asr"; apiTokenFile = "${builtins.storeDir}/x-token"; }; };
   firewall = evalWith { asr = { enable = true; package = fake "rt-asr"; listenAddresses = [ "127.0.0.1" "100.64.0.10" ]; openFirewall = true; }; };
   closed = evalWith { asr = { enable = true; package = fake "rt-asr"; listenAddresses = [ "127.0.0.1" "100.64.0.10" ]; }; };
@@ -117,9 +118,23 @@ let
       };
       expected = { mdwe = false; privateDevices = true; port = true; user = "rt-phonetic"; stateDir = "rt-phonetic"; };
     };
-    testPhoneticGpuRejected = {
-      expr = failedAssertions phoneticCuda;
-      expected = [ ''services.rtSpeech.phonetic runs on cpu only; devices = ["cuda"]'' ];
+    testPhoneticCudaSwitchable = {
+      expr = {
+        inherit (sc phoneticCuda "rt-phonetic") DeviceAllow MemoryDenyWriteExecute PrivateDevices;
+        package = phoneticCuda.services.rtSpeech.phonetic.package.name;
+        env = builtins.filter (s: lib.hasInfix "RT_DEVICE" s || lib.hasInfix "RT_COMPUTE_TYPE" s) (sc phoneticCuda "rt-phonetic").Environment;
+      };
+      expected = {
+        DeviceAllow = [ "/dev/nvidiactl rw" "/dev/nvidia0 rw" "/dev/nvidia-modeset rw" "/dev/nvidia-uvm rw" "/dev/nvidia-uvm-tools rw" ];
+        MemoryDenyWriteExecute = false;
+        PrivateDevices = false;
+        package = (import ../packages { inherit pkgs lib; }).phonetic.gpu.name;
+        env = [ ''"RT_DEVICE=cpu"'' ''"RT_DEVICES=cpu,cuda"'' ];
+      };
+    };
+    testPhoneticRocmRejected = {
+      expr = failedAssertions phoneticRocm;
+      expected = [ ''services.rtSpeech.phonetic runs on cpu or cuda (no ROCm torch bundle); devices = ["rocm"]'' ];
     };
     testTtsRocmRejected = {
       expr = (builtins.tryEval (builtins.deepSeq (sc ttsRocm "rt-tts").ExecStart true)).success;
