@@ -7,7 +7,7 @@ timestamps, ``initial_prompt`` = committed text before the buffer, <= 200
 chars) and commits the longest common prefix of the last two hypotheses
 (normalized words; text and times from the newer one), never the newer
 hypothesis' last word (its punctuation is not settled). A VAD endpoint
-(``STREAMING_VAD``: >= 800 ms silence) commits the whole hypothesis up to the
+(``STREAMING_VAD``: >= 500 ms silence) commits the whole hypothesis up to the
 end of speech (``eos``) and sends ``endpoint``.
 
 Once the buffer is >= ``SENTENCE_TRIM_SECONDS`` long (shorter buffers cut

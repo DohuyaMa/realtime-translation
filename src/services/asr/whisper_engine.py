@@ -37,11 +37,9 @@ class VadProfile:
 
 
 # Streaming endpointing (asr/stream.py): speech >= threshold, silence below
-# neg_threshold; min_silence_duration_ms is the endpoint (owner decision 6,
-# 2026-10-31: 500 ms; changed 2026-11-01 to 800 ms - reading pauses of
-# 0.5-0.8 s cut sentences, live test §18), speech_pad_ms the pre-roll kept
-# before speech.
-STREAMING_VAD = VadProfile(0.5, 0.35, 250, 800, 200, 12.0)
+# neg_threshold; min_silence_duration_ms is the endpoint (owner decision
+# 2026-10-31: 500 ms), speech_pad_ms the pre-roll kept before speech.
+STREAMING_VAD = VadProfile(0.5, 0.35, 250, 500, 200, 12.0)
 # File transcription (vad_filter=True).
 FILE_VAD = VadProfile(0.5, None, 0, 500, 300, 30.0)
 

@@ -97,9 +97,7 @@ def test_endpoint_commits_everything_up_to_speech_end():
     s = session(b, t0=10.0)
     assert s.feed(speech(1.0)) is False
     assert finals(s.step()) == []  # first hypothesis: nothing agreed yet
-    # a reading pause of 0.6 s is not an endpoint (owner 2026-11-01: 0.8 s)
-    assert s.feed(silence(0.6)) is False
-    assert s.feed(silence(0.3)) is True
+    assert s.feed(silence(0.6)) is True
     out = s.step()
     (final,) = finals(out)
     assert final["text"] == "one two three" and final["eos"] is True

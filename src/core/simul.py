@@ -19,7 +19,7 @@ of, scanning word by word:
   endpoint);
 * >= ``CLAUSE_WORDS`` untranslated words ending at a clause mark (``,;:``);
 * ``HARD_WORDS`` untranslated words;
-* the end of the committed words when an endpoint (VAD silence >= 0.8 s,
+* the end of the committed words when an endpoint (VAD silence >= 0.5 s,
   rt-asr; ``final`` with ``eos``) closed them - except a short piece
   (<= ``SHORT_WORDS`` words, no sentence end: «використання принципів»,
   live 2026-11-01 §18): it joins the next unit when the next words are
