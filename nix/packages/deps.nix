@@ -12,8 +12,9 @@ let
   perService = {
     asr = with ps; [ faster-whisper ];
     tts = with ps; [ onnxruntime kokoro enCoreWebSm ];
-    # wav2vec2 CTC on torch (cpu: cache.nixos.org; gpu: the variant's CUDA torch, cache.nixos-cuda.org)
-    phonetic = with ps; [ torch transformers ];
+    # wav2vec2 CTC: cpu = onnxruntime int8, exported once from the pinned weights (torch + onnx);
+    # cuda = torch float16 (gpu variant: CUDA torch, cache.nixos-cuda.org)
+    phonetic = with ps; [ torch transformers onnx onnxruntime ];
   };
 in
 common ++ perService.${service}

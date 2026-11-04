@@ -1,6 +1,8 @@
-"""Real wav2vec2 CTC on the provisioned model; skipped unless the model is in
-RT_MODEL_DIR (`rt-models fetch uk-wav2vec2-stress`), torch/transformers are
-importable and espeak-ng can synthesize the test phrase."""
+"""Real wav2vec2 CTC on the provisioned model, cpu path (onnxruntime int8;
+the first run exports the ONNX copy into the model dir, ~1 min); skipped
+unless the model is in RT_MODEL_DIR (`rt-models fetch uk-wav2vec2-stress`),
+torch/transformers/onnx/onnxruntime are importable and espeak-ng can
+synthesize the test phrase."""
 
 import shutil
 import subprocess
@@ -15,10 +17,12 @@ from src.services.common.model_store import ModelSettings
 ALIAS = "uk-wav2vec2-stress"
 
 
-@pytest.mark.timeout(300)
+@pytest.mark.timeout(900)
 def test_ctc_transcribes_ukrainian_speech_and_silence_is_empty(tmp_path):
     pytest.importorskip("torch")
     pytest.importorskip("transformers")
+    pytest.importorskip("onnx")
+    pytest.importorskip("onnxruntime")
     if shutil.which("espeak-ng") is None:
         pytest.skip("espeak-ng not on PATH")
     if ModelSettings.from_env().store().verify(get_spec(ALIAS)):

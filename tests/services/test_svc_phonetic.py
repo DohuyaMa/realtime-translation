@@ -44,7 +44,7 @@ def test_settings_defaults_port_and_language():
     assert PhoneticSettings.from_env({}).backend == "wav2vec2"
 
 
-def test_settings_cuda_defaults_to_float16_and_switches_per_device():
+def test_settings_cpu_defaults_to_int8_cuda_to_float16():
     cuda = PhoneticSettings.from_env({**FAKE, "RT_DEVICE": "cuda"})
     assert (cuda.device, cuda.compute_type, cuda.torch_device) == (
         "cuda",
@@ -59,8 +59,10 @@ def test_settings_cuda_defaults_to_float16_and_switches_per_device():
     assert (both.device, both.devices, both.compute_type) == (
         "cpu",
         ("cpu", "cuda"),
-        "float32",
+        "int8",
     )
+    cpu32 = PhoneticSettings.from_env({**FAKE, "RT_COMPUTE_TYPE": "float32"})
+    assert cpu32.compute_type == "float32"
 
 
 @pytest.mark.parametrize(
@@ -69,7 +71,7 @@ def test_settings_cuda_defaults_to_float16_and_switches_per_device():
         ({"RT_MODEL": "whisper-small"}, "unknown phonetic model"),
         ({"RT_DEVICE": "rocm"}, "cpu/cuda, not rocm"),
         ({"RT_DEVICES": "cpu,rocm"}, "cpu/cuda, not rocm"),
-        ({"RT_COMPUTE_TYPE": "float16"}, "on cpu computes in float32"),
+        ({"RT_COMPUTE_TYPE": "float16"}, "on cpu computes in int8/float32"),
         ({"RT_DEVICE": "cuda", "RT_COMPUTE_TYPE": "int8"}, "float16/float32"),
     ],
 )
@@ -232,8 +234,9 @@ def test_phonetic_shares_the_model_lifecycle():
 
 
 def test_device_switch_reloads_and_status_reports_it():
-    """cpu -> cuda via POST /config: the model is unloaded, then loaded on
-    the new device (fake backend; the real one moves torch to the GPU)."""
+    """cpu -> cuda -> cpu via POST /config: the model is unloaded, then
+    loaded on the new device with that device's default precision (fake
+    backend; the real one runs onnxruntime int8 on cpu, torch on cuda)."""
     env = {**FAKE, "RT_DEVICES": "cpu,cuda"}
     loaded = []
 
@@ -261,7 +264,15 @@ def test_device_switch_reloads_and_status_reports_it():
         assert status["model"]["device"] == "cuda"
         values = client.get("/config").json()["values"]
         assert (values["device"], values["compute_type"]) == ("cuda", "float16")
-    assert loaded == ["cpu", "cuda"]
+        r = client.post("/config", json={"version": 2, "values": {"device": "cpu"}})
+        assert r.status_code == 200 and r.json()["reloaded"] is True
+        deadline = time.monotonic() + 5
+        while runtime.state.value != "ready":
+            assert time.monotonic() < deadline
+            time.sleep(0.005)
+        values = client.get("/config").json()["values"]
+        assert (values["device"], values["compute_type"]) == ("cpu", "int8")
+    assert loaded == ["cpu", "cuda", "cpu"]
 
 
 def test_failed_load_is_reported_in_status():

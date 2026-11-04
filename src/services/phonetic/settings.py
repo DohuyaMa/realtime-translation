@@ -4,10 +4,11 @@
 no dictionary or LM): it writes what it hears letter by letter in the
 alphabet of one language (from the model registry); a request in another
 language is refused (409 ``model_language_mismatch``), the model is
-switched explicitly via ``POST /config``. CPU (float32, RT_NUM_THREADS
-torch threads) or CUDA (float16 default, float32 allowed): 4-9 s units took
-0.5-1.4 s on 4 CPU threads next to Kokoro and missed the edge's per-unit
-budget live (2026-11-01), so a node with a GPU runs it there.
+switched explicitly via ``POST /config``. The device is switchable at
+runtime too (``RT_DEVICES``, RELOAD): cpu = onnxruntime, int8 default
+(float32 allowed), no VRAM; cuda = torch, float16 default (float32
+allowed). torch float32 on 4 CPU threads took 0.5-1.4 s per 4-9 s unit next
+to Kokoro (2026-11-01) - the reason for the int8 ONNX cpu path.
 """
 
 from __future__ import annotations
@@ -21,8 +22,9 @@ from ..common.model_registry import specs_for
 from ..common.settings import BaseSettings, FieldMeta, base_from_env
 
 PHONETIC_DEVICES = ("cpu", "cuda")
-# precision per device: CPU torch has no fast float16 convolutions
-COMPUTE_TYPES = {"cpu": ("float32",), "cuda": ("float16", "float32")}
+# precision per device: cpu = onnxruntime (int8 dynamic / float32 ONNX),
+# cuda = torch
+COMPUTE_TYPES = {"cpu": ("int8", "float32"), "cuda": ("float16", "float32")}
 
 PHONETIC_BACKENDS = ("wav2vec2", "fake")
 DEFAULT_PHONETIC_MODEL = "uk-wav2vec2-stress"
@@ -63,8 +65,9 @@ class PhoneticSettings(BaseSettings):
         "device": FieldMeta("choice", "compute device", PHONETIC_DEVICES),
         "compute_type": FieldMeta(
             "choice",
-            "torch precision (cpu: float32; cuda: float16/float32)",
-            ("float16", "float32"),
+            "precision (cpu, onnxruntime: int8/float32; cuda, torch:"
+            " float16/float32)",
+            ("int8", "float16", "float32"),
         ),
         "backend": FieldMeta("choice", "phonetic backend", PHONETIC_BACKENDS),
         "model": FieldMeta(
@@ -90,7 +93,7 @@ class PhoneticSettings(BaseSettings):
             backends=PHONETIC_BACKENDS,
             default_backend="wav2vec2",
             default_model=DEFAULT_PHONETIC_MODEL,
-            compute_cpu="float32",
+            compute_cpu="int8",
             compute_gpu="float16",
         )
         bad = [d for d in base["devices"] if d not in PHONETIC_DEVICES]

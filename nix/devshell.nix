@@ -12,7 +12,7 @@ pkgs.mkShell {
         fastapi uvicorn pydantic python-multipart httpx
         faster-whisper ctranslate2 huggingface-hub
         kokoro onnxruntime soundfile enCoreWebSm
-        torch transformers
+        torch transformers onnx  # rt-phonetic: torch (cuda) + onnxruntime int8 (cpu; export needs onnx)
         # tests / tooling
         pytest pytest-asyncio pytest-timeout black flake8 mypy
       ])))

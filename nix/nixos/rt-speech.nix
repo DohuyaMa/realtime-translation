@@ -85,9 +85,12 @@ let
       vad = mkOption { type = types.bool; default = true; description = "RT_ASR_VAD."; };
       chunkSeconds = mkOption { type = types.nullOr types.float; default = null; description = "RT_ASR_CHUNK_SECONDS; null = not emitted (service default)."; };
     };
-    # torch wav2vec2 CTC on cpu or cuda (no rocm bundle); computeType:
-    # cpu float32 only, cuda float16 or float32; null = per device (keep null
-    # when the device switches at runtime: a fixed float16 cannot start on cpu)
+    # wav2vec2 CTC on cpu (onnxruntime, no VRAM) or cuda (torch); no rocm
+    # bundle. computeType: cpu int8 (default) or float32, cuda float16
+    # (default) or float32; null = per device (keep null when the device
+    # switches at runtime: a fixed float16 cannot start on cpu, int8 not on
+    # cuda). The first cpu load exports the ONNX copy into the model dir
+    # (~1 min, ~3 GiB RAM, once per pinned revision).
     phonetic = { computeType = computeTypeOption; };
     tts = {
       voice = mkOption { type = types.str; default = "af_heart"; description = "RT_TTS_VOICE."; };
